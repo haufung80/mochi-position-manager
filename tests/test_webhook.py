@@ -184,13 +184,38 @@ def test_health_endpoint(strategies_yaml, stub_exchange, silent_notifier):
     assert r.status_code == 200 and r.json() == {"status": "ok"}
 
 
-def test_dashboard_renders_with_strategies(strategies_yaml, stub_exchange, silent_notifier):
+def test_dashboard_renders_with_strategies(strategies_yaml, stub_exchange,
+                                            silent_notifier, monkeypatch):
     """Regression: ensure the dashboard template renders without crashing
     when there ARE strategies. Catches schema drift (e.g. template references
     a field that's been removed from the dataclass)."""
+    # Stub the egress-IP lookup so tests don't hit the network
+    from app import network
+    monkeypatch.setattr(network, "get_outbound_ip", lambda force_refresh=False: "1.2.3.4")
+
     c = _client(strategies_yaml)
     r = c.get("/")
     assert r.status_code == 200
-    # active strategies from fixture should render their names
     assert "TEST_BTC" in r.text
     assert "TEST_MULTI" in r.text
+    # egress IP should render so the user can copy it for Bybit whitelist
+    assert "1.2.3.4" in r.text
+
+
+def test_egress_ip_endpoint(strategies_yaml, stub_exchange, silent_notifier, monkeypatch):
+    from app import network
+    monkeypatch.setattr(network, "get_outbound_ip", lambda force_refresh=False: "5.6.7.8")
+    c = _client(strategies_yaml)
+    r = c.get("/network/egress-ip")
+    assert r.status_code == 200
+    assert r.json() == {"egress_ip": "5.6.7.8"}
+
+
+def test_egress_ip_endpoint_handles_lookup_failure(strategies_yaml, stub_exchange,
+                                                    silent_notifier, monkeypatch):
+    from app import network
+    monkeypatch.setattr(network, "get_outbound_ip", lambda force_refresh=False: None)
+    c = _client(strategies_yaml)
+    r = c.get("/network/egress-ip")
+    assert r.status_code == 200
+    assert r.json() == {"egress_ip": None}

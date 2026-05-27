@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from .. import network
 from ..db import session_scope
 from ..models import Alert, Order, Position
 
@@ -100,8 +101,19 @@ def dashboard(request: Request):
                 "retrying": retrying,
                 "dead": dead,
                 "routes": routes,
+                "outbound_ip": network.get_outbound_ip(),
             },
         )
+
+
+@router.get("/network/egress-ip", response_class=JSONResponse)
+def egress_ip(refresh: bool = False):
+    """JSON endpoint for the current outbound IP. Useful for monitoring
+    scripts that need to detect when the IP shifts.
+
+    Pass ?refresh=true to bypass the 5-minute cache.
+    """
+    return {"egress_ip": network.get_outbound_ip(force_refresh=refresh)}
 
 
 @router.post("/admin/reload-strategies")
