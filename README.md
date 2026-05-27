@@ -132,6 +132,82 @@ The middleware accepts these `action` values:
 
 ---
 
+## Deploy to Fly.io
+
+Fly.io is the recommended cloud target — free tier covers this exact workload (1 shared-cpu-1x VM + 3GB persistent volume), Dockerfile-native, automatic HTTPS, and the persistent volume keeps SQLite intact across deploys.
+
+### One-time setup
+
+```bash
+# 1. Install flyctl
+brew install flyctl                                 # macOS
+# curl -L https://fly.io/install.sh | sh            # Linux/WSL
+
+# 2. Sign in (or sign up — payment card required even on free tier, but won't be charged within limits)
+fly auth login
+
+# 3. Provision the app (uses fly.toml in this repo)
+fly launch --no-deploy --copy-config --name mochi-position-manager --region sin
+
+# 4. Create the persistent volume (SQLite + strategies.yaml live here)
+fly volumes create data --size 1 --region sin
+
+# 5. Set secrets — these never appear in logs or fly.toml
+fly secrets set WEBHOOK_SECRET="$(openssl rand -hex 32)"
+fly secrets set BYBIT_API_KEY=xxx BYBIT_API_SECRET=xxx
+fly secrets set HYPERLIQUID_PRIVATE_KEY=0xabc... HYPERLIQUID_ACCOUNT_ADDRESS=0xdef...
+fly secrets set TELEGRAM_BOT_TOKEN=123:abc TELEGRAM_CHAT_ID=456789
+
+# 6. First deploy
+fly deploy
+
+# 7. Upload your strategies.yaml to the persistent volume
+fly ssh console -C "cp /app/strategies.yaml.example /app/data/strategies.yaml"
+fly ssh console -C "vi /app/data/strategies.yaml"   # edit in place
+fly apps restart                                    # router reloads on boot
+```
+
+Your app is now live at `https://mochi-position-manager.fly.dev` — point TradingView alerts at `https://mochi-position-manager.fly.dev/webhook/tradingview`.
+
+### Verifying the deploy
+
+```bash
+fly status                                       # machine health, IP, region
+fly logs                                         # tail logs
+curl https://mochi-position-manager.fly.dev/health
+curl https://mochi-position-manager.fly.dev/positions
+open https://mochi-position-manager.fly.dev/      # the dashboard
+```
+
+### Ongoing updates
+
+- **Code changes**: `git push` to `main` — the bundled GitHub Action (`.github/workflows/fly-deploy.yml`) runs `flyctl deploy` automatically. Set `FLY_API_TOKEN` in GitHub repo *Settings → Secrets and variables → Actions* (`fly tokens create deploy` to mint one).
+- **Manual deploy**: `fly deploy` from your machine.
+- **Strategy changes**: `fly ssh console -C "vi /app/data/strategies.yaml"`, then `fly apps restart`.
+- **Inspect the SQLite DB**: `fly ssh console`, then `apt install sqlite3 -y && sqlite3 /app/data/middleware.db`.
+- **Rollback**: `fly releases` to list, `fly deploy --image registry.fly.io/mochi-position-manager:deployment-XXXX` to pin.
+
+### Region choice
+
+`primary_region` defaults to `sin` (Singapore) in `fly.toml` because Bybit's matching engine is in Singapore — sub-10ms latency from your middleware → exchange. Other reasonable picks:
+
+| Region | Best for |
+|---|---|
+| `sin` | Bybit, Asia-resident users (default) |
+| `nrt` | Bybit (Tokyo failover), Japan |
+| `iad` | Hyperliquid (Arbitrum sequencer), US users |
+| `fra` | EU users |
+
+Edit `primary_region` in `fly.toml` and `fly deploy` to move.
+
+### Cost guard-rails
+
+- **Always-on**: `auto_stop_machines = "off"` in `fly.toml` — a stopped machine would return 502 to TradingView and silently drop alerts. Do not change unless you're OK missing signals.
+- **Free tier**: a single `shared-cpu-1x` 256MB VM + 3GB volume + outbound bandwidth fits in the free allowance for low-volume use (a few hundred alerts/day).
+- **Scale up**: edit `[[vm]] memory = "512mb"` if you start seeing OOM in `fly logs` — unlikely for this workload.
+
+---
+
 ## `strategies.yaml`
 
 ```yaml

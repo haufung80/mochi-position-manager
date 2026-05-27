@@ -13,7 +13,10 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY app ./app
-COPY strategies.yaml ./strategies.yaml
+# Ship the example so users can `cp /app/strategies.yaml.example /app/data/strategies.yaml`
+# during first-time setup. The real strategies.yaml lives on the persistent volume
+# (see fly.toml [env] STRATEGIES_FILE=/app/data/strategies.yaml).
+COPY strategies.yaml.example ./strategies.yaml.example
 
 RUN mkdir -p /app/data
 
