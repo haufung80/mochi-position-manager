@@ -1,6 +1,7 @@
 import pytest
 
-from app.routing import StrategyRouter, symbol_for, SUPPORTED_EXCHANGES
+from app.routing import StrategyRouter, SUPPORTED_BASE_ASSETS
+from app.exchanges.symbols import symbol_for, SUPPORTED_EXCHANGES
 
 
 def test_loads_strategy_with_base_asset(strategies_yaml):
@@ -8,8 +9,6 @@ def test_loads_strategy_with_base_asset(strategies_yaml):
     btc = r.get("TEST_BTC")
     assert btc is not None
     assert btc.base_asset == "BTC"
-    assert btc.quantity_usd == 100.0
-    # one venue per exchange in YAML
     venues = {v.exchange: v for v in btc.venues}
     assert venues["bybit"].enabled is True
     assert venues["bybit"].symbol == "BTCUSDT"
@@ -19,13 +18,12 @@ def test_loads_strategy_with_base_asset(strategies_yaml):
 
 def test_enabled_venues_filter(strategies_yaml):
     r = StrategyRouter(strategies_yaml)
-    btc = r.get("TEST_BTC")
-    enabled = btc.enabled_venues()
+    enabled = r.get("TEST_BTC").enabled_venues()
     assert len(enabled) == 1
     assert enabled[0].exchange == "bybit"
 
 
-def test_strategy_enabled_property_when_any_venue_enabled(strategies_yaml):
+def test_enabled_property(strategies_yaml):
     r = StrategyRouter(strategies_yaml)
     assert r.get("TEST_BTC").enabled is True
     assert r.get("TEST_DISABLED").enabled is False
@@ -33,12 +31,11 @@ def test_strategy_enabled_property_when_any_venue_enabled(strategies_yaml):
 
 def test_multi_venue_strategy(strategies_yaml):
     r = StrategyRouter(strategies_yaml)
-    multi = r.get("TEST_MULTI")
-    assert multi is not None
-    enabled = multi.enabled_venues()
-    assert len(enabled) == 2
-    ex = {v.exchange: v.symbol for v in enabled}
-    assert ex == {"bybit": "ETHUSDT", "hyperliquid": "ETH"}
+    enabled = r.get("TEST_MULTI").enabled_venues()
+    assert {(v.exchange, v.symbol) for v in enabled} == {
+        ("bybit", "ETHUSDT"),
+        ("hyperliquid", "ETH"),
+    }
 
 
 def test_unknown_returns_none(strategies_yaml):
@@ -46,11 +43,14 @@ def test_unknown_returns_none(strategies_yaml):
     assert r.get("UNKNOWN") is None
 
 
+# ---------- symbol mapping ----------
+
 def test_symbol_for_known_exchanges():
     assert symbol_for("hyperliquid", "BTC") == "BTC"
     assert symbol_for("bybit", "BTC") == "BTCUSDT"
     assert symbol_for("hyperliquid", "ETH") == "ETH"
     assert symbol_for("bybit", "SOL") == "SOLUSDT"
+    assert symbol_for("bybit", "BNB") == "BNBUSDT"
 
 
 def test_symbol_for_unknown_exchange_raises():
@@ -58,29 +58,54 @@ def test_symbol_for_unknown_exchange_raises():
         symbol_for("binance", "BTC")
 
 
-def test_supported_exchanges_constant():
+def test_symbol_for_unsupported_base_asset_raises():
+    with pytest.raises(ValueError, match="unsupported base_asset"):
+        symbol_for("hyperliquid", "DOGE")
+
+
+def test_supported_constants():
+    assert "BTC" in SUPPORTED_BASE_ASSETS
+    assert "ETH" in SUPPORTED_BASE_ASSETS
+    assert "SOL" in SUPPORTED_BASE_ASSETS
+    assert "BNB" in SUPPORTED_BASE_ASSETS
     assert "hyperliquid" in SUPPORTED_EXCHANGES
     assert "bybit" in SUPPORTED_EXCHANGES
 
 
+# ---------- resilience ----------
+
 def test_unsupported_venue_is_skipped_not_fatal(tmp_path):
-    """A typo in a venue name should not crash — it should be logged
-    and the rest of the strategy should still load."""
     p = tmp_path / "bad.yaml"
     p.write_text(
         "strategies:\n"
         "  X:\n"
         "    base_asset: BTC\n"
-        "    quantity_usd: 20\n"
         "    venues:\n"
         "      hyperliquid: true\n"
-        "      ftx: true\n"  # unknown exchange
+        "      ftx: true\n"
     )
     r = StrategyRouter(p)
     s = r.get("X")
     assert s is not None
-    venues = {v.exchange for v in s.venues}
-    assert venues == {"hyperliquid"}  # ftx silently dropped
+    assert {v.exchange for v in s.venues} == {"hyperliquid"}
+
+
+def test_unsupported_base_asset_skips_entry(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(
+        "strategies:\n"
+        "  GOOD:\n"
+        "    base_asset: BTC\n"
+        "    venues:\n"
+        "      hyperliquid: true\n"
+        "  BAD:\n"
+        "    base_asset: DOGE\n"
+        "    venues:\n"
+        "      hyperliquid: true\n"
+    )
+    r = StrategyRouter(p)
+    assert r.get("GOOD") is not None
+    assert r.get("BAD") is None
 
 
 def test_router_resilient_to_missing_file(tmp_path):
@@ -102,43 +127,32 @@ def test_router_skips_bad_entries_loads_good_ones(tmp_path):
 strategies:
   GOOD:
     base_asset: BTC
-    quantity_usd: 20
     venues:
       hyperliquid: true
   MISSING_BASE_ASSET:
-    quantity_usd: 20
     venues:
       hyperliquid: true
-  ZERO_QTY:
+  EMPTY_VENUES:
     base_asset: ETH
-    quantity_usd: 0
-    venues:
-      hyperliquid: true
+    venues: {}
 """)
     r = StrategyRouter(f)
     routes = {x.strategy_id for x in r.all()}
     assert "GOOD" in routes
     assert "MISSING_BASE_ASSET" not in routes
-    assert "ZERO_QTY" not in routes
+    assert "EMPTY_VENUES" not in routes
 
 
 def test_reload_picks_up_changes(strategies_yaml):
     r = StrategyRouter(strategies_yaml)
-    assert r.get("TEST_BTC").quantity_usd == 100.0
+    assert r.get("TEST_BTC").base_asset == "BTC"
     strategies_yaml.write_text(
         "strategies:\n"
         "  TEST_BTC:\n"
-        "    base_asset: BTC\n"
-        "    quantity_usd: 500\n"
+        "    base_asset: SOL\n"
         "    venues:\n"
         "      bybit: true\n"
     )
     r.reload()
-    assert r.get("TEST_BTC").quantity_usd == 500.0
-
-
-def test_venue_leverage_is_hardcoded_to_one(strategies_yaml):
-    r = StrategyRouter(strategies_yaml)
-    btc = r.get("TEST_BTC")
-    for v in btc.venues:
-        assert v.leverage == 1.0
+    assert r.get("TEST_BTC").base_asset == "SOL"
+    assert r.get("TEST_BTC").venues[0].symbol == "SOLUSDT"

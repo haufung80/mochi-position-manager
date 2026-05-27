@@ -1,64 +1,38 @@
+"""In-memory strategy router: parses YAML into immutable route objects.
+
+The middleware's hot path (`webhook` -> `router.get(strategy_id)`) reads
+from this in-memory cache. Disk I/O happens only on `reload()`, which the
+admin endpoints trigger after every write.
+"""
 from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-import yaml
+
+from .exchanges.symbols import (
+    SUPPORTED_BASE_ASSETS,  # noqa: F401  re-exported for callers
+    SUPPORTED_EXCHANGES,
+    symbol_for,
+)
+from . import strategy_store
 
 log = logging.getLogger(__name__)
-
-# Supported exchanges with their canonical USD-denominated perp symbol format.
-# Keyed by exchange name; value is the quote suffix appended to the base asset.
-EXCHANGE_QUOTE_SUFFIX: dict[str, str] = {
-    "hyperliquid": "",       # HL: bare base ticker  (BTC, ETH, SOL)
-    "bybit": "USDT",         # Bybit linear perp     (BTCUSDT, ETHUSDT)
-}
-SUPPORTED_EXCHANGES = tuple(EXCHANGE_QUOTE_SUFFIX.keys())
-
-
-def symbol_for(exchange: str, base_asset: str) -> str:
-    """Return the exchange-native perp symbol for a base asset.
-
-    Examples:
-      symbol_for("hyperliquid", "BTC") -> "BTC"
-      symbol_for("bybit",       "BTC") -> "BTCUSDT"
-    """
-    if exchange not in EXCHANGE_QUOTE_SUFFIX:
-        raise ValueError(f"unsupported exchange: {exchange}")
-    return f"{base_asset}{EXCHANGE_QUOTE_SUFFIX[exchange]}"
 
 
 @dataclass(frozen=True)
 class VenueRoute:
-    """Per-venue resolved route. One of these per (strategy × enabled exchange)."""
+    """One (strategy × exchange) resolved route. `symbol` is exchange-native."""
     exchange: str
-    symbol: str               # exchange-native, derived from base_asset
+    symbol: str
     enabled: bool
-    quantity_usd: float       # inherited from parent strategy
-
-    @property
-    def leverage(self) -> float:
-        """Hardcoded to 1.0 — the middleware does not configure leverage;
-        the exchange's default margin mode applies."""
-        return 1.0
 
 
 @dataclass(frozen=True)
 class StrategyRoute:
-    """One TradingView alert → one StrategyRoute → fans out to N venues.
-
-    YAML schema:
-
-        strategies:
-          MR_VOTING_BTC_6H:
-            base_asset: BTC
-            quantity_usd: 20
-            venues:
-              hyperliquid: true
-              bybit: false
-    """
+    """One strategy fans out across N venues. Per-signal quantity is supplied
+    by the TradingView alert payload, NOT stored here."""
     strategy_id: str
     base_asset: str
-    quantity_usd: float
     venues: tuple[VenueRoute, ...]
 
     def enabled_venues(self) -> tuple[VenueRoute, ...]:
@@ -66,22 +40,26 @@ class StrategyRoute:
 
     @property
     def enabled(self) -> bool:
-        """A strategy is considered enabled if any of its venues is enabled."""
         return any(v.enabled for v in self.venues)
 
 
+def _coerce_venue_enabled(value: object) -> bool:
+    """Accept either a plain bool or `{enabled: bool}` shape for forward compat."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        return bool(value.get("enabled", True))
+    return False
+
+
 def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
-    """Parse a single strategy entry from YAML. Raises ValueError on bad input."""
+    """Parse one strategy entry. Raises ValueError on any bad input."""
     if not isinstance(cfg, dict):
         raise ValueError(f"entry must be a dict, got {type(cfg).__name__}")
 
     base = str(cfg["base_asset"]).strip().upper()
-    if not base:
-        raise ValueError("base_asset is required")
-
-    qty = float(cfg["quantity_usd"])
-    if qty <= 0:
-        raise ValueError(f"quantity_usd must be > 0 (got {qty})")
+    if base not in SUPPORTED_BASE_ASSETS:
+        raise ValueError(f"base_asset '{base}' is not in {SUPPORTED_BASE_ASSETS}")
 
     venues_cfg = cfg.get("venues") or {}
     if not isinstance(venues_cfg, dict):
@@ -93,35 +71,20 @@ def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
         if ex not in SUPPORTED_EXCHANGES:
             log.warning("strategy %s: skipping unknown exchange '%s'", sid, ex)
             continue
-        # Accept either `bool` or `{enabled: bool}` for forward compat
-        if isinstance(raw, bool):
-            enabled = raw
-        elif isinstance(raw, dict):
-            enabled = bool(raw.get("enabled", True))
-        else:
-            log.warning("strategy %s: venue %s: bad value %r — treating as disabled",
-                        sid, ex, raw)
-            enabled = False
         venues.append(VenueRoute(
             exchange=ex,
             symbol=symbol_for(ex, base),
-            enabled=enabled,
-            quantity_usd=qty,
+            enabled=_coerce_venue_enabled(raw),
         ))
 
     if not venues:
         raise ValueError("at least one supported venue must be declared")
 
-    return StrategyRoute(
-        strategy_id=sid,
-        base_asset=base,
-        quantity_usd=qty,
-        venues=tuple(venues),
-    )
+    return StrategyRoute(strategy_id=sid, base_asset=base, venues=tuple(venues))
 
 
 class StrategyRouter:
-    """Loads strategies from a YAML file. Resilient to bad input — individual
+    """Loads strategies from disk and serves lookups. Resilient — individual
     bad entries are logged and skipped, never fatal at startup."""
 
     def __init__(self, path: str | Path):
@@ -134,29 +97,9 @@ class StrategyRouter:
         return self._path
 
     def reload(self) -> None:
-        self._routes = {}
-        if not self._path.exists():
-            log.warning("strategies file not found: %s — router empty", self._path)
-            return
-        try:
-            with self._path.open("r") as f:
-                data = yaml.safe_load(f) or {}
-        except yaml.YAMLError as e:
-            log.error("strategies file is invalid YAML: %s — router empty: %s",
-                      self._path, e)
-            return
-
-        raw = data.get("strategies")
-        if raw is None:
-            log.warning("strategies file has no 'strategies:' key — router empty")
-            return
-        if not isinstance(raw, dict):
-            log.error("strategies must be a dict keyed by strategy_id (got %s) — router empty",
-                      type(raw).__name__)
-            return
-
+        data = strategy_store.load(self._path)
         loaded: dict[str, StrategyRoute] = {}
-        for sid, cfg in raw.items():
+        for sid, cfg in data.get("strategies", {}).items():
             try:
                 loaded[sid] = _build_strategy(sid, cfg)
             except (KeyError, ValueError, TypeError) as e:

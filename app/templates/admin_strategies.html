@@ -19,14 +19,20 @@
              vertical-align: middle; }
     th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
     .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
     label { display: block; color: #aaa; font-size: 11px; text-transform: uppercase;
             letter-spacing: 0.03em; margin-bottom: 4px; }
-    input[type=text], input[type=number], select {
+    input[type=text], input[type=password], select {
       width: 100%; padding: 8px 10px; background: #0f1115;
       border: 1px solid #2a2e38; border-radius: 4px; color: #e6e6e6;
       box-sizing: border-box; font-size: 14px; font-family: inherit;
     }
+    select { appearance: none; background-image:
+      linear-gradient(45deg, transparent 50%, #888 50%),
+      linear-gradient(135deg, #888 50%, transparent 50%);
+      background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
+      background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+      padding-right: 32px; }
     input:focus, select:focus { outline: 1px solid #60a5fa; border-color: #60a5fa; }
     .venues-block { background: #161922; padding: 10px 12px; border-radius: 6px;
                     border: 1px solid #2a2e38; }
@@ -44,32 +50,31 @@
     button:hover { opacity: 0.9; }
     button.danger { background: #7f1d1d; padding: 6px 10px; font-size: 11px;
                     font-weight: 500; }
-    button.toggle { background: #374151; padding: 4px 8px; font-size: 11px;
-                    font-weight: 500; }
-    button.toggle.on { background: #14532d; color: #4ade80; }
     .delete-form { display: flex; gap: 6px; align-items: center; }
     .delete-form input { width: 110px; padding: 5px 8px; font-size: 12px; }
     .toggle-form { display: inline-flex; gap: 4px; align-items: center; }
     .toggle-form input { width: 90px; padding: 4px 6px; font-size: 11px;
                          background: #0f1115; border: 1px solid #2a2e38;
                          border-radius: 3px; color: #e6e6e6; }
-    .ok { color: #4ade80; }
     .muted { color: #666; }
     code { font-family: "SF Mono", Menlo, monospace; font-size: 12px;
            background: #0f1115; padding: 2px 6px; border-radius: 3px; }
     .venue-pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
-                  font-size: 11px; font-weight: 600; margin-right: 4px; }
+                  font-size: 11px; font-weight: 600; margin-right: 4px;
+                  background: #2a2e38; color: #666; border: none; cursor: pointer; }
     .venue-pill.on { background: #14532d; color: #4ade80; }
-    .venue-pill.off { background: #2a2e38; color: #666; }
   </style>
 </head>
 <body>
   <a href="/" class="back">← back to dashboard</a>
   <h1>Strategy Configuration</h1>
   <div class="sub">
-    Each strategy_id maps to ONE TradingView alert that fans out to multiple exchanges.
-    The middleware translates <code>base_asset</code> to each exchange's native symbol
-    (HL: <code>BTC</code>, Bybit: <code>BTCUSDT</code>) — you don't configure the symbol directly.
+    Each strategy maps to ONE TradingView alert that fans out to multiple exchanges.
+    The middleware resolves <code>base_asset</code> to each exchange's native symbol
+    (HL: <code>BTC</code>, Bybit: <code>BTCUSDT</code>) automatically.
+    <strong>Position size per signal comes from the TradingView alert payload</strong>
+    (<code>"quantity_usd"</code>), letting your pine-script sizing logic drive it.
+    <br>
     File: <code>{{ strategies_file }}</code>. Every write requires the
     <span style="color:#facc15;">webhook secret</span>.
   </div>
@@ -85,13 +90,12 @@
         </div>
         <div>
           <label>Base asset</label>
-          <input type="text" name="base_asset" required pattern="[A-Za-z0-9]+"
-                 placeholder="BTC" style="text-transform: uppercase;">
-        </div>
-        <div>
-          <label>Quantity per signal (USD)</label>
-          <input type="number" name="quantity_usd" step="0.01" min="0.01"
-                 required placeholder="20">
+          <select name="base_asset" required>
+            <option value="" disabled selected>— select asset —</option>
+            {% for asset in supported_base_assets %}
+              <option value="{{ asset }}">{{ asset }}</option>
+            {% endfor %}
+          </select>
         </div>
       </div>
       <div style="margin-top: 14px;">
@@ -105,7 +109,7 @@
               {{ ex }}
             </label>
             <span class="sym-hint">
-              symbol will be: {% if ex == "bybit" %}<base_asset>USDT{% else %}<base_asset>{% endif %}
+              symbol: <code>&lt;base_asset&gt;{% if ex == "bybit" %}USDT{% endif %}</code>
             </span>
           </div>
           {% endfor %}
@@ -119,7 +123,8 @@
       </div>
       <button type="submit" style="margin-top: 14px;">Save strategy</button>
       <span class="muted" style="margin-left: 12px; font-size: 12px;">
-        Existing strategy_id will be overwritten. Leverage is fixed at 1× and not configured here.
+        Existing strategy_id will be overwritten. Position size per signal is
+        supplied by the TradingView alert, not configured here.
       </span>
     </form>
   </div>
@@ -131,8 +136,7 @@
       <thead>
         <tr>
           <th>Strategy ID</th>
-          <th>Base</th>
-          <th>$/signal</th>
+          <th>Base asset</th>
           <th>Venues (click pill to toggle)</th>
           <th>Delete</th>
         </tr>
@@ -142,14 +146,13 @@
         <tr>
           <td class="mono">{{ r.strategy_id }}</td>
           <td class="mono">{{ r.base_asset }}</td>
-          <td class="mono">${{ "%.2f"|format(r.quantity_usd) }}</td>
           <td>
             {% for v in r.venues %}
               <form method="POST"
                     action="/admin/strategies/toggle/{{ r.strategy_id }}/{{ v.exchange }}"
                     class="toggle-form"
                     onsubmit="return confirm('Toggle {{ v.exchange }} for {{ r.strategy_id }}?');">
-                <button class="venue-pill {{ 'on' if v.enabled else 'off' }}" type="submit"
+                <button class="venue-pill {{ 'on' if v.enabled else '' }}" type="submit"
                         title="symbol: {{ v.symbol }} · click to {{ 'disable' if v.enabled else 'enable' }}">
                   {{ v.exchange }}{% if v.enabled %} ●{% else %} ○{% endif %}
                 </button>
@@ -176,18 +179,22 @@
     {% endif %}
   </div>
 
-  <h2 class="muted">Notes</h2>
+  <h2 class="muted">TradingView alert template</h2>
   <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
-    • <strong>One TradingView alert per strategy.</strong> The alert sends a single
-      <code>strategy_id</code>; the middleware fans out to every enabled venue.<br>
-    • <strong>Symbol is computed</strong>, not configured. Add new exchanges by
-      extending <code>EXCHANGE_QUOTE_SUFFIX</code> in <code>app/routing.py</code>.<br>
-    • Per-venue toggles persist instantly and reload the in-memory router.<br>
-    • A strategy with all venues disabled is preserved in the YAML but no orders fire —
-      useful for pausing without losing the row.<br>
-    • Rotate the secret with
-      <code>flyctl secrets set WEBHOOK_SECRET=$(openssl rand -hex 32)</code>
-      then update TradingView's alert body to match.
+    Paste this into the alert's <em>Message</em> field, replacing the secret:
+    <pre style="background:#0f1115; padding:10px; border-radius:4px; overflow:auto; font-size:12px;">
+{
+  "secret": "&lt;paste WEBHOOK_SECRET here&gt;",
+  "strategy_id": "MR_VOTING_BTC_6H",
+  "action": "{{ '{{strategy.order.action}}' }}",
+  "quantity_usd": {{ '{{strategy.order.value}}' }},
+  "alert_id": "{{ '{{strategy.order.id}}-{{timenow}}' }}"
+}</pre>
+    <code>{{ '{{strategy.order.value}}' }}</code> is the dollar notional of the order, computed by
+    your pine script.<br>
+    <code>{{ '{{strategy.order.action}}' }}</code> auto-fills as <code>buy</code> / <code>sell</code>.<br>
+    Per-signal sizing is fully driven by TradingView — change your strategy's
+    sizing logic and the middleware honours it without any config change here.
   </div>
 </body>
 </html>

@@ -3,7 +3,10 @@ from app.schemas import TradingViewAlert
 
 
 def _alert(**kw):
-    base = {"secret": "x", "strategy_id": "S1", "action": "buy"}
+    # buy/sell require quantity_usd > 0 — supply a default for tests
+    # that don't care about it.
+    base = {"secret": "x", "strategy_id": "S1", "action": "buy",
+            "quantity_usd": 100.0}
     base.update(kw)
     return TradingViewAlert(**base)
 

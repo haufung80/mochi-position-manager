@@ -3,45 +3,41 @@
 # Key = strategy_id sent by TradingView in the alert payload.
 # ONE TradingView alert → ONE strategy here → fans out to N enabled exchanges.
 #
-# `base_asset` is the canonical ticker (e.g. BTC, ETH, SOL). The middleware
-# translates it to each exchange's native symbol:
-#   - Hyperliquid:        BTC,    ETH,    SOL       (bare base ticker)
-#   - Bybit linear perp:  BTCUSDT, ETHUSDT, SOLUSDT (base + USDT)
+# `base_asset` is the canonical ticker. Supported: BTC, ETH, SOL, BNB.
+# The middleware maps it to each exchange's native symbol automatically:
+#   - Hyperliquid:        BTC,    ETH,    SOL,    BNB     (bare ticker)
+#   - Bybit linear perp:  BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT
 #
-# `quantity_usd` is the notional position size per signal, used on EVERY
-# enabled venue. Set to a conservative value for your first deploys.
+# `venues` maps exchange name → enabled (bool). `false` keeps the row
+# configured but skips orders — useful for pausing one venue while keeping
+# the other running.
 #
-# `venues` maps exchange name → enabled (bool). Listing an exchange with
-# `false` keeps it configured but skips orders — useful for pausing a
-# specific venue (e.g. during HL maintenance) without losing the row.
-# Leverage is intentionally not configured — the middleware passes 1x to
-# every adapter, letting the exchange's account-level margin mode apply.
+# Per-signal position size is NOT configured here. It comes from the
+# TradingView alert payload's `quantity_usd` field, supplied by your
+# pine-script sizing logic. Tweak your strategy's sizing → reflects
+# immediately, no middleware redeploy.
 
 strategies:
   MR_VOTING_BTC_6H:
     base_asset: BTC
-    quantity_usd: 20
     venues:
       hyperliquid: true
       bybit: false
 
   DON_CHANNEL_ETH_1H:
     base_asset: ETH
-    quantity_usd: 15
     venues:
       hyperliquid: true
       bybit: true
 
   VWAP_ATR_BTC_4H:
     base_asset: BTC
-    quantity_usd: 30
     venues:
       hyperliquid: true
       bybit: true
 
   SMA_CROSS_SOL_1H:
     base_asset: SOL
-    quantity_usd: 10
     venues:
       hyperliquid: false
       bybit: false
