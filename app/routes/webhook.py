@@ -17,8 +17,7 @@ router = APIRouter()
 
 
 async def _parse_body(request: Request) -> dict:
-    """TradingView sometimes posts JSON with content-type text/plain.
-    Tolerate both."""
+    """TradingView sometimes posts JSON with content-type text/plain. Tolerate both."""
     ctype = request.headers.get("content-type", "")
     if "application/json" in ctype:
         return await request.json()
@@ -33,20 +32,17 @@ async def _parse_body(request: Request) -> dict:
 async def tradingview_webhook(request: Request, settings: Settings = Depends(get_settings)):
     body = await _parse_body(request)
 
-    # Validate payload shape
     try:
         alert = TradingViewAlert(**body)
     except Exception as e:
         log.warning("Rejected payload (schema): %s :: body=%s", e, body)
         raise HTTPException(status_code=422, detail=f"schema: {e}") from e
 
-    # Auth
     if alert.secret != settings.webhook_secret:
         log.warning("Rejected payload: bad secret (ip=%s strat=%s)",
                     request.client.host if request.client else "?", alert.strategy_id)
         raise HTTPException(status_code=401, detail="bad secret")
 
-    # Routing
     router_state = request.app.state.strategy_router
     route = router_state.get(alert.strategy_id)
 
@@ -54,7 +50,6 @@ async def tradingview_webhook(request: Request, settings: Settings = Depends(get
     notifier = get_notifier()
     source_ip = request.client.host if request.client else ""
 
-    # Persist alert (dedup gate)
     try:
         with session_scope() as db:
             row = Alert(
@@ -65,26 +60,43 @@ async def tradingview_webhook(request: Request, settings: Settings = Depends(get
                 source_ip=source_ip,
             )
             db.add(row)
-            db.flush()  # raises IntegrityError on duplicate
+            db.flush()
             alert_id = row.id
 
-            # Skip-paths after persisting the alert log:
             if route is None:
                 notifier.unknown_strategy(alert.strategy_id)
                 return {"status": "skipped", "reason": "unknown_strategy",
                         "alert_id": alert_id, "idempotency_key": key}
-            if not route.enabled:
-                notifier.disabled_strategy(alert.strategy_id)
-                return {"status": "skipped", "reason": "disabled_strategy",
-                        "alert_id": alert_id, "idempotency_key": key}
 
-            order = execute_order(db, row, route)
+            enabled = route.enabled_venues()
+            if not enabled:
+                notifier.disabled_strategy(alert.strategy_id)
+                return {"status": "skipped", "reason": "no_enabled_venues",
+                        "alert_id": alert_id, "idempotency_key": key,
+                        "strategy_id": alert.strategy_id}
+
+            # Fan out: one Order per enabled venue.
+            results = []
+            for venue in enabled:
+                order = execute_order(db, row, venue)
+                results.append({
+                    "exchange": venue.exchange,
+                    "symbol": venue.symbol,
+                    "order_id": order.id,
+                    "status": order.status,
+                    "attempts": order.attempts,
+                })
+
+            # Overall webhook status: 'accepted' if any venue order is non-failed,
+            # 'all_failed' if every venue went straight to retrying/dead.
+            statuses = {r["status"] for r in results}
+            overall = "accepted" if (statuses & {"success", "retrying"}) else "all_failed"
             return {
-                "status": "accepted",
+                "status": overall,
                 "alert_id": alert_id,
-                "order_id": order.id,
-                "order_status": order.status,
                 "idempotency_key": key,
+                "strategy_id": alert.strategy_id,
+                "orders": results,
             }
 
     except IntegrityError:

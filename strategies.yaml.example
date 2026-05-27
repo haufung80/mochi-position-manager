@@ -1,36 +1,47 @@
 # Per-strategy routing config.
+#
 # Key = strategy_id sent by TradingView in the alert payload.
-# `symbol` uses each exchange's native naming convention:
-#   - Bybit linear perp:  BTCUSDT, ETHUSDT, SOLUSDT, ...
-#   - Hyperliquid perp:   BTC, ETH, SOL, ...
-# `quantity_usd` is the notional position size for each entry signal.
-# `leverage` is applied on the exchange before the order is placed.
+# ONE TradingView alert → ONE strategy here → fans out to N enabled exchanges.
+#
+# `base_asset` is the canonical ticker (e.g. BTC, ETH, SOL). The middleware
+# translates it to each exchange's native symbol:
+#   - Hyperliquid:        BTC,    ETH,    SOL       (bare base ticker)
+#   - Bybit linear perp:  BTCUSDT, ETHUSDT, SOLUSDT (base + USDT)
+#
+# `quantity_usd` is the notional position size per signal, used on EVERY
+# enabled venue. Set to a conservative value for your first deploys.
+#
+# `venues` maps exchange name → enabled (bool). Listing an exchange with
+# `false` keeps it configured but skips orders — useful for pausing a
+# specific venue (e.g. during HL maintenance) without losing the row.
+# Leverage is intentionally not configured — the middleware passes 1x to
+# every adapter, letting the exchange's account-level margin mode apply.
 
 strategies:
   MR_VOTING_BTC_6H:
-    exchange: bybit
-    symbol: BTCUSDT
-    quantity_usd: 500
-    leverage: 3
-    enabled: true
+    base_asset: BTC
+    quantity_usd: 20
+    venues:
+      hyperliquid: true
+      bybit: false
 
   DON_CHANNEL_ETH_1H:
-    exchange: bybit
-    symbol: ETHUSDT
-    quantity_usd: 300
-    leverage: 3
-    enabled: true
+    base_asset: ETH
+    quantity_usd: 15
+    venues:
+      hyperliquid: true
+      bybit: true
 
   VWAP_ATR_BTC_4H:
-    exchange: hyperliquid
-    symbol: BTC
-    quantity_usd: 500
-    leverage: 5
-    enabled: true
+    base_asset: BTC
+    quantity_usd: 30
+    venues:
+      hyperliquid: true
+      bybit: true
 
   SMA_CROSS_SOL_1H:
-    exchange: hyperliquid
-    symbol: SOL
-    quantity_usd: 200
-    leverage: 5
-    enabled: false
+    base_asset: SOL
+    quantity_usd: 10
+    venues:
+      hyperliquid: false
+      bybit: false

@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..config import get_settings
+from ..routing import SUPPORTED_EXCHANGES
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -31,7 +32,6 @@ def _require_secret(secret: str) -> None:
 
 
 def _load_yaml(path: Path) -> dict:
-    """Returns the parsed YAML or a fresh {strategies: {}} skeleton."""
     if not path.exists():
         return {"strategies": {}}
     try:
@@ -40,7 +40,6 @@ def _load_yaml(path: Path) -> dict:
     except yaml.YAMLError as e:
         log.warning("strategies.yaml is malformed (%s) — starting fresh", e)
         return {"strategies": {}}
-    # Heal old/wrong shapes: if 'strategies' is missing or not a dict, reset it
     if not isinstance(data.get("strategies"), dict):
         log.warning("strategies file has wrong shape; resetting to empty dict")
         data["strategies"] = {}
@@ -62,38 +61,50 @@ def strategies_page(request: Request):
         {
             "request": request,
             "routes": routes,
+            "supported_exchanges": SUPPORTED_EXCHANGES,
             "strategies_file": settings.strategies_file,
-            "has_secret": bool(settings.webhook_secret),
         },
     )
 
 
 @router.post("/strategies", response_class=HTMLResponse)
-def save_strategy(
-    request: Request,
-    secret: str = Form(...),
-    strategy_id: str = Form(...),
-    exchange: str = Form(...),
-    symbol: str = Form(...),
-    quantity_usd: float = Form(...),
-    leverage: float = Form(1.0),
-    enabled: str = Form("true"),
-):
+async def save_strategy(request: Request):
+    """Upsert a strategy. Form fields:
+        secret, strategy_id, base_asset, quantity_usd, venue_<exchange> (checkbox)
+    """
+    form = await request.form()
+    secret = str(form.get("secret", ""))
     _require_secret(secret)
 
-    sid = strategy_id.strip()
+    sid = str(form.get("strategy_id", "")).strip()
     if not sid or not sid.replace("_", "").replace("-", "").isalnum():
         raise HTTPException(400, "strategy_id must be alphanumeric (plus _ and -)")
-    ex = exchange.lower().strip()
-    if ex not in ("bybit", "hyperliquid"):
-        raise HTTPException(400, f"unsupported exchange: {exchange}")
-    sym = symbol.strip()
-    if not sym:
-        raise HTTPException(400, "symbol is required")
-    if quantity_usd <= 0:
+
+    base = str(form.get("base_asset", "")).strip().upper()
+    if not base or not base.isalnum():
+        raise HTTPException(400, "base_asset must be alphanumeric (e.g. BTC)")
+
+    try:
+        qty = float(form.get("quantity_usd", "0"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "quantity_usd must be a number")
+    if qty <= 0:
         raise HTTPException(400, "quantity_usd must be > 0")
-    if leverage <= 0:
-        raise HTTPException(400, "leverage must be > 0")
+
+    # Collect venue toggles. Checkbox unchecked == field absent.
+    venues_cfg: dict[str, bool] = {}
+    any_enabled = False
+    for ex in SUPPORTED_EXCHANGES:
+        field = f"venue_{ex}"
+        enabled = str(form.get(field, "")).lower() in ("on", "true", "1", "yes")
+        venues_cfg[ex] = enabled
+        if enabled:
+            any_enabled = True
+
+    if not any_enabled:
+        # Allow saving with all-disabled (useful to keep the row but pause it),
+        # but warn via log so it's not silent.
+        log.warning("admin: strategy %s saved with all venues disabled", sid)
 
     settings = get_settings()
     path = Path(settings.strategies_file)
@@ -101,17 +112,15 @@ def save_strategy(
     strategies = data.setdefault("strategies", {})
     is_update = sid in strategies
     strategies[sid] = {
-        "exchange": ex,
-        "symbol": sym,
-        "quantity_usd": float(quantity_usd),
-        "leverage": float(leverage),
-        "enabled": str(enabled).lower() in ("true", "1", "yes", "on"),
+        "base_asset": base,
+        "quantity_usd": qty,
+        "venues": venues_cfg,
     }
     _save_yaml(path, data)
     request.app.state.strategy_router.reload()
-    log.info("admin: %s strategy %s -> %s/%s qty=$%s lev=%sx",
+    log.info("admin: %s strategy %s base=%s qty=$%s venues=%s",
              "updated" if is_update else "created",
-             sid, ex, sym, quantity_usd, leverage)
+             sid, base, qty, venues_cfg)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 
@@ -128,6 +137,34 @@ def delete_strategy(sid: str, request: Request, secret: str = Form(...)):
     _save_yaml(path, data)
     request.app.state.strategy_router.reload()
     log.info("admin: deleted strategy %s", sid)
+    return RedirectResponse(url="/admin/strategies", status_code=303)
+
+
+@router.post("/strategies/toggle/{sid}/{exchange}", response_class=HTMLResponse)
+def toggle_venue(sid: str, exchange: str, request: Request,
+                 secret: str = Form(...)):
+    """Quick toggle: flip a single venue's enabled bit without re-entering the
+    full strategy form."""
+    _require_secret(secret)
+    if exchange not in SUPPORTED_EXCHANGES:
+        raise HTTPException(400, f"unsupported exchange: {exchange}")
+    settings = get_settings()
+    path = Path(settings.strategies_file)
+    data = _load_yaml(path)
+    strategies = data.get("strategies", {})
+    if sid not in strategies:
+        raise HTTPException(404, f"strategy_id not found: {sid}")
+    venues = strategies[sid].setdefault("venues", {})
+    current = venues.get(exchange, False)
+    if isinstance(current, dict):
+        venues[exchange]["enabled"] = not bool(current.get("enabled", False))
+        new_val = venues[exchange]["enabled"]
+    else:
+        venues[exchange] = not bool(current)
+        new_val = venues[exchange]
+    _save_yaml(path, data)
+    request.app.state.strategy_router.reload()
+    log.info("admin: toggled %s/%s -> %s", sid, exchange, new_val)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 

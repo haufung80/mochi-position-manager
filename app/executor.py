@@ -1,7 +1,11 @@
 """Glue between an Alert row and an exchange order.
 
+Each call to execute_order() places a SINGLE order on a SINGLE venue.
+The webhook handler fans out one alert across N enabled venues by calling
+this function once per venue.
+
 Responsibilities:
-  - Translate (alert + route) into a concrete exchange call.
+  - Translate (alert + venue) into a concrete exchange call.
   - Update the Order row through its lifecycle: pending -> success / retrying / dead.
   - Mutate the Position ledger on successful fills only.
   - Notify on terminal states.
@@ -14,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .models import Alert, Order, Position
-from .routing import StrategyRoute
+from .routing import VenueRoute
 from .exchanges.registry import get_registry
 from .notifier import get_notifier
 from .schemas import OrderResult
@@ -25,8 +29,6 @@ log = logging.getLogger(__name__)
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-# ---------- helpers ----------
 
 def _side_from_action(action: str) -> tuple[str, bool, bool]:
     """Return (side, is_close, reduce_only)."""
@@ -66,8 +68,6 @@ def _apply_fill_to_position(db: Session, exchange: str, symbol: str,
 
     signed = qty_base if side == "buy" else -qty_base
     if is_close:
-        # close orders just zero out (best-effort — exchange might have a
-        # different actual size, but middleware is intent-tracking only)
         pos.net_qty_base = 0.0
         pos.net_qty_usd = 0.0
     else:
@@ -77,10 +77,12 @@ def _apply_fill_to_position(db: Session, exchange: str, symbol: str,
     pos.updated_at = _utcnow()
 
 
-# ---------- main entry ----------
+def execute_order(db: Session, alert: Alert, venue: VenueRoute,
+                  *, existing_order: Order | None = None) -> Order:
+    """Place (or retry) an order for this alert on a single venue.
 
-def execute_order(db: Session, alert: Alert, route: StrategyRoute, *, existing_order: Order | None = None) -> Order:
-    """Place (or retry) an order for this alert. Mutates DB state and notifies."""
+    Mutates DB state and emits notifications. Returns the Order row.
+    """
     side, is_close, reduce_only = _side_from_action(alert.action)
 
     if existing_order is not None:
@@ -88,12 +90,12 @@ def execute_order(db: Session, alert: Alert, route: StrategyRoute, *, existing_o
     else:
         order = Order(
             alert_id=alert.id,
-            exchange=route.exchange,
-            symbol=route.symbol,
-            side=side or "buy",  # placeholder for close-only; not used by adapter
-            qty_usd=route.quantity_usd,
+            exchange=venue.exchange,
+            symbol=venue.symbol,
+            side=side or "buy",
+            qty_usd=venue.quantity_usd,
             reduce_only=reduce_only,
-            leverage=route.leverage,
+            leverage=venue.leverage,  # hardcoded 1.0 — see VenueRoute
             status="pending",
             attempts=0,
         )
@@ -105,16 +107,16 @@ def execute_order(db: Session, alert: Alert, route: StrategyRoute, *, existing_o
     db.flush()
 
     notifier = get_notifier()
-    exchange = get_registry().get(route.exchange)
+    exchange = get_registry().get(venue.exchange)
 
     if is_close:
-        result: OrderResult = exchange.close_position(route.symbol)
+        result: OrderResult = exchange.close_position(venue.symbol)
     else:
         result = exchange.market_order(
-            symbol=route.symbol,
+            symbol=venue.symbol,
             side=side,  # type: ignore[arg-type]
-            qty_usd=route.quantity_usd,
-            leverage=route.leverage,
+            qty_usd=venue.quantity_usd,
+            leverage=venue.leverage,
             reduce_only=reduce_only,
         )
 
@@ -126,15 +128,15 @@ def execute_order(db: Session, alert: Alert, route: StrategyRoute, *, existing_o
         order.next_retry_at = None
         if is_close or (result.avg_price > 0 and result.filled_qty_base > 0):
             _apply_fill_to_position(
-                db, route.exchange, route.symbol,
+                db, venue.exchange, venue.symbol,
                 side or "buy", result.filled_qty_base, result.avg_price, is_close
             )
         notifier.order_succeeded(
-            alert.strategy_id, route.exchange, route.symbol,
-            side or "close", route.quantity_usd, result.avg_price,
+            alert.strategy_id, venue.exchange, venue.symbol,
+            side or "close", venue.quantity_usd, result.avg_price,
         )
         log.info("Order success alert=%s strategy=%s ex=%s sym=%s",
-                 alert.id, alert.strategy_id, route.exchange, route.symbol)
+                 alert.id, alert.strategy_id, venue.exchange, venue.symbol)
         return order
 
     # ---- failure path ----
@@ -145,20 +147,20 @@ def execute_order(db: Session, alert: Alert, route: StrategyRoute, *, existing_o
         order.status = "dead"
         order.next_retry_at = None
         notifier.order_dead(
-            alert.strategy_id, route.exchange, route.symbol,
-            side or "close", route.quantity_usd, order.attempts, result.error_message,
+            alert.strategy_id, venue.exchange, venue.symbol,
+            side or "close", venue.quantity_usd, order.attempts, result.error_message,
         )
-        log.error("Order DEAD alert=%s strategy=%s err=%s",
-                  alert.id, alert.strategy_id, result.error_message)
+        log.error("Order DEAD alert=%s strategy=%s ex=%s err=%s",
+                  alert.id, alert.strategy_id, venue.exchange, result.error_message)
     else:
         order.status = "retrying"
         delay = _next_retry_delay(order.attempts)
         order.next_retry_at = _utcnow() + timedelta(seconds=delay)
         notifier.order_failed(
-            alert.strategy_id, route.exchange, route.symbol,
-            side or "close", route.quantity_usd, order.attempts, result.error_message,
+            alert.strategy_id, venue.exchange, venue.symbol,
+            side or "close", venue.quantity_usd, order.attempts, result.error_message,
         )
-        log.warning("Order retrying in %ss alert=%s err=%s",
-                    delay, alert.id, result.error_message)
+        log.warning("Order retrying in %ss alert=%s ex=%s err=%s",
+                    delay, alert.id, venue.exchange, result.error_message)
 
     return order

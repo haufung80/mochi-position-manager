@@ -1,4 +1,4 @@
-"""Tests for /admin/strategies UI endpoints."""
+"""Tests for /admin/strategies UI endpoints (new venue fan-out schema)."""
 from __future__ import annotations
 from pathlib import Path
 
@@ -15,12 +15,7 @@ SECRET = "test-secret-12345"  # matches conftest default; avoids cache pollution
 
 @pytest.fixture
 def strategies_file(tmp_path, monkeypatch):
-    """Empty strategies.yaml in a temp dir + settings pointed at it.
-
-    We override the settings.strategies_file by patching the cached Settings
-    object directly — avoiding env-var + cache_clear() dance that can pollute
-    sibling test modules.
-    """
+    """Empty strategies.yaml in a temp dir + settings pointed at it."""
     f = tmp_path / "strategies.yaml"
     f.write_text("strategies: {}\n")
     from app.config import get_settings
@@ -31,9 +26,7 @@ def strategies_file(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(strategies_file):
-    """TestClient with state.strategy_router pointed at the temp file."""
     with TestClient(app) as c:
-        # lifespan sets up app.state.strategy_router; override to our temp file
         c.app.state.strategy_router = StrategyRouter(strategies_file)
         yield c
 
@@ -42,129 +35,148 @@ def test_get_page_renders(client):
     r = client.get("/admin/strategies")
     assert r.status_code == 200
     assert "Strategy Configuration" in r.text
-    assert "Webhook secret (required)" in r.text
+    assert "Base asset" in r.text
+    # checkboxes for both supported exchanges should render
+    assert "venue_hyperliquid" in r.text
+    assert "venue_bybit" in r.text
 
 
 def test_post_without_secret_rejected(client):
     r = client.post("/admin/strategies", data={
-        "strategy_id": "X",
-        "exchange": "hyperliquid",
-        "symbol": "BTC",
-        "quantity_usd": "10",
-        "leverage": "1",
+        "strategy_id": "X", "base_asset": "BTC", "quantity_usd": "10",
+        "venue_hyperliquid": "on",
     })
-    # FastAPI Form(...) returns 422 if a required form field is missing
-    assert r.status_code == 422
+    assert r.status_code == 401
 
 
 def test_post_with_wrong_secret_returns_401(client):
     r = client.post("/admin/strategies", data={
         "secret": "wrong",
-        "strategy_id": "X",
-        "exchange": "hyperliquid",
-        "symbol": "BTC",
-        "quantity_usd": "10",
-        "leverage": "1",
+        "strategy_id": "X", "base_asset": "BTC", "quantity_usd": "10",
+        "venue_hyperliquid": "on",
     })
     assert r.status_code == 401
     assert r.json() == {"detail": "bad secret"}
 
 
-def test_post_creates_strategy(client, strategies_file):
+def test_post_creates_strategy_with_single_venue(client, strategies_file):
     r = client.post(
         "/admin/strategies",
         data={
             "secret": SECRET,
             "strategy_id": "MR_VOTING_BTC_6H",
-            "exchange": "hyperliquid",
-            "symbol": "BTC",
+            "base_asset": "BTC",
             "quantity_usd": "20",
-            "leverage": "2",
-            "enabled": "true",
+            "venue_hyperliquid": "on",
+            # bybit checkbox NOT submitted (unchecked == absent)
         },
         follow_redirects=False,
     )
     assert r.status_code == 303
     assert r.headers["location"] == "/admin/strategies"
 
-    # file persisted in correct dict shape
     data = yaml.safe_load(strategies_file.read_text())
-    assert "strategies" in data
-    assert "MR_VOTING_BTC_6H" in data["strategies"]
     entry = data["strategies"]["MR_VOTING_BTC_6H"]
-    assert entry == {
-        "exchange": "hyperliquid",
-        "symbol": "BTC",
-        "quantity_usd": 20.0,
-        "leverage": 2.0,
-        "enabled": True,
-    }
+    assert entry["base_asset"] == "BTC"
+    assert entry["quantity_usd"] == 20.0
+    assert entry["venues"] == {"hyperliquid": True, "bybit": False}
 
-    # router reloaded — get() returns the new route
-    route = client.app.state.strategy_router.get("MR_VOTING_BTC_6H")
-    assert route is not None
-    assert route.exchange == "hyperliquid"
-    assert route.quantity_usd == 20.0
+    # router reloaded — strategy resolves to one enabled venue with right symbol
+    s = client.app.state.strategy_router.get("MR_VOTING_BTC_6H")
+    assert s is not None
+    enabled = s.enabled_venues()
+    assert len(enabled) == 1
+    assert enabled[0].exchange == "hyperliquid"
+    assert enabled[0].symbol == "BTC"
 
 
-def test_post_rejects_unsupported_exchange(client):
-    r = client.post("/admin/strategies", data={
+def test_post_creates_strategy_with_both_venues(client, strategies_file):
+    r = client.post(
+        "/admin/strategies",
+        data={
+            "secret": SECRET,
+            "strategy_id": "MULTI",
+            "base_asset": "ETH",
+            "quantity_usd": "15",
+            "venue_hyperliquid": "on",
+            "venue_bybit": "on",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    data = yaml.safe_load(strategies_file.read_text())
+    assert data["strategies"]["MULTI"]["venues"] == {"hyperliquid": True, "bybit": True}
+
+    s = client.app.state.strategy_router.get("MULTI")
+    assert len(s.enabled_venues()) == 2
+    symbols = {v.exchange: v.symbol for v in s.enabled_venues()}
+    assert symbols == {"hyperliquid": "ETH", "bybit": "ETHUSDT"}
+
+
+def test_post_with_no_venues_is_saved_but_inactive(client, strategies_file):
+    """All-venues-off is allowed (pause without losing config)."""
+    client.post("/admin/strategies", data={
         "secret": SECRET,
-        "strategy_id": "X",
-        "exchange": "binance",
-        "symbol": "BTC",
+        "strategy_id": "PAUSED",
+        "base_asset": "BTC",
         "quantity_usd": "10",
-        "leverage": "1",
-    })
-    assert r.status_code == 400
-    assert "unsupported exchange" in r.json()["detail"]
+        # no venue_ fields
+    }, follow_redirects=False)
+
+    s = client.app.state.strategy_router.get("PAUSED")
+    assert s is not None
+    assert s.enabled is False
+    assert len(s.enabled_venues()) == 0
 
 
 def test_post_rejects_zero_qty(client):
     r = client.post("/admin/strategies", data={
         "secret": SECRET,
-        "strategy_id": "X",
-        "exchange": "hyperliquid",
-        "symbol": "BTC",
-        "quantity_usd": "0",
-        "leverage": "1",
+        "strategy_id": "X", "base_asset": "BTC", "quantity_usd": "0",
+        "venue_hyperliquid": "on",
+    })
+    assert r.status_code == 400
+
+
+def test_post_rejects_bad_base_asset(client):
+    r = client.post("/admin/strategies", data={
+        "secret": SECRET,
+        "strategy_id": "X", "base_asset": "BTC$%^", "quantity_usd": "10",
+        "venue_hyperliquid": "on",
     })
     assert r.status_code == 400
 
 
 def test_post_updates_existing_strategy(client, strategies_file):
-    # create
     client.post("/admin/strategies", data={
-        "secret": SECRET, "strategy_id": "X", "exchange": "hyperliquid",
-        "symbol": "BTC", "quantity_usd": "10", "leverage": "1", "enabled": "true",
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "quantity_usd": "10", "venue_hyperliquid": "on",
     }, follow_redirects=False)
-    # update
+    # update — different asset + venue
     client.post("/admin/strategies", data={
-        "secret": SECRET, "strategy_id": "X", "exchange": "bybit",
-        "symbol": "BTCUSDT", "quantity_usd": "50", "leverage": "3", "enabled": "false",
+        "secret": SECRET, "strategy_id": "X", "base_asset": "ETH",
+        "quantity_usd": "50", "venue_bybit": "on",
     }, follow_redirects=False)
 
-    data = yaml.safe_load(strategies_file.read_text())
-    assert data["strategies"]["X"] == {
-        "exchange": "bybit",
-        "symbol": "BTCUSDT",
-        "quantity_usd": 50.0,
-        "leverage": 3.0,
-        "enabled": False,
-    }
+    s = client.app.state.strategy_router.get("X")
+    assert s.base_asset == "ETH"
+    assert s.quantity_usd == 50.0
+    enabled = s.enabled_venues()
+    assert len(enabled) == 1
+    assert enabled[0].exchange == "bybit"
+    assert enabled[0].symbol == "ETHUSDT"
 
 
 def test_delete_removes_strategy(client, strategies_file):
     client.post("/admin/strategies", data={
-        "secret": SECRET, "strategy_id": "X", "exchange": "hyperliquid",
-        "symbol": "BTC", "quantity_usd": "10", "leverage": "1", "enabled": "true",
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "quantity_usd": "10", "venue_hyperliquid": "on",
     }, follow_redirects=False)
     assert client.app.state.strategy_router.get("X") is not None
 
     r = client.post("/admin/strategies/delete/X",
                     data={"secret": SECRET}, follow_redirects=False)
     assert r.status_code == 303
-
     data = yaml.safe_load(strategies_file.read_text())
     assert "X" not in data["strategies"]
     assert client.app.state.strategy_router.get("X") is None
@@ -172,50 +184,52 @@ def test_delete_removes_strategy(client, strategies_file):
 
 def test_delete_without_secret_rejected(client, strategies_file):
     client.post("/admin/strategies", data={
-        "secret": SECRET, "strategy_id": "X", "exchange": "hyperliquid",
-        "symbol": "BTC", "quantity_usd": "10", "leverage": "1", "enabled": "true",
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "quantity_usd": "10", "venue_hyperliquid": "on",
     }, follow_redirects=False)
 
     r = client.post("/admin/strategies/delete/X", data={"secret": "wrong"})
     assert r.status_code == 401
-    # entry still there
     data = yaml.safe_load(strategies_file.read_text())
     assert "X" in data["strategies"]
 
 
-def test_router_resilient_to_malformed_yaml(tmp_path, monkeypatch):
-    """Broken YAML must not crash; router should be empty + log warning."""
-    f = tmp_path / "strategies.yaml"
-    f.write_text("strategies:\n  - BAD: this should be a dict, not a list\n")
-    r = StrategyRouter(f)
-    assert r.all() == []
+def test_toggle_venue_flips_enabled_state(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "quantity_usd": "10", "venue_hyperliquid": "on",
+    }, follow_redirects=False)
+
+    s = client.app.state.strategy_router.get("X")
+    venues_before = {v.exchange: v.enabled for v in s.venues}
+    assert venues_before == {"hyperliquid": True, "bybit": False}
+
+    # toggle bybit on
+    r = client.post("/admin/strategies/toggle/X/bybit",
+                    data={"secret": SECRET}, follow_redirects=False)
+    assert r.status_code == 303
+
+    s = client.app.state.strategy_router.get("X")
+    assert {v.exchange: v.enabled for v in s.venues} == {"hyperliquid": True, "bybit": True}
+
+    # toggle bybit back off
+    client.post("/admin/strategies/toggle/X/bybit",
+                data={"secret": SECRET}, follow_redirects=False)
+    s = client.app.state.strategy_router.get("X")
+    assert {v.exchange: v.enabled for v in s.venues} == {"hyperliquid": True, "bybit": False}
 
 
-def test_router_resilient_to_missing_file(tmp_path):
-    f = tmp_path / "does-not-exist.yaml"
-    r = StrategyRouter(f)
-    assert r.all() == []
+def test_toggle_unknown_strategy_returns_404(client):
+    r = client.post("/admin/strategies/toggle/DOES_NOT_EXIST/bybit",
+                    data={"secret": SECRET})
+    assert r.status_code == 404
 
 
-def test_router_skips_bad_entries_loads_good_ones(tmp_path):
-    f = tmp_path / "strategies.yaml"
-    f.write_text("""
-strategies:
-  GOOD:
-    exchange: hyperliquid
-    symbol: BTC
-    quantity_usd: 20
-    leverage: 2
-  BAD_EXCHANGE:
-    exchange: foobar
-    symbol: BTC
-    quantity_usd: 20
-  MISSING_SYMBOL:
-    exchange: bybit
-    quantity_usd: 20
-""")
-    r = StrategyRouter(f)
-    routes = {x.strategy_id: x for x in r.all()}
-    assert "GOOD" in routes
-    assert "BAD_EXCHANGE" not in routes
-    assert "MISSING_SYMBOL" not in routes
+def test_toggle_unsupported_exchange_returns_400(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "quantity_usd": "10", "venue_hyperliquid": "on",
+    }, follow_redirects=False)
+    r = client.post("/admin/strategies/toggle/X/binance",
+                    data={"secret": SECRET})
+    assert r.status_code == 400

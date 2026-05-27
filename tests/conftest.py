@@ -26,22 +26,35 @@ def _clean_db():
 
 @pytest.fixture
 def strategies_yaml(tmp_path):
+    """New schema (post-redesign): one strategy fans out to multiple venues.
+
+    TEST_BTC routes to bybit only (single venue, used by happy-path tests
+    that assert exactly one Order is created per alert).
+    TEST_MULTI routes to BOTH bybit and hyperliquid (used by fan-out tests).
+    TEST_DISABLED has both venues disabled.
+    """
     p = tmp_path / "strategies.yaml"
     p.write_text(
         """
 strategies:
   TEST_BTC:
-    exchange: bybit
-    symbol: BTCUSDT
+    base_asset: BTC
     quantity_usd: 100
-    leverage: 2
-    enabled: true
+    venues:
+      bybit: true
+      hyperliquid: false
+  TEST_MULTI:
+    base_asset: ETH
+    quantity_usd: 50
+    venues:
+      bybit: true
+      hyperliquid: true
   TEST_DISABLED:
-    exchange: bybit
-    symbol: ETHUSDT
+    base_asset: ETH
     quantity_usd: 100
-    leverage: 1
-    enabled: false
+    venues:
+      bybit: false
+      hyperliquid: false
 """
     )
     return p

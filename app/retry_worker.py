@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from .db import session_scope
 from .models import Alert, Order
 from .executor import execute_order
+from .routing import VenueRoute
 
 log = logging.getLogger(__name__)
 
@@ -33,15 +34,18 @@ async def retry_loop(router, *, poll_interval_sec: float = 5.0, stop_event: asyn
                         log.error("retry_worker: orphan order id=%s (no alert)", order.id)
                         order.status = "dead"
                         continue
-                    route = router.get(alert.strategy_id)
-                    if route is None:
-                        log.error("retry_worker: route gone for strategy=%s", alert.strategy_id)
-                        order.status = "dead"
-                        order.error_message = "route_missing_on_retry"
-                        continue
+                    # Rebuild a venue from the order's frozen-at-fire-time fields,
+                    # so retries aren't broken by strategy reconfigurations between
+                    # original fire and retry attempt.
+                    venue = VenueRoute(
+                        exchange=order.exchange,
+                        symbol=order.symbol,
+                        enabled=True,
+                        quantity_usd=order.qty_usd,
+                    )
                     log.info("retry_worker: replaying order id=%s alert=%s attempt=%s",
                              order.id, alert.id, order.attempts + 1)
-                    execute_order(db, alert, route, existing_order=order)
+                    execute_order(db, alert, venue, existing_order=order)
         except Exception:
             log.exception("retry_worker loop error")
         try:

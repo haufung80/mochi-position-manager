@@ -29,7 +29,8 @@ def test_rejects_invalid_action(strategies_yaml, stub_exchange, silent_notifier)
     assert r.status_code == 422
 
 
-def test_happy_path_creates_alert_order_and_position(strategies_yaml, stub_exchange, silent_notifier):
+def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier):
+    """TEST_BTC has only bybit enabled — expect ONE order."""
     c = _client(strategies_yaml)
     r = c.post("/webhook/tradingview", json={
         "secret": "test-secret-12345", "strategy_id": "TEST_BTC",
@@ -38,27 +39,61 @@ def test_happy_path_creates_alert_order_and_position(strategies_yaml, stub_excha
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "accepted"
-    assert body["order_status"] == "success"
+    assert len(body["orders"]) == 1
+    assert body["orders"][0]["exchange"] == "bybit"
+    assert body["orders"][0]["symbol"] == "BTCUSDT"
+    assert body["orders"][0]["status"] == "success"
 
     with session_scope() as db:
         assert db.query(Alert).count() == 1
-        order = db.query(Order).one()
-        assert order.status == "success"
-        assert order.attempts == 1
+        assert db.query(Order).count() == 1
         pos = db.query(Position).one()
         assert pos.exchange == "bybit"
         assert pos.symbol == "BTCUSDT"
         assert pos.net_qty_base > 0
 
-    # second identical hit -> duplicate
-    r2 = c.post("/webhook/tradingview", json={
-        "secret": "test-secret-12345", "strategy_id": "TEST_BTC",
+
+def test_fan_out_creates_one_order_per_enabled_venue(strategies_yaml, stub_exchange, silent_notifier):
+    """TEST_MULTI has bybit + hyperliquid both enabled — expect TWO orders from ONE alert."""
+    c = _client(strategies_yaml)
+    r = c.post("/webhook/tradingview", json={
+        "secret": "test-secret-12345", "strategy_id": "TEST_MULTI",
         "action": "buy", "alert_id": "a1",
     })
-    assert r2.json()["status"] == "duplicate"
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "accepted"
+    assert len(body["orders"]) == 2
+
+    exchanges = {o["exchange"]: o for o in body["orders"]}
+    assert exchanges["bybit"]["symbol"] == "ETHUSDT"
+    assert exchanges["hyperliquid"]["symbol"] == "ETH"
+    assert all(o["status"] == "success" for o in body["orders"])
+
     with session_scope() as db:
-        assert db.query(Alert).count() == 1  # not double-recorded
-        assert db.query(Order).count() == 1  # no extra order
+        assert db.query(Alert).count() == 1
+        assert db.query(Order).count() == 2  # one per venue
+        # two positions, one per (exchange, symbol)
+        positions = {(p.exchange, p.symbol): p for p in db.query(Position).all()}
+        assert ("bybit", "ETHUSDT") in positions
+        assert ("hyperliquid", "ETH") in positions
+
+
+def test_duplicate_alert_does_not_create_extra_orders(strategies_yaml, stub_exchange, silent_notifier):
+    c = _client(strategies_yaml)
+    body = {
+        "secret": "test-secret-12345", "strategy_id": "TEST_MULTI",
+        "action": "buy", "alert_id": "dup1",
+    }
+    r1 = c.post("/webhook/tradingview", json=body)
+    assert r1.json()["status"] == "accepted"
+    r2 = c.post("/webhook/tradingview", json=body)
+    assert r2.json()["status"] == "duplicate"
+
+    with session_scope() as db:
+        assert db.query(Alert).count() == 1
+        # first alert created 2 orders (multi-venue); duplicate added zero
+        assert db.query(Order).count() == 2
 
 
 def test_sell_decrements_position(strategies_yaml, stub_exchange, silent_notifier):
@@ -73,7 +108,7 @@ def test_sell_decrements_position(strategies_yaml, stub_exchange, silent_notifie
     })
     with session_scope() as db:
         pos = db.query(Position).one()
-        assert pos.net_qty_base == 0.0  # +0.001 - 0.001
+        assert pos.net_qty_base == 0.0
 
 
 def test_close_action_zeroes_position(strategies_yaml, stub_exchange, silent_notifier):
@@ -105,14 +140,18 @@ def test_unknown_strategy_logs_but_skips(strategies_yaml, stub_exchange, silent_
         assert db.query(Order).count() == 0  # but no order placed
 
 
-def test_disabled_strategy_logs_but_skips(strategies_yaml, stub_exchange, silent_notifier):
+def test_strategy_with_all_venues_disabled_skips(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
     r = c.post("/webhook/tradingview", json={
         "secret": "test-secret-12345", "strategy_id": "TEST_DISABLED",
         "action": "buy", "alert_id": "a1",
     })
-    assert r.json()["status"] == "skipped"
-    assert r.json()["reason"] == "disabled_strategy"
+    body = r.json()
+    assert body["status"] == "skipped"
+    assert body["reason"] == "no_enabled_venues"
+    with session_scope() as db:
+        assert db.query(Alert).count() == 1
+        assert db.query(Order).count() == 0
 
 
 def test_failed_order_marks_retrying(strategies_yaml, stub_exchange, silent_notifier):
@@ -122,14 +161,15 @@ def test_failed_order_marks_retrying(strategies_yaml, stub_exchange, silent_noti
         "secret": "test-secret-12345", "strategy_id": "TEST_BTC",
         "action": "buy", "alert_id": "a1",
     })
-    assert r.json()["order_status"] == "retrying"
+    body = r.json()
+    # one venue, failed → retrying
+    assert body["orders"][0]["status"] == "retrying"
     with session_scope() as db:
         order = db.query(Order).one()
         assert order.status == "retrying"
         assert order.attempts == 1
         assert order.next_retry_at is not None
         assert "exchange down" in order.error_message
-        # no position movement on failure
         assert db.query(Position).count() == 0
 
 

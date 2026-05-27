@@ -10,7 +10,7 @@
     h1 { margin: 0 0 6px 0; font-size: 22px; }
     h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em;
          color: #888; margin: 28px 0 10px 0; }
-    .sub { color: #888; font-size: 13px; margin-bottom: 18px; }
+    .sub { color: #888; font-size: 13px; margin-bottom: 18px; line-height: 1.6; }
     .back { color: #60a5fa; text-decoration: none; font-size: 13px; }
     .card { background: #1a1d24; border: 1px solid #2a2e38;
             border-radius: 8px; padding: 16px; margin-bottom: 16px; }
@@ -19,13 +19,22 @@
              vertical-align: middle; }
     th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
     .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 16px; }
     label { display: block; color: #aaa; font-size: 11px; text-transform: uppercase;
             letter-spacing: 0.03em; margin-bottom: 4px; }
-    input, select { width: 100%; padding: 8px 10px; background: #0f1115;
-                    border: 1px solid #2a2e38; border-radius: 4px; color: #e6e6e6;
-                    box-sizing: border-box; font-size: 14px; font-family: inherit; }
+    input[type=text], input[type=number], select {
+      width: 100%; padding: 8px 10px; background: #0f1115;
+      border: 1px solid #2a2e38; border-radius: 4px; color: #e6e6e6;
+      box-sizing: border-box; font-size: 14px; font-family: inherit;
+    }
     input:focus, select:focus { outline: 1px solid #60a5fa; border-color: #60a5fa; }
+    .venues-block { background: #161922; padding: 10px 12px; border-radius: 6px;
+                    border: 1px solid #2a2e38; }
+    .venue-row { display: flex; align-items: center; gap: 10px; padding: 4px 0;
+                 font-size: 13px; }
+    .venue-row input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
+    .venue-row .sym-hint { color: #666; font-size: 11px;
+                           font-family: "SF Mono", Menlo, monospace; }
     .secret-row { background: #2d2308; border: 1px solid #facc15; border-radius: 6px;
                   padding: 12px; margin-top: 16px; }
     .secret-row label { color: #facc15; }
@@ -35,21 +44,34 @@
     button:hover { opacity: 0.9; }
     button.danger { background: #7f1d1d; padding: 6px 10px; font-size: 11px;
                     font-weight: 500; }
+    button.toggle { background: #374151; padding: 4px 8px; font-size: 11px;
+                    font-weight: 500; }
+    button.toggle.on { background: #14532d; color: #4ade80; }
     .delete-form { display: flex; gap: 6px; align-items: center; }
     .delete-form input { width: 110px; padding: 5px 8px; font-size: 12px; }
+    .toggle-form { display: inline-flex; gap: 4px; align-items: center; }
+    .toggle-form input { width: 90px; padding: 4px 6px; font-size: 11px;
+                         background: #0f1115; border: 1px solid #2a2e38;
+                         border-radius: 3px; color: #e6e6e6; }
     .ok { color: #4ade80; }
     .muted { color: #666; }
     code { font-family: "SF Mono", Menlo, monospace; font-size: 12px;
            background: #0f1115; padding: 2px 6px; border-radius: 3px; }
+    .venue-pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                  font-size: 11px; font-weight: 600; margin-right: 4px; }
+    .venue-pill.on { background: #14532d; color: #4ade80; }
+    .venue-pill.off { background: #2a2e38; color: #666; }
   </style>
 </head>
 <body>
   <a href="/" class="back">← back to dashboard</a>
   <h1>Strategy Configuration</h1>
   <div class="sub">
-    Routes TradingView <code>strategy_id</code> → exchange + symbol + sizing.
-    Changes persist to <code>{{ strategies_file }}</code> and reload the in-memory router immediately.
-    Every write requires the <span style="color:#facc15;">webhook secret</span>.
+    Each strategy_id maps to ONE TradingView alert that fans out to multiple exchanges.
+    The middleware translates <code>base_asset</code> to each exchange's native symbol
+    (HL: <code>BTC</code>, Bybit: <code>BTCUSDT</code>) — you don't configure the symbol directly.
+    File: <code>{{ strategies_file }}</code>. Every write requires the
+    <span style="color:#facc15;">webhook secret</span>.
   </div>
 
   <h2>Add or update a strategy</h2>
@@ -58,47 +80,46 @@
       <div class="grid">
         <div>
           <label>Strategy ID</label>
-          <input name="strategy_id" required pattern="[A-Za-z0-9_\-]+"
+          <input type="text" name="strategy_id" required pattern="[A-Za-z0-9_\-]+"
                  placeholder="MR_VOTING_BTC_6H">
         </div>
         <div>
-          <label>Exchange</label>
-          <select name="exchange" required>
-            <option value="hyperliquid">hyperliquid</option>
-            <option value="bybit">bybit</option>
-          </select>
+          <label>Base asset</label>
+          <input type="text" name="base_asset" required pattern="[A-Za-z0-9]+"
+                 placeholder="BTC" style="text-transform: uppercase;">
         </div>
         <div>
-          <label>Symbol</label>
-          <input name="symbol" required placeholder="BTC (HL) / BTCUSDT (Bybit)">
-        </div>
-        <div>
-          <label>Quantity (USD)</label>
-          <input name="quantity_usd" type="number" step="0.01" min="0.01"
+          <label>Quantity per signal (USD)</label>
+          <input type="number" name="quantity_usd" step="0.01" min="0.01"
                  required placeholder="20">
         </div>
-        <div>
-          <label>Leverage</label>
-          <input name="leverage" type="number" step="0.1" min="0.1"
-                 value="2" required>
-        </div>
-        <div>
-          <label>Enabled</label>
-          <select name="enabled">
-            <option value="true">true</option>
-            <option value="false">false</option>
-          </select>
+      </div>
+      <div style="margin-top: 14px;">
+        <label>Route to</label>
+        <div class="venues-block">
+          {% for ex in supported_exchanges %}
+          <div class="venue-row">
+            <input type="checkbox" name="venue_{{ ex }}" id="venue_{{ ex }}" value="on">
+            <label for="venue_{{ ex }}" style="margin: 0; color: #e6e6e6;
+                   text-transform: none; font-size: 13px; letter-spacing: 0;">
+              {{ ex }}
+            </label>
+            <span class="sym-hint">
+              symbol will be: {% if ex == "bybit" %}<base_asset>USDT{% else %}<base_asset>{% endif %}
+            </span>
+          </div>
+          {% endfor %}
         </div>
       </div>
       <div class="secret-row">
         <label>Webhook secret (required)</label>
-        <input name="secret" type="password" required
+        <input type="password" name="secret" required
                placeholder="paste WEBHOOK_SECRET to authorise"
                autocomplete="off">
       </div>
       <button type="submit" style="margin-top: 14px;">Save strategy</button>
       <span class="muted" style="margin-left: 12px; font-size: 12px;">
-        Existing strategy_id will be overwritten.
+        Existing strategy_id will be overwritten. Leverage is fixed at 1× and not configured here.
       </span>
     </form>
   </div>
@@ -109,24 +130,39 @@
     <table>
       <thead>
         <tr>
-          <th>Strategy ID</th><th>Exchange</th><th>Symbol</th>
-          <th>$/order</th><th>Leverage</th><th>Enabled</th><th>Delete</th>
+          <th>Strategy ID</th>
+          <th>Base</th>
+          <th>$/signal</th>
+          <th>Venues (click pill to toggle)</th>
+          <th>Delete</th>
         </tr>
       </thead>
       <tbody>
         {% for r in routes %}
         <tr>
           <td class="mono">{{ r.strategy_id }}</td>
-          <td>{{ r.exchange }}</td>
-          <td class="mono">{{ r.symbol }}</td>
+          <td class="mono">{{ r.base_asset }}</td>
           <td class="mono">${{ "%.2f"|format(r.quantity_usd) }}</td>
-          <td class="mono">{{ "%.1f"|format(r.leverage) }}x</td>
-          <td>{% if r.enabled %}<span class="ok">●</span>{% else %}<span class="muted">○</span>{% endif %}</td>
+          <td>
+            {% for v in r.venues %}
+              <form method="POST"
+                    action="/admin/strategies/toggle/{{ r.strategy_id }}/{{ v.exchange }}"
+                    class="toggle-form"
+                    onsubmit="return confirm('Toggle {{ v.exchange }} for {{ r.strategy_id }}?');">
+                <button class="venue-pill {{ 'on' if v.enabled else 'off' }}" type="submit"
+                        title="symbol: {{ v.symbol }} · click to {{ 'disable' if v.enabled else 'enable' }}">
+                  {{ v.exchange }}{% if v.enabled %} ●{% else %} ○{% endif %}
+                </button>
+                <input type="password" name="secret" required placeholder="secret"
+                       autocomplete="off">
+              </form>
+            {% endfor %}
+          </td>
           <td>
             <form method="POST" action="/admin/strategies/delete/{{ r.strategy_id }}"
                   class="delete-form"
                   onsubmit="return confirm('Delete strategy {{ r.strategy_id }}? This cannot be undone.');">
-              <input name="secret" type="password" required placeholder="secret"
+              <input type="password" name="secret" required placeholder="secret"
                      autocomplete="off">
               <button type="submit" class="danger">Delete</button>
             </form>
@@ -140,19 +176,18 @@
     {% endif %}
   </div>
 
-  <h2 class="muted">Tips</h2>
+  <h2 class="muted">Notes</h2>
   <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
-    • The <code>Strategy ID</code> must match exactly what your TradingView alert sends
-    in <code>"strategy_id"</code> — case-sensitive.<br>
-    • Hyperliquid symbols are bare tickers: <code>BTC</code>, <code>ETH</code>, <code>SOL</code>.
-    Bybit USDT-perp symbols are <code>BTCUSDT</code>, <code>ETHUSDT</code>, etc.<br>
-    • <code>Enabled = false</code> keeps the config but skips orders — useful for pausing
-    a strategy during regime change without losing the row.<br>
-    • Changes are atomic: file write + router reload happen together. If the next webhook
-    fires within a second of saving, it uses the new config.<br>
-    • If you ever leak the webhook secret, rotate via
-    <code>fly secrets set WEBHOOK_SECRET=$(openssl rand -hex 32)</code>
-    then update your TradingView alert body too.
+    • <strong>One TradingView alert per strategy.</strong> The alert sends a single
+      <code>strategy_id</code>; the middleware fans out to every enabled venue.<br>
+    • <strong>Symbol is computed</strong>, not configured. Add new exchanges by
+      extending <code>EXCHANGE_QUOTE_SUFFIX</code> in <code>app/routing.py</code>.<br>
+    • Per-venue toggles persist instantly and reload the in-memory router.<br>
+    • A strategy with all venues disabled is preserved in the YAML but no orders fire —
+      useful for pausing without losing the row.<br>
+    • Rotate the secret with
+      <code>flyctl secrets set WEBHOOK_SECRET=$(openssl rand -hex 32)</code>
+      then update TradingView's alert body to match.
   </div>
 </body>
 </html>
