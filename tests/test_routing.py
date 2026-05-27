@@ -24,7 +24,9 @@ def test_unknown_returns_none(strategies_yaml):
     assert r.get("UNKNOWN") is None
 
 
-def test_rejects_unsupported_exchange(tmp_path):
+def test_unsupported_exchange_is_skipped_not_fatal(tmp_path, caplog):
+    """Bad entries are logged and skipped — they must not crash the router,
+    so one typo can't bring down the whole app at startup."""
     p = tmp_path / "bad.yaml"
     p.write_text(
         "strategies:\n"
@@ -32,9 +34,14 @@ def test_rejects_unsupported_exchange(tmp_path):
         "    exchange: ftx\n"
         "    symbol: BTC\n"
         "    quantity_usd: 100\n"
+        "  GOOD:\n"
+        "    exchange: hyperliquid\n"
+        "    symbol: BTC\n"
+        "    quantity_usd: 20\n"
     )
-    with pytest.raises(ValueError, match="unsupported exchange"):
-        StrategyRouter(p)
+    r = StrategyRouter(p)
+    assert r.get("BAD") is None
+    assert r.get("GOOD") is not None
 
 
 def test_reload_picks_up_changes(strategies_yaml):

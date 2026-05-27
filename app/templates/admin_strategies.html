@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Strategies — Mochi Position Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px; }
+    h1 { margin: 0 0 6px 0; font-size: 22px; }
+    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em;
+         color: #888; margin: 28px 0 10px 0; }
+    .sub { color: #888; font-size: 13px; margin-bottom: 18px; }
+    .back { color: #60a5fa; text-decoration: none; font-size: 13px; }
+    .card { background: #1a1d24; border: 1px solid #2a2e38;
+            border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #2a2e38;
+             vertical-align: middle; }
+    th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
+    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 16px; }
+    label { display: block; color: #aaa; font-size: 11px; text-transform: uppercase;
+            letter-spacing: 0.03em; margin-bottom: 4px; }
+    input, select { width: 100%; padding: 8px 10px; background: #0f1115;
+                    border: 1px solid #2a2e38; border-radius: 4px; color: #e6e6e6;
+                    box-sizing: border-box; font-size: 14px; font-family: inherit; }
+    input:focus, select:focus { outline: 1px solid #60a5fa; border-color: #60a5fa; }
+    .secret-row { background: #2d2308; border: 1px solid #facc15; border-radius: 6px;
+                  padding: 12px; margin-top: 16px; }
+    .secret-row label { color: #facc15; }
+    .secret-row input { background: #1a1500; border-color: #92400e; }
+    button { padding: 10px 18px; background: #2563eb; color: white; border: none;
+             border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 14px; }
+    button:hover { opacity: 0.9; }
+    button.danger { background: #7f1d1d; padding: 6px 10px; font-size: 11px;
+                    font-weight: 500; }
+    .delete-form { display: flex; gap: 6px; align-items: center; }
+    .delete-form input { width: 110px; padding: 5px 8px; font-size: 12px; }
+    .ok { color: #4ade80; }
+    .muted { color: #666; }
+    code { font-family: "SF Mono", Menlo, monospace; font-size: 12px;
+           background: #0f1115; padding: 2px 6px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <a href="/" class="back">← back to dashboard</a>
+  <h1>Strategy Configuration</h1>
+  <div class="sub">
+    Routes TradingView <code>strategy_id</code> → exchange + symbol + sizing.
+    Changes persist to <code>{{ strategies_file }}</code> and reload the in-memory router immediately.
+    Every write requires the <span style="color:#facc15;">webhook secret</span>.
+  </div>
+
+  <h2>Add or update a strategy</h2>
+  <div class="card">
+    <form method="POST" action="/admin/strategies">
+      <div class="grid">
+        <div>
+          <label>Strategy ID</label>
+          <input name="strategy_id" required pattern="[A-Za-z0-9_\-]+"
+                 placeholder="MR_VOTING_BTC_6H">
+        </div>
+        <div>
+          <label>Exchange</label>
+          <select name="exchange" required>
+            <option value="hyperliquid">hyperliquid</option>
+            <option value="bybit">bybit</option>
+          </select>
+        </div>
+        <div>
+          <label>Symbol</label>
+          <input name="symbol" required placeholder="BTC (HL) / BTCUSDT (Bybit)">
+        </div>
+        <div>
+          <label>Quantity (USD)</label>
+          <input name="quantity_usd" type="number" step="0.01" min="0.01"
+                 required placeholder="20">
+        </div>
+        <div>
+          <label>Leverage</label>
+          <input name="leverage" type="number" step="0.1" min="0.1"
+                 value="2" required>
+        </div>
+        <div>
+          <label>Enabled</label>
+          <select name="enabled">
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </div>
+      </div>
+      <div class="secret-row">
+        <label>Webhook secret (required)</label>
+        <input name="secret" type="password" required
+               placeholder="paste WEBHOOK_SECRET to authorise"
+               autocomplete="off">
+      </div>
+      <button type="submit" style="margin-top: 14px;">Save strategy</button>
+      <span class="muted" style="margin-left: 12px; font-size: 12px;">
+        Existing strategy_id will be overwritten.
+      </span>
+    </form>
+  </div>
+
+  <h2>Active strategies ({{ routes | length }})</h2>
+  <div class="card">
+    {% if routes %}
+    <table>
+      <thead>
+        <tr>
+          <th>Strategy ID</th><th>Exchange</th><th>Symbol</th>
+          <th>$/order</th><th>Leverage</th><th>Enabled</th><th>Delete</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in routes %}
+        <tr>
+          <td class="mono">{{ r.strategy_id }}</td>
+          <td>{{ r.exchange }}</td>
+          <td class="mono">{{ r.symbol }}</td>
+          <td class="mono">${{ "%.2f"|format(r.quantity_usd) }}</td>
+          <td class="mono">{{ "%.1f"|format(r.leverage) }}x</td>
+          <td>{% if r.enabled %}<span class="ok">●</span>{% else %}<span class="muted">○</span>{% endif %}</td>
+          <td>
+            <form method="POST" action="/admin/strategies/delete/{{ r.strategy_id }}"
+                  class="delete-form"
+                  onsubmit="return confirm('Delete strategy {{ r.strategy_id }}? This cannot be undone.');">
+              <input name="secret" type="password" required placeholder="secret"
+                     autocomplete="off">
+              <button type="submit" class="danger">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No strategies configured yet. Use the form above to add one.</p>
+    {% endif %}
+  </div>
+
+  <h2 class="muted">Tips</h2>
+  <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
+    • The <code>Strategy ID</code> must match exactly what your TradingView alert sends
+    in <code>"strategy_id"</code> — case-sensitive.<br>
+    • Hyperliquid symbols are bare tickers: <code>BTC</code>, <code>ETH</code>, <code>SOL</code>.
+    Bybit USDT-perp symbols are <code>BTCUSDT</code>, <code>ETHUSDT</code>, etc.<br>
+    • <code>Enabled = false</code> keeps the config but skips orders — useful for pausing
+    a strategy during regime change without losing the row.<br>
+    • Changes are atomic: file write + router reload happen together. If the next webhook
+    fires within a second of saving, it uses the new config.<br>
+    • If you ever leak the webhook secret, rotate via
+    <code>fly secrets set WEBHOOK_SECRET=$(openssl rand -hex 32)</code>
+    then update your TradingView alert body too.
+  </div>
+</body>
+</html>
