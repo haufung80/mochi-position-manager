@@ -1,0 +1,26 @@
+services:
+  middleware:
+    build: .
+    container_name: tv-middleware
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./strategies.yaml:/app/strategies.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional: Cloudflare Tunnel for free HTTPS without opening ports.
+  # Generate a token at https://one.dash.cloudflare.com/ and set CF_TUNNEL_TOKEN in .env
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: tv-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+  #   depends_on:
+  #     - middleware

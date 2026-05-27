@@ -1,0 +1,15 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+sqlalchemy==2.0.35
+alembic==1.13.3
+pyyaml==6.0.2
+httpx==0.27.2
+tenacity==9.0.0
+pybit==5.8.0
+hyperliquid-python-sdk==0.7.0
+jinja2==3.1.4
+python-multipart==0.0.12
+pytest==8.3.3
+pytest-asyncio==0.24.0

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>TV Middleware</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; }
+    h1 { margin: 0 0 8px 0; font-size: 22px; }
+    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 24px 0 8px 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card { background: #1a1d24; border: 1px solid #2a2e38; border-radius: 8px; padding: 16px; }
+    .stat { font-size: 28px; font-weight: 600; }
+    .stat-label { color: #888; font-size: 12px; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #2a2e38; }
+    th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
+    .ok { color: #4ade80; }
+    .warn { color: #facc15; }
+    .err { color: #f87171; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .pill.success { background: #14532d; color: #4ade80; }
+    .pill.retrying { background: #713f12; color: #facc15; }
+    .pill.dead { background: #7f1d1d; color: #f87171; }
+    .pill.pending { background: #1e3a8a; color: #93c5fd; }
+    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 11px; }
+    a { color: #60a5fa; }
+  </style>
+</head>
+<body>
+  <h1>📡 TradingView Middleware</h1>
+  <div style="color:#888;font-size:13px;">Routing TradingView alerts → Bybit / Hyperliquid with dedup, retry, Telegram alerting.</div>
+
+  <div class="grid" style="margin-top:16px;">
+    <div class="card">
+      <div class="stat-label">Retrying</div>
+      <div class="stat {% if retrying %}warn{% else %}ok{% endif %}">{{ retrying }}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Dead-lettered</div>
+      <div class="stat {% if dead %}err{% else %}ok{% endif %}">{{ dead }}</div>
+    </div>
+    <div class="card">
+      <div class="stat-label">Active strategies</div>
+      <div class="stat">{{ routes|selectattr("enabled")|list|length }} / {{ routes|length }}</div>
+    </div>
+  </div>
+
+  <h2>Net positions</h2>
+  <div class="card">
+    <table>
+      <tr><th>Exchange</th><th>Symbol</th><th>Net qty (base)</th><th>Net $</th><th>Last px</th><th>Updated</th></tr>
+      {% for p in positions %}
+        <tr>
+          <td>{{ p.exchange }}</td><td>{{ p.symbol }}</td>
+          <td class="mono">{{ "%.6f"|format(p.net_qty_base) }}</td>
+          <td class="mono">${{ "%.2f"|format(p.net_qty_usd) }}</td>
+          <td class="mono">{{ p.last_price }}</td>
+          <td class="mono">{{ p.updated_at.strftime("%Y-%m-%d %H:%M:%S") if p.updated_at else "" }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" style="color:#888;">No positions yet.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <h2>Recent orders</h2>
+  <div class="card">
+    <table>
+      <tr><th>When</th><th>Strategy → Exchange</th><th>Side</th><th>Qty $</th><th>Status</th><th>Attempts</th><th>Error</th></tr>
+      {% for o in orders %}
+        <tr>
+          <td class="mono">{{ o.created_at.strftime("%H:%M:%S") }}</td>
+          <td>{{ o.exchange }}/{{ o.symbol }}</td>
+          <td>{{ o.side }}{% if o.reduce_only %} (close){% endif %}</td>
+          <td class="mono">${{ "%.0f"|format(o.qty_usd) }}</td>
+          <td><span class="pill {{ o.status }}">{{ o.status }}</span></td>
+          <td>{{ o.attempts }}</td>
+          <td class="mono err">{{ o.error_message[:80] if o.error_message else "" }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <h2>Recent alerts</h2>
+  <div class="card">
+    <table>
+      <tr><th>When</th><th>Strategy</th><th>Action</th><th>Idempotency key</th><th>Source IP</th></tr>
+      {% for a in alerts %}
+        <tr>
+          <td class="mono">{{ a.received_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+          <td>{{ a.strategy_id }}</td>
+          <td>{{ a.action }}</td>
+          <td class="mono">{{ a.idempotency_key }}</td>
+          <td class="mono">{{ a.source_ip }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <h2>Configured strategies</h2>
+  <div class="card">
+    <table>
+      <tr><th>Strategy ID</th><th>Exchange</th><th>Symbol</th><th>$/order</th><th>Leverage</th><th>Enabled</th></tr>
+      {% for r in routes %}
+        <tr>
+          <td class="mono">{{ r.strategy_id }}</td>
+          <td>{{ r.exchange }}</td><td>{{ r.symbol }}</td>
+          <td class="mono">${{ "%.0f"|format(r.quantity_usd) }}</td>
+          <td>{{ r.leverage }}x</td>
+          <td>{% if r.enabled %}<span class="ok">●</span>{% else %}<span class="err">○</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+  <p style="color:#666;font-size:11px;margin-top:24px;">
+    Endpoints: <a href="/positions">/positions</a> · <a href="/alerts">/alerts</a> ·
+    <a href="/orders">/orders</a> · <a href="/health">/health</a>
+  </p>
+</body>
+</html>

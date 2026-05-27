@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+data/
+*.db
+*.db-journal
+strategies.yaml
+.DS_Store
