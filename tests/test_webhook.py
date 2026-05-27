@@ -21,11 +21,12 @@ def _client(strategies_yaml):
 
 
 def _payload(strategy_id: str, *, action: str = "buy", alert_id: str = "a1",
-             quantity_usd: float | None = 100.0) -> dict:
+             quantity: float | None = 0.001) -> dict:
+    """Build a TV alert body. `quantity` is in BASE-ASSET units (e.g. 0.001 BTC)."""
     body = {"secret": SECRET, "strategy_id": strategy_id, "action": action,
             "alert_id": alert_id}
-    if quantity_usd is not None:
-        body["quantity_usd"] = quantity_usd
+    if quantity is not None:
+        body["quantity"] = quantity
     return body
 
 
@@ -45,16 +46,16 @@ def test_rejects_invalid_action(strategies_yaml, stub_exchange, silent_notifier)
 
 
 def test_rejects_missing_qty_for_buy(strategies_yaml, stub_exchange, silent_notifier):
-    """quantity_usd is required for buy/sell actions."""
+    """quantity is required for buy/sell actions."""
     c = _client(strategies_yaml)
-    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity_usd=None))
+    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=None))
     assert r.status_code == 422
-    assert "quantity_usd" in r.text
+    assert "quantity" in r.text
 
 
 def test_rejects_zero_qty_for_buy(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
-    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity_usd=0))
+    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0))
     assert r.status_code == 422
 
 
@@ -63,10 +64,10 @@ def test_close_action_does_not_require_qty(strategies_yaml, stub_exchange, silen
     # buy first to open a position
     c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="buy",
                                                 alert_id="buy1"))
-    # close without quantity_usd
+    # close without quantity
     r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="close",
                                                     alert_id="close1",
-                                                    quantity_usd=None))
+                                                    quantity=None))
     assert r.status_code == 200, r.text
     with session_scope() as db:
         pos = db.query(Position).one()
@@ -75,7 +76,7 @@ def test_close_action_does_not_require_qty(strategies_yaml, stub_exchange, silen
 
 def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
-    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC"))
+    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.05))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "accepted"
@@ -84,30 +85,38 @@ def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier
     assert body["orders"][0]["symbol"] == "BTCUSDT"
     assert body["orders"][0]["status"] == "success"
 
+    # The stub exchange was called with the alert's `quantity` (0.05)
+    qty_calls = [c[3] for c in stub_exchange.calls if c[0] == "market"]
+    assert qty_calls == [0.05]
+
     with session_scope() as db:
         assert db.query(Alert).count() == 1
         order = db.query(Order).one()
-        assert order.qty_usd == 100.0  # came from the alert payload
+        # order.qty_base after fill = whatever the exchange actually filled
+        # (stub returns its hardcoded filled_qty_base=0.001 from conftest)
+        assert order.qty_base == 0.001
         pos = db.query(Position).one()
         assert (pos.exchange, pos.symbol) == ("bybit", "BTCUSDT")
         assert pos.net_qty_base > 0
 
 
 def test_alert_payload_drives_qty(strategies_yaml, stub_exchange, silent_notifier):
-    """Different alerts can fire different qtys against the same strategy."""
+    """Different alerts can fire different quantities against the same strategy.
+    The stub returns its own filled_qty_base; what we're checking is that the
+    middleware passes through the alert's `quantity` to the exchange adapter."""
     c = _client(strategies_yaml)
     c.post("/webhook/tradingview", json=_payload("TEST_BTC", alert_id="a1",
-                                                quantity_usd=50))
+                                                quantity=0.002))
     c.post("/webhook/tradingview", json=_payload("TEST_BTC", alert_id="a2",
-                                                quantity_usd=250))
-    with session_scope() as db:
-        orders = db.query(Order).order_by(Order.id).all()
-        assert [o.qty_usd for o in orders] == [50.0, 250.0]
+                                                quantity=0.005))
+    # Verify the adapter was called with each alert's quantity
+    qty_calls = [c[3] for c in stub_exchange.calls if c[0] == "market"]
+    assert qty_calls == [0.002, 0.005]
 
 
 def test_fan_out_creates_one_order_per_enabled_venue(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
-    r = c.post("/webhook/tradingview", json=_payload("TEST_MULTI"))
+    r = c.post("/webhook/tradingview", json=_payload("TEST_MULTI", quantity=0.05))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "accepted"
@@ -189,7 +198,6 @@ def test_dashboard_renders_with_strategies(strategies_yaml, stub_exchange,
     """Regression: ensure the dashboard template renders without crashing
     when there ARE strategies. Catches schema drift (e.g. template references
     a field that's been removed from the dataclass)."""
-    # Stub the egress-IP lookup so tests don't hit the network
     from app import network
     monkeypatch.setattr(network, "get_outbound_ip", lambda force_refresh=False: "1.2.3.4")
 
@@ -198,7 +206,6 @@ def test_dashboard_renders_with_strategies(strategies_yaml, stub_exchange,
     assert r.status_code == 200
     assert "TEST_BTC" in r.text
     assert "TEST_MULTI" in r.text
-    # egress IP should render so the user can copy it for Bybit whitelist
     assert "1.2.3.4" in r.text
 
 

@@ -80,8 +80,9 @@
     Each strategy maps to ONE TradingView alert that fans out to multiple exchanges.
     The middleware resolves <code>base_asset</code> to each exchange's native symbol
     (HL: <code>BTC</code>, Bybit: <code>BTCUSDT</code>) automatically.
-    <strong>Position size per signal comes from the TradingView alert payload</strong>
-    (<code>"quantity_usd"</code>), letting your pine-script sizing logic drive it.
+    <strong>Order size per signal comes from the TradingView alert payload</strong>
+    (<code>"quantity"</code>, in base-asset units like 0.001 BTC),
+    letting your pine-script sizing logic drive it.
     <br>
     File: <code>{{ strategies_file }}</code>. Every write requires the
     <span style="color:#facc15;">webhook secret</span>.
@@ -222,14 +223,18 @@
   "secret": "&lt;paste WEBHOOK_SECRET here&gt;",
   "strategy_id": "MR_VOTING_BTC_6H",
   "action": "{{ '{{strategy.order.action}}' }}",
-  "quantity_usd": {{ '{{strategy.order.value}}' }},
+  "quantity": {{ '{{strategy.order.contracts}}' }},
   "alert_id": "{{ '{{strategy.order.id}}-{{timenow}}' }}"
 }</pre>
-    <code>{{ '{{strategy.order.value}}' }}</code> is the dollar notional of the order, computed by
-    your pine script.<br>
-    <code>{{ '{{strategy.order.action}}' }}</code> auto-fills as <code>buy</code> / <code>sell</code>.<br>
+    <code>{{ '{{strategy.order.contracts}}' }}</code> is the order size in
+    <strong>base-asset units</strong> (e.g. 0.001 = 0.001 BTC), as computed by
+    your pine-script sizing logic — NOT a USD amount.<br>
+    <code>{{ '{{strategy.order.action}}' }}</code> auto-fills as
+    <code>buy</code> / <code>sell</code>.<br>
     Per-signal sizing is fully driven by TradingView — change your strategy's
-    sizing logic and the middleware honours it without any config change here.
+    sizing logic and the middleware honours it without any config change here.<br>
+    If your pine script sizes in dollars, convert in pine before sending:
+    <code>qty = cash_size / close</code>.
   </div>
 </body>
 </html>

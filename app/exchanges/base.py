@@ -13,7 +13,7 @@ class Exchange(Protocol):
         self,
         symbol: str,
         side: Side,
-        qty_usd: float,
+        quantity: float,        # in base-asset units (e.g. 0.001 = 0.001 BTC)
         leverage: float = 1.0,
         reduce_only: bool = False,
     ) -> OrderResult: ...

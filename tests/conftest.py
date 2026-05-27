@@ -70,8 +70,8 @@ def stub_exchange(monkeypatch):
             self.next_result = OrderResult(success=True, exchange_order_id="FAKE_1",
                                            filled_qty_base=0.001, avg_price=50000.0)
 
-        def market_order(self, symbol, side, qty_usd, leverage=1.0, reduce_only=False):
-            self.calls.append(("market", symbol, side, qty_usd, leverage, reduce_only))
+        def market_order(self, symbol, side, quantity, leverage=1.0, reduce_only=False):
+            self.calls.append(("market", symbol, side, quantity, leverage, reduce_only))
             return self.next_result
 
         def close_position(self, symbol):

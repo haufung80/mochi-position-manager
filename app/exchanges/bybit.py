@@ -37,6 +37,8 @@ class BybitExchange:
         return self._instrument_cache[symbol]
 
     def _mark_price(self, symbol: str) -> float:
+        """Best-effort mark price for OrderResult metadata. Not in the critical
+        sizing path — the order quantity comes pre-computed from TradingView."""
         resp = self._client.get_tickers(category=CATEGORY, symbol=symbol)
         items = (resp.get("result") or {}).get("list") or []
         if not items:
@@ -44,14 +46,16 @@ class BybitExchange:
         return float(items[0]["lastPrice"])
 
     def _round_qty(self, symbol: str, qty: float) -> str:
+        """Snap a base-asset quantity down to the exchange's lot-size grid.
+        Protects against TradingView sending an unaligned size (which Bybit
+        would otherwise reject)."""
         inst = self._instrument(symbol)
         lot = inst.get("lotSizeFilter", {})
         step = Decimal(str(lot.get("qtyStep", "0.001")))
         min_qty = Decimal(str(lot.get("minOrderQty", "0")))
         q = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
         if q < min_qty:
-            raise RuntimeError(f"Bybit: computed qty {q} below minOrderQty {min_qty} for {symbol}")
-        # Normalize to step's decimal places
+            raise RuntimeError(f"Bybit: quantity {q} below minOrderQty {min_qty} for {symbol}")
         return format(q.normalize(), "f")
 
     def _ensure_leverage(self, symbol: str, leverage: float) -> None:
@@ -63,7 +67,7 @@ class BybitExchange:
                 buyLeverage=str(leverage), sellLeverage=str(leverage),
             )
         except Exception as e:
-            # Bybit returns retCode 110043 when leverage is already set to the same value.
+            # 110043 == leverage already at the same value (no-op)
             msg = str(e)
             if "110043" in msg or "leverage not modified" in msg.lower():
                 return
@@ -75,22 +79,28 @@ class BybitExchange:
         self,
         symbol: str,
         side: Side,
-        qty_usd: float,
+        quantity: float,
         leverage: float = 1.0,
         reduce_only: bool = False,
     ) -> OrderResult:
         try:
-            # Skip authenticated leverage call in dry_run so the app
-            # works end-to-end without real API keys.
             if not self.dry_run:
                 self._ensure_leverage(symbol, leverage)
-            price = self._mark_price(symbol)
-            qty_base = qty_usd / price
-            qty_str = self._round_qty(symbol, qty_base)
+
+            qty_str = self._round_qty(symbol, quantity)
+
+            # Best-effort mark price for OrderResult metadata. Used by the
+            # position tracker to display net_qty_usd. Order placement does
+            # NOT depend on this — if the lookup fails we still submit.
+            try:
+                price = self._mark_price(symbol)
+            except Exception as e:
+                log.warning("Bybit mark price lookup failed (continuing): %s", e)
+                price = 0.0
 
             if self.dry_run:
-                log.info("[DRY_RUN] bybit market %s %s qty=%s usd=%.2f lev=%s",
-                         side, symbol, qty_str, qty_usd, leverage)
+                log.info("[DRY_RUN] bybit market %s %s qty=%s lev=%s",
+                         side, symbol, qty_str, leverage)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
                                    filled_qty_base=float(qty_str), avg_price=price)
 
@@ -124,7 +134,6 @@ class BybitExchange:
         try:
             resp = self._client.get_positions(category=CATEGORY, symbol=symbol)
             positions = (resp.get("result") or {}).get("list") or []
-            # one-way mode: at most one entry; hedge mode: long+short
             for p in positions:
                 size = float(p.get("size", 0) or 0)
                 if size == 0:

@@ -39,6 +39,8 @@ async def retry_loop(router, *, poll_interval_sec: float = 5.0, stop_event: asyn
                     # original fire and retry attempt.
                     # Reconstruct the venue from the order's frozen-at-fire-time
                     # fields, so retries survive strategy reconfigurations.
+                    # Rebuild a venue from the order's frozen-at-fire-time
+                    # fields, so retries survive strategy reconfigurations.
                     venue = VenueRoute(
                         exchange=order.exchange,
                         symbol=order.symbol,
@@ -47,7 +49,7 @@ async def retry_loop(router, *, poll_interval_sec: float = 5.0, stop_event: asyn
                     log.info("retry_worker: replaying order id=%s alert=%s attempt=%s",
                              order.id, alert.id, order.attempts + 1)
                     execute_order(db, alert, venue,
-                                  quantity_usd=order.qty_usd,
+                                  quantity=order.qty_base,
                                   existing_order=order)
         except Exception:
             log.exception("retry_worker loop error")

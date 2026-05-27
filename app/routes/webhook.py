@@ -71,12 +71,13 @@ def _fan_out(db, alert_row: Alert, alert: TradingViewAlert,
     for venue in route.enabled_venues():
         order = execute_order(
             db, alert_row, venue,
-            quantity_usd=alert.quantity_usd or 0.0,
+            quantity=alert.quantity or 0.0,
         )
         summaries.append({
             "exchange": venue.exchange,
             "symbol": venue.symbol,
             "order_id": order.id,
+            "qty_base": order.qty_base,
             "status": order.status,
             "attempts": order.attempts,
         })

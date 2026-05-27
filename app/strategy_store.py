@@ -12,9 +12,9 @@ YAML schema:
           hyperliquid: true      # symbol resolved at runtime via symbol_for()
           bybit: false
 
-Per-signal quantity is NOT stored here — TradingView's alert payload
-carries `quantity_usd` per order, letting your pine-script sizing logic
-drive position size.
+Per-signal order size is NOT stored here — TradingView's alert payload
+carries `quantity` (in base-asset units, e.g. 0.001 BTC), letting your
+pine-script sizing logic drive size per signal.
 """
 from __future__ import annotations
 import logging

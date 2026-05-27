@@ -3,11 +3,14 @@
 Each call to `execute_order` places (or retries) ONE order on ONE venue.
 The webhook fan-out logic calls this once per enabled venue.
 
+Quantity flows from TradingView (base-asset units, e.g. 0.001 BTC) →
+webhook handler → here → exchange adapter. We do NOT convert USD↔base
+anywhere in the path; the pine-script sizing logic owns that decision.
+
 Responsibilities:
-    - Translate (alert + venue + qty) into a concrete exchange call.
     - Drive the Order row through pending -> success / retrying / dead.
     - Mutate the Position ledger on successful fills only.
-    - Emit notifier events for visibility / Telegram alerts.
+    - Emit notifier events.
 """
 from __future__ import annotations
 import logging
@@ -24,9 +27,8 @@ from .schemas import OrderResult
 
 log = logging.getLogger(__name__)
 
-# Middleware does not configure leverage — the exchange's account-level
-# margin mode applies. Adapters still accept this parameter for API
-# compatibility with their underlying SDKs.
+# The middleware does not configure leverage — the exchange's account-level
+# margin mode applies. Adapters still accept this parameter for SDK compat.
 DEFAULT_LEVERAGE: float = 1.0
 
 
@@ -35,12 +37,7 @@ def _utcnow() -> datetime:
 
 
 def _side_from_action(action: str) -> tuple[str, bool, bool]:
-    """Map TV action string -> (side, is_close, reduce_only).
-
-    For close actions, `side` is the side of the closing trade (e.g.
-    `close_long` -> sell). `side=""` means "let the close_position()
-    adapter figure it out" (used for the generic `close` action).
-    """
+    """Map TV action string -> (side, is_close, reduce_only)."""
     a = action.lower()
     match a:
         case "buy":          return "buy",  False, False
@@ -60,7 +57,6 @@ def _next_retry_delay(attempts: int) -> int:
 def _apply_fill_to_position(db: Session, exchange: str, symbol: str,
                             side: str, qty_base: float, price: float,
                             is_close: bool) -> None:
-    """Update the (exchange, symbol) position row to reflect this fill."""
     pos = (
         db.query(Position)
         .filter(Position.exchange == exchange, Position.symbol == symbol)
@@ -83,13 +79,16 @@ def _apply_fill_to_position(db: Session, exchange: str, symbol: str,
 
 
 def _new_order(alert_id: int, venue: VenueRoute, side: str,
-               qty_usd: float, reduce_only: bool) -> Order:
+               quantity: float, reduce_only: bool) -> Order:
+    """Create a pending Order row. qty_base is the source of truth (from TV);
+    qty_usd is left at 0 and filled in once we know the fill price."""
     return Order(
         alert_id=alert_id,
         exchange=venue.exchange,
         symbol=venue.symbol,
-        side=side or "buy",  # close actions store a placeholder
-        qty_usd=qty_usd,
+        side=side or "buy",
+        qty_base=quantity,
+        qty_usd=0.0,
         reduce_only=reduce_only,
         leverage=DEFAULT_LEVERAGE,
         status="pending",
@@ -97,7 +96,7 @@ def _new_order(alert_id: int, venue: VenueRoute, side: str,
     )
 
 
-def _call_exchange(venue: VenueRoute, side: str, qty_usd: float,
+def _call_exchange(venue: VenueRoute, side: str, quantity: float,
                    is_close: bool, reduce_only: bool) -> OrderResult:
     exchange = get_registry().get(venue.exchange)
     if is_close:
@@ -105,7 +104,7 @@ def _call_exchange(venue: VenueRoute, side: str, qty_usd: float,
     return exchange.market_order(
         symbol=venue.symbol,
         side=side,  # type: ignore[arg-type]
-        qty_usd=qty_usd,
+        quantity=quantity,
         leverage=DEFAULT_LEVERAGE,
         reduce_only=reduce_only,
     )
@@ -113,22 +112,25 @@ def _call_exchange(venue: VenueRoute, side: str, qty_usd: float,
 
 def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
                 side: str, is_close: bool, result: OrderResult) -> None:
+    filled_qty = result.filled_qty_base or order.qty_base
     order.status = "success"
     order.exchange_order_id = result.exchange_order_id
-    order.qty_base = result.filled_qty_base
+    order.qty_base = filled_qty
+    order.qty_usd = filled_qty * result.avg_price  # derived for dashboard
     order.error_message = ""
     order.next_retry_at = None
-    if is_close or (result.avg_price > 0 and result.filled_qty_base > 0):
+    if is_close or (result.avg_price > 0 and filled_qty > 0):
         _apply_fill_to_position(
             db, venue.exchange, venue.symbol,
-            side or "buy", result.filled_qty_base, result.avg_price, is_close,
+            side or "buy", filled_qty, result.avg_price, is_close,
         )
     get_notifier().order_succeeded(
         alert.strategy_id, venue.exchange, venue.symbol,
-        side or "close", order.qty_usd, result.avg_price,
+        side or "close", filled_qty, result.avg_price,
     )
-    log.info("Order success alert=%s strategy=%s ex=%s sym=%s qty=$%.2f",
-             alert.id, alert.strategy_id, venue.exchange, venue.symbol, order.qty_usd)
+    log.info("Order success alert=%s strategy=%s ex=%s sym=%s qty=%s @ $%.2f",
+             alert.id, alert.strategy_id, venue.exchange, venue.symbol,
+             filled_qty, result.avg_price)
 
 
 def _on_failure(order: Order, alert: Alert, venue: VenueRoute,
@@ -142,7 +144,7 @@ def _on_failure(order: Order, alert: Alert, venue: VenueRoute,
         order.next_retry_at = None
         notifier.order_dead(
             alert.strategy_id, venue.exchange, venue.symbol,
-            side or "close", order.qty_usd, order.attempts, result.error_message,
+            side or "close", order.qty_base, order.attempts, result.error_message,
         )
         log.error("Order DEAD alert=%s strategy=%s ex=%s err=%s",
                   alert.id, alert.strategy_id, venue.exchange, result.error_message)
@@ -153,14 +155,14 @@ def _on_failure(order: Order, alert: Alert, venue: VenueRoute,
     order.next_retry_at = _utcnow() + timedelta(seconds=delay)
     notifier.order_failed(
         alert.strategy_id, venue.exchange, venue.symbol,
-        side or "close", order.qty_usd, order.attempts, result.error_message,
+        side or "close", order.qty_base, order.attempts, result.error_message,
     )
     log.warning("Order retrying in %ss alert=%s ex=%s err=%s",
                 delay, alert.id, venue.exchange, result.error_message)
 
 
 def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
-                  quantity_usd: float,
+                  quantity: float,
                   existing_order: Order | None = None) -> Order:
     """Place (or retry) an order on a single venue.
 
@@ -168,17 +170,15 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
         db: SQLAlchemy session.
         alert: the Alert row this order is acting on.
         venue: resolved per-exchange route.
-        quantity_usd: notional size for THIS order (from TV alert payload).
-            For close actions this is informational only — the exchange
-            closes the full position.
-        existing_order: pass when retrying an already-persisted Order; the
-            function increments its attempt counter rather than inserting
-            a new row.
+        quantity: order size in BASE-ASSET units (e.g. 0.001 = 0.001 BTC).
+            For close actions this is informational only — the exchange closes
+            the full position.
+        existing_order: pass when retrying an already-persisted Order.
     """
     side, is_close, reduce_only = _side_from_action(alert.action)
 
     order = existing_order or _new_order(
-        alert.id, venue, side, quantity_usd, reduce_only,
+        alert.id, venue, side, quantity, reduce_only,
     )
     if existing_order is None:
         db.add(order)
@@ -188,7 +188,7 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
     order.updated_at = _utcnow()
     db.flush()
 
-    result = _call_exchange(venue, side, quantity_usd, is_close, reduce_only)
+    result = _call_exchange(venue, side, quantity, is_close, reduce_only)
     if result.success:
         _on_success(db, order, alert, venue, side, is_close, result)
     else:

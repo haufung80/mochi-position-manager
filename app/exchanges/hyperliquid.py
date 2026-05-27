@@ -31,9 +31,9 @@ class HyperliquidExchange:
         if private_key:
             wallet = Account.from_key(private_key)
             account = account_address or wallet.address
-            # When vault_address is set, the HL SDK signs every order as
-            # "execute on behalf of vault X". The agent wallet (private_key)
-            # must be approved by the vault leader for this to work.
+            # When vault_address is set, the SDK signs orders as "execute on
+            # behalf of vault X". The agent (private_key) must be approved by
+            # the vault leader for this to work.
             kwargs: dict = {"account_address": account}
             if self._vault_address:
                 kwargs["vault_address"] = self._vault_address
@@ -50,7 +50,7 @@ class HyperliquidExchange:
         return float(all_mids[symbol])
 
     def _round_size(self, symbol: str, qty: float) -> float:
-        # HL exposes szDecimals per asset in meta()
+        """Snap a base-asset quantity to HL's per-asset szDecimals grid."""
         meta = self._info.meta()
         for asset in meta["universe"]:
             if asset["name"] == symbol:
@@ -62,18 +62,30 @@ class HyperliquidExchange:
         self,
         symbol: str,
         side: Side,
-        qty_usd: float,
+        quantity: float,
         leverage: float = 1.0,
         reduce_only: bool = False,
     ) -> OrderResult:
         try:
-            price = self._mid_price(symbol)
-            qty_base = self._round_size(symbol, qty_usd / price)
+            qty_base = self._round_size(symbol, quantity)
             if qty_base <= 0:
-                return OrderResult(success=False, error_message=f"qty rounded to 0 (qty_usd={qty_usd}, px={price})")
+                return OrderResult(
+                    success=False,
+                    error_message=f"quantity rounded to 0 (requested={quantity}, symbol={symbol})",
+                )
+
+            # Best-effort mid price for OrderResult metadata. Used by the
+            # position tracker to display net_qty_usd. Order placement does
+            # NOT depend on this — if the lookup fails we still submit.
+            try:
+                price = self._mid_price(symbol)
+            except Exception as e:
+                log.warning("HL mid price lookup failed (continuing): %s", e)
+                price = 0.0
 
             if self.dry_run or self._exchange is None:
-                log.info("[DRY_RUN] hyperliquid market %s %s qty=%s usd=%.2f", side, symbol, qty_base, qty_usd)
+                log.info("[DRY_RUN] hyperliquid market %s %s qty=%s",
+                         side, symbol, qty_base)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
                                    filled_qty_base=qty_base, avg_price=price)
 

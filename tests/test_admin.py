@@ -45,6 +45,7 @@ def test_page_renders_dropdown_with_supported_assets(client):
     assert 'name="venue_hyperliquid"' in r.text
     assert 'name="venue_bybit"' in r.text
     # qty input REMOVED — driven by TV alert now
+    assert 'name="quantity"' not in r.text
     assert 'name="quantity_usd"' not in r.text
 
 
