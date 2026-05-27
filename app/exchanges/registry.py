@@ -33,6 +33,7 @@ class ExchangeRegistry:
             ex = HyperliquidExchange(
                 private_key=settings.hyperliquid_private_key,
                 account_address=settings.hyperliquid_account_address,
+                vault_address=settings.hyperliquid_vault_address,
                 testnet=settings.hyperliquid_testnet,
                 dry_run=settings.dry_run,
             )

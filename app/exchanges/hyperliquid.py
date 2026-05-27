@@ -20,16 +20,24 @@ class HyperliquidExchange:
         self,
         private_key: str,
         account_address: str = "",
+        vault_address: str = "",
         testnet: bool = False,
         dry_run: bool = False,
     ):
         self.dry_run = dry_run
+        self._vault_address = vault_address or ""
         base_url = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
         self._info = Info(base_url, skip_ws=True)
         if private_key:
             wallet = Account.from_key(private_key)
             account = account_address or wallet.address
-            self._exchange = HLExchange(wallet, base_url, account_address=account)
+            # When vault_address is set, the HL SDK signs every order as
+            # "execute on behalf of vault X". The agent wallet (private_key)
+            # must be approved by the vault leader for this to work.
+            kwargs: dict = {"account_address": account}
+            if self._vault_address:
+                kwargs["vault_address"] = self._vault_address
+            self._exchange = HLExchange(wallet, base_url, **kwargs)
             self._account_address = account
         else:
             self._exchange = None

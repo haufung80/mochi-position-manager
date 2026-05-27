@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     hyperliquid_private_key: str = ""
     hyperliquid_account_address: str = ""
+    hyperliquid_vault_address: str = ""   # if set, orders trade on behalf of this vault
     hyperliquid_testnet: bool = False
 
     retry_max_attempts: int = 4
