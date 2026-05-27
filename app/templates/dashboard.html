@@ -105,15 +105,24 @@
   <h2>Configured strategies</h2>
   <div class="card">
     <table>
-      <tr><th>Strategy ID</th><th>Exchange</th><th>Symbol</th><th>$/order</th><th>Leverage</th><th>Enabled</th></tr>
+      <tr><th>Strategy ID</th><th>Base asset</th><th>Venues</th></tr>
       {% for r in routes %}
         <tr>
           <td class="mono">{{ r.strategy_id }}</td>
-          <td>{{ r.exchange }}</td><td>{{ r.symbol }}</td>
-          <td class="mono">${{ "%.0f"|format(r.quantity_usd) }}</td>
-          <td>{{ r.leverage }}x</td>
-          <td>{% if r.enabled %}<span class="ok">●</span>{% else %}<span class="err">○</span>{% endif %}</td>
+          <td class="mono">{{ r.base_asset }}</td>
+          <td>
+            {% for v in r.venues %}
+              <span class="pill {{ 'success' if v.enabled else 'pending' }}"
+                    title="symbol: {{ v.symbol }}">
+                {{ v.exchange }}{% if v.enabled %} ●{% else %} ○{% endif %}
+              </span>
+            {% endfor %}
+          </td>
         </tr>
+      {% else %}
+        <tr><td colspan="3" style="color:#888;">
+          No strategies configured. <a href="/admin/strategies">Add one →</a>
+        </td></tr>
       {% endfor %}
     </table>
   </div>

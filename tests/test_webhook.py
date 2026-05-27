@@ -182,3 +182,15 @@ def test_health_endpoint(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
     r = c.get("/health")
     assert r.status_code == 200 and r.json() == {"status": "ok"}
+
+
+def test_dashboard_renders_with_strategies(strategies_yaml, stub_exchange, silent_notifier):
+    """Regression: ensure the dashboard template renders without crashing
+    when there ARE strategies. Catches schema drift (e.g. template references
+    a field that's been removed from the dataclass)."""
+    c = _client(strategies_yaml)
+    r = c.get("/")
+    assert r.status_code == 200
+    # active strategies from fixture should render their names
+    assert "TEST_BTC" in r.text
+    assert "TEST_MULTI" in r.text

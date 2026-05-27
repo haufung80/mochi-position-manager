@@ -34,6 +34,14 @@
       background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
       padding-right: 32px; }
     input:focus, select:focus { outline: 1px solid #60a5fa; border-color: #60a5fa; }
+    /* Visible feedback when a required field is empty after submit attempt */
+    form.was-validated input:invalid,
+    form.was-validated select:invalid { border-color: #ef4444;
+                                          box-shadow: 0 0 0 1px #ef4444; }
+    .form-error { display: none; background: #7f1d1d; color: #fecaca;
+                  padding: 8px 12px; border-radius: 4px; margin-bottom: 12px;
+                  font-size: 13px; }
+    .form-error.show { display: block; }
     .venues-block { background: #161922; padding: 10px 12px; border-radius: 6px;
                     border: 1px solid #2a2e38; }
     .venue-row { display: flex; align-items: center; gap: 10px; padding: 4px 0;
@@ -81,7 +89,8 @@
 
   <h2>Add or update a strategy</h2>
   <div class="card">
-    <form method="POST" action="/admin/strategies">
+    <form method="POST" action="/admin/strategies" id="strategy-form">
+      <div class="form-error" id="form-error"></div>
       <div class="grid">
         <div>
           <label>Strategy ID</label>
@@ -91,9 +100,8 @@
         <div>
           <label>Base asset</label>
           <select name="base_asset" required>
-            <option value="" disabled selected>— select asset —</option>
             {% for asset in supported_base_assets %}
-              <option value="{{ asset }}">{{ asset }}</option>
+              <option value="{{ asset }}"{% if loop.first %} selected{% endif %}>{{ asset }}</option>
             {% endfor %}
           </select>
         </div>
@@ -128,6 +136,33 @@
       </span>
     </form>
   </div>
+
+  <script>
+    // Show explicit inline errors instead of relying on dim browser tooltips.
+    (function() {
+      const form = document.getElementById('strategy-form');
+      const errBox = document.getElementById('form-error');
+      if (!form) return;
+      form.addEventListener('submit', function(e) {
+        form.classList.add('was-validated');
+        const sid = form.elements.strategy_id.value.trim();
+        const venues = ['venue_hyperliquid', 'venue_bybit'].some(n =>
+          form.querySelector(`input[name="${n}"]`)?.checked
+        );
+        const secret = form.elements.secret.value;
+        const errors = [];
+        if (!sid) errors.push('Strategy ID is required.');
+        if (!venues) errors.push('Pick at least one venue (hyperliquid / bybit).');
+        if (!secret) errors.push('Webhook secret is required to authorise the change.');
+        if (errors.length) {
+          e.preventDefault();
+          errBox.textContent = errors.join(' ');
+          errBox.classList.add('show');
+          errBox.scrollIntoView({behavior: 'smooth', block: 'center'});
+        }
+      });
+    })();
+  </script>
 
   <h2>Active strategies ({{ routes | length }})</h2>
   <div class="card">
