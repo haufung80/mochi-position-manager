@@ -156,3 +156,16 @@ def test_reload_picks_up_changes(strategies_yaml):
     r.reload()
     assert r.get("TEST_BTC").base_asset == "SOL"
     assert r.get("TEST_BTC").venues[0].symbol == "SOLUSDT"
+
+
+def test_hyperliquid_adapter_imports_cleanly():
+    """Regression: ensure the HL adapter + its eth_account dep chain import
+    without errors. Catches parsimonious/inspect.getargspec issues on
+    Python 3.11+ that don't surface until first use in production
+    (since the import is lazy inside the registry)."""
+    from app.exchanges.hyperliquid import HyperliquidExchange  # noqa: F401
+
+
+def test_bybit_adapter_imports_cleanly():
+    """Same regression guard for the Bybit adapter."""
+    from app.exchanges.bybit import BybitExchange  # noqa: F401

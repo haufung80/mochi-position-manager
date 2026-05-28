@@ -8,7 +8,9 @@ pyyaml==6.0.2
 httpx==0.27.2
 tenacity==9.0.0
 pybit==5.8.0
-hyperliquid-python-sdk==0.7.0
+hyperliquid-python-sdk==0.23.0   # ≥ 0.10 pulls in modern eth-account (0.13+),
+                                  # which dropped the parsimonious dep that
+                                  # broke on Python 3.11 (inspect.getargspec).
 jinja2==3.1.4
 python-multipart==0.0.12
 pytest==8.3.3
