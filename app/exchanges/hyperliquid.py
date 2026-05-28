@@ -96,13 +96,16 @@ class HyperliquidExchange:
                     log.warning("Hyperliquid update_leverage failed (continuing): %s", e)
 
             is_buy = side == "buy"
+            # NOTE: HL SDK 0.23+ removed the `reduce_only` kwarg from
+            # market_open. For our use case it's a no-op anyway — entries
+            # are never reduce_only=True. Closes go through close_position()
+            # below, which calls market_close() (a separate SDK method).
             resp = self._exchange.market_open(
                 name=symbol,
                 is_buy=is_buy,
                 sz=qty_base,
                 px=None,
                 slippage=0.01,
-                reduce_only=reduce_only,
             )
             if resp.get("status") != "ok":
                 return OrderResult(success=False, error_message=str(resp), raw=resp)

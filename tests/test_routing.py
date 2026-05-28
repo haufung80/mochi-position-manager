@@ -169,3 +169,19 @@ def test_hyperliquid_adapter_imports_cleanly():
 def test_bybit_adapter_imports_cleanly():
     """Same regression guard for the Bybit adapter."""
     from app.exchanges.bybit import BybitExchange  # noqa: F401
+
+
+def test_hl_market_open_signature_matches_our_call():
+    """Regression: ensure the HL SDK's market_open() still accepts the
+    kwargs we pass. The SDK has made breaking changes here before — e.g.
+    0.23 dropped `reduce_only` — and those crashes don't surface until a
+    real webhook is routed to HL in production."""
+    import inspect
+    from hyperliquid.exchange import Exchange as HLExchange
+    params = set(inspect.signature(HLExchange.market_open).parameters)
+    expected = {"name", "is_buy", "sz", "px", "slippage"}
+    missing = expected - params
+    assert not missing, (
+        f"HL SDK's market_open no longer accepts {missing}; "
+        f"update app/exchanges/hyperliquid.py to match new signature."
+    )
