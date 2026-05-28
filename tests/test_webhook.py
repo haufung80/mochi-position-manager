@@ -45,30 +45,37 @@ def test_rejects_invalid_action(strategies_yaml, stub_exchange, silent_notifier)
     assert r.status_code == 422
 
 
-def test_rejects_missing_qty_for_buy(strategies_yaml, stub_exchange, silent_notifier):
-    """quantity is required for buy/sell actions."""
+def test_rejects_missing_qty(strategies_yaml, stub_exchange, silent_notifier):
+    """quantity is required on every alert."""
     c = _client(strategies_yaml)
     r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=None))
     assert r.status_code == 422
     assert "quantity" in r.text
 
 
-def test_rejects_zero_qty_for_buy(strategies_yaml, stub_exchange, silent_notifier):
+def test_rejects_zero_qty(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
     r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0))
     assert r.status_code == 422
 
 
-def test_close_action_does_not_require_qty(strategies_yaml, stub_exchange, silent_notifier):
+def test_rejects_close_action(strategies_yaml, stub_exchange, silent_notifier):
+    """TradingView only sends buy/sell — close* actions should be rejected
+    at the schema layer so we don't silently process malformed payloads."""
     c = _client(strategies_yaml)
-    # buy first to open a position
+    body = _payload("TEST_BTC", action="close")
+    r = c.post("/webhook/tradingview", json=body)
+    assert r.status_code == 422
+
+
+def test_sell_against_long_closes_it(strategies_yaml, stub_exchange, silent_notifier):
+    """A sell after a buy of equal size returns the position to flat
+    (one-way mode behavior). Replaces the old explicit close action path."""
+    c = _client(strategies_yaml)
     c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="buy",
                                                 alert_id="buy1"))
-    # close without quantity
-    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="close",
-                                                    alert_id="close1",
-                                                    quantity=None))
-    assert r.status_code == 200, r.text
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="sell",
+                                                alert_id="sell1"))
     with session_scope() as db:
         pos = db.query(Position).one()
         assert pos.net_qty_base == 0.0
@@ -142,17 +149,6 @@ def test_duplicate_alert_does_not_create_extra_orders(strategies_yaml, stub_exch
     with session_scope() as db:
         assert db.query(Alert).count() == 1
         assert db.query(Order).count() == 2  # first alert's 2 venues only
-
-
-def test_sell_decrements_position(strategies_yaml, stub_exchange, silent_notifier):
-    c = _client(strategies_yaml)
-    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="buy",
-                                                alert_id="b1"))
-    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="sell",
-                                                alert_id="s1"))
-    with session_scope() as db:
-        pos = db.query(Position).one()
-        assert pos.net_qty_base == 0.0
 
 
 def test_unknown_strategy_logs_but_skips(strategies_yaml, stub_exchange, silent_notifier):

@@ -2,10 +2,10 @@
 from __future__ import annotations
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
-Action = Literal["buy", "sell", "close", "close_long", "close_short"]
+Action = Literal["buy", "sell"]
 
 
 class TradingViewAlert(BaseModel):
@@ -21,10 +21,15 @@ class TradingViewAlert(BaseModel):
           "alert_id": "{{strategy.order.id}}-{{timenow}}"
         }
 
+    Actions: TradingView's `{{strategy.order.action}}` always resolves to
+    either `buy` or `sell` — entries AND closes both surface as one of these
+    two. The middleware places a market order in the given direction; on
+    one-way-mode perps (Bybit/HL defaults) a sell against an open long
+    naturally closes it, and vice versa.
+
     `quantity` is the order size in **base-asset units** (e.g. 0.001 = 0.001 BTC),
-    as computed by your pine-script sizing logic and surfaced via
-    `{{strategy.order.contracts}}`. Required for `buy` and `sell`; ignored on
-    close actions (which exit the whole position).
+    surfaced via `{{strategy.order.contracts}}` in TradingView. Required
+    (> 0) on every alert.
 
     Note: this is NOT a USD amount. If your pine script sizes orders in dollars,
     convert to base in pine before sending (e.g. `qty := cash_size / close`).
@@ -32,7 +37,7 @@ class TradingViewAlert(BaseModel):
     secret: str
     strategy_id: str = Field(..., min_length=1, max_length=128)
     action: Action
-    quantity: Optional[float] = Field(default=None, gt=0)
+    quantity: float = Field(..., gt=0)
     alert_id: Optional[str] = None
     bar_time: Optional[str] = None
     price: Optional[float] = None
@@ -41,17 +46,6 @@ class TradingViewAlert(BaseModel):
     @classmethod
     def _strip_id(cls, v: str) -> str:
         return v.strip()
-
-    @model_validator(mode="after")
-    def _qty_required_for_entries(self) -> "TradingViewAlert":
-        if self.action in ("buy", "sell"):
-            if self.quantity is None or self.quantity <= 0:
-                raise ValueError(
-                    "quantity > 0 is required for buy/sell actions "
-                    "(use {{strategy.order.contracts}} in your TV alert — "
-                    "it's the order size in BASE-ASSET units, not USD)"
-                )
-        return self
 
 
 class OrderResult(BaseModel):

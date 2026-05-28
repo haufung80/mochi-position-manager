@@ -64,7 +64,6 @@ class HyperliquidExchange:
         side: Side,
         quantity: float,
         leverage: float = 1.0,
-        reduce_only: bool = False,
     ) -> OrderResult:
         try:
             qty_base = self._round_size(symbol, quantity)

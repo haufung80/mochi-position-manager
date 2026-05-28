@@ -81,7 +81,6 @@ class BybitExchange:
         side: Side,
         quantity: float,
         leverage: float = 1.0,
-        reduce_only: bool = False,
     ) -> OrderResult:
         try:
             if not self.dry_run:
@@ -110,7 +109,6 @@ class BybitExchange:
                 side="Buy" if side == "buy" else "Sell",
                 orderType="Market",
                 qty=qty_str,
-                reduceOnly=reduce_only,
             )
             if resp.get("retCode") != 0:
                 return OrderResult(

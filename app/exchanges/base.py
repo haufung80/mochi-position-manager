@@ -15,7 +15,10 @@ class Exchange(Protocol):
         side: Side,
         quantity: float,        # in base-asset units (e.g. 0.001 = 0.001 BTC)
         leverage: float = 1.0,
-        reduce_only: bool = False,
     ) -> OrderResult: ...
 
-    def close_position(self, symbol: str) -> OrderResult: ...
+    def close_position(self, symbol: str) -> OrderResult:
+        """Emergency escape hatch — close full position via reduceOnly.
+        NOT used by the regular webhook path (TradingView only sends
+        buy/sell). Reserved for future admin endpoints."""
+        ...
