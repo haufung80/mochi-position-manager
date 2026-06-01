@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -51,16 +52,29 @@ def _next_retry_delay(attempts: int) -> int:
 
 def _bump_position(db: Session, model, keys: dict,
                    signed_delta: float, price: float) -> None:
-    """Find-or-create a ledger row and apply a signed fill delta."""
-    row = db.query(model).filter_by(**keys).one_or_none()
-    if row is None:
-        row = model(**keys)
-        db.add(row)
-        db.flush()
-    row.net_qty_base += signed_delta
-    row.net_qty_usd = row.net_qty_base * price
-    row.last_price = price
-    row.updated_at = _utcnow()
+    """Atomic insert-or-increment of a ledger row.
+
+    Uses a single SQLite UPSERT so concurrent fills on the same row (e.g.
+    several strategies trading the same symbol at the same bar) can't lose each
+    other's increment — the read-modify-write would otherwise race.
+    """
+    now = _utcnow()
+    col = model.__table__.c
+    stmt = (
+        sqlite_insert(model)
+        .values(**keys, net_qty_base=signed_delta, net_qty_usd=signed_delta * price,
+                last_price=price, updated_at=now)
+        .on_conflict_do_update(
+            index_elements=list(keys),
+            set_={
+                "net_qty_base": col.net_qty_base + signed_delta,
+                "net_qty_usd": (col.net_qty_base + signed_delta) * price,
+                "last_price": price,
+                "updated_at": now,
+            },
+        )
+    )
+    db.execute(stmt)
 
 
 def _apply_fill_to_position(db: Session, strategy_id: str, exchange: str, symbol: str,

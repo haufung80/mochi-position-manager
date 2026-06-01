@@ -1,6 +1,6 @@
 import os
 from contextlib import contextmanager
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Session
 
 from .config import get_settings
@@ -23,6 +23,19 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {},
     future=True,
 )
+
+if _settings.database_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # WAL keeps reads (dashboard, retry-worker scans) from blocking the
+        # writer; busy_timeout makes concurrent writers WAIT for a lock instead
+        # of erroring "database is locked". Both matter now that order placement
+        # and the retry worker write SQLite from multiple threads.
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=20000")
+        cur.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 

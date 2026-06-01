@@ -293,6 +293,32 @@ def test_qty_formatter_strips_trailing_zeros():
     assert _fmt_qty(0.002) == "0.002"
 
 
+def test_position_increments_accumulate_via_upsert():
+    """Atomic insert-or-increment: the per-symbol Position sums across
+    strategies; each StrategyPosition tracks only its own fills."""
+    from app.executor import _apply_fill_to_position
+    from app.models import Position, StrategyPosition
+
+    with session_scope() as db:
+        _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 0.01, 60000.0)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 0.02, 61000.0)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "S2", "bybit", "BTCUSDT", "sell", 0.005, 62000.0)
+
+    with session_scope() as db:
+        pos = db.query(Position).filter_by(exchange="bybit", symbol="BTCUSDT").one()
+        assert abs(pos.net_qty_base - 0.025) < 1e-9        # 0.01 + 0.02 - 0.005
+        assert pos.last_price == 62000.0
+        assert abs(pos.net_qty_usd - 0.025 * 62000.0) < 1e-3
+        s1 = db.query(StrategyPosition).filter_by(
+            strategy_id="S1", exchange="bybit", symbol="BTCUSDT").one()
+        assert abs(s1.net_qty_base - 0.03) < 1e-9          # S1 only
+        s2 = db.query(StrategyPosition).filter_by(
+            strategy_id="S2", exchange="bybit", symbol="BTCUSDT").one()
+        assert abs(s2.net_qty_base + 0.005) < 1e-9         # S2 only (short)
+
+
 def test_configured_strategy_shows_flat_without_fills(strategies_yaml, stub_exchange, silent_notifier):
     """Every configured strategy appears in the per-strategy view — flat if it
     has no fills yet — so a freshly added strategy shows up immediately."""
