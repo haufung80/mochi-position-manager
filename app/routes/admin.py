@@ -133,3 +133,38 @@ def reload_strategies(request: Request, secret: str = Form(...)):
     _require_secret(secret)
     _reload_router(request)
     return {"status": "ok", "count": len(request.app.state.strategy_router.all())}
+
+
+@router.post("/strategies/sync-positions", response_class=HTMLResponse)
+def sync_positions(request: Request, secret: str = Form(...)):
+    """Re-baseline the per-strategy ledger to live exchange positions, clearing
+    stale residue. Reads live state per configured strategy/venue."""
+    _require_secret(secret)
+    from .. import reconcile
+    result = reconcile.sync_strategy_positions(request.app.state.strategy_router)
+
+    synced = "".join(
+        f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: "
+        f"{s['net_qty_base']:+.6f} (${s['net_qty_usd']:+.2f})</li>"
+        for s in result["synced"]
+    ) or "<li>(none)</li>"
+    skipped = "".join(
+        f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: {s['reason']}</li>"
+        for s in result["skipped"]
+    )
+    skip_block = (
+        f'<h3 style="color:#e0a030">Skipped {len(result["skipped"])}</h3><ul>{skipped}</ul>'
+        if skipped else ""
+    )
+    log.info("admin: sync-positions -> %d synced, %d skipped",
+             len(result["synced"]), len(result["skipped"]))
+    return HTMLResponse(
+        '<!doctype html><html><head><meta charset="utf-8"><title>Sync result</title></head>'
+        '<body style="font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;'
+        'padding:28px;max-width:760px;margin:auto">'
+        f'<h2>Synced {len(result["synced"])} position(s) to exchange</h2><ul>{synced}</ul>'
+        f'{skip_block}'
+        '<p style="margin-top:20px"><a href="/admin/strategies" style="color:#6cf">'
+        '&larr; strategies</a> &nbsp;&middot;&nbsp; '
+        '<a href="/" style="color:#6cf">dashboard &rarr;</a></p></body></html>'
+    )

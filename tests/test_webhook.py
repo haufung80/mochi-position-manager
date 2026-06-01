@@ -86,11 +86,11 @@ def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier
     r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.05))
     assert r.status_code == 200, r.text
     body = r.json()
+    # Response acks fast with the dispatched venues; order RESULTS land in the
+    # DB via the background task (which the TestClient runs before returning).
     assert body["status"] == "accepted"
-    assert len(body["orders"]) == 1
-    assert body["orders"][0]["exchange"] == "bybit"
-    assert body["orders"][0]["symbol"] == "BTCUSDT"
-    assert body["orders"][0]["status"] == "success"
+    assert body["venues"] == ["bybit"]
+    assert "orders" not in body  # results are async now, not echoed in the response
 
     # The stub exchange was called with the alert's `quantity` (0.05)
     qty_calls = [c[3] for c in stub_exchange.calls if c[0] == "market"]
@@ -99,6 +99,8 @@ def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier
     with session_scope() as db:
         assert db.query(Alert).count() == 1
         order = db.query(Order).one()
+        assert (order.exchange, order.symbol) == ("bybit", "BTCUSDT")
+        assert order.status == "success"
         # order.qty_base after fill = whatever the exchange actually filled
         # (stub returns its hardcoded filled_qty_base=0.001 from conftest)
         assert order.qty_base == 0.001
@@ -127,14 +129,14 @@ def test_fan_out_creates_one_order_per_enabled_venue(strategies_yaml, stub_excha
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "accepted"
-    assert len(body["orders"]) == 2
-    by_ex = {o["exchange"]: o for o in body["orders"]}
-    assert by_ex["bybit"]["symbol"] == "ETHUSDT"
-    assert by_ex["hyperliquid"]["symbol"] == "ETH"
+    assert set(body["venues"]) == {"bybit", "hyperliquid"}
 
     with session_scope() as db:
         assert db.query(Alert).count() == 1
         assert db.query(Order).count() == 2
+        orders = {o.exchange: o for o in db.query(Order).all()}
+        assert orders["bybit"].symbol == "ETHUSDT"
+        assert orders["hyperliquid"].symbol == "ETH"
         positions = {(p.exchange, p.symbol): p for p in db.query(Position).all()}
         assert ("bybit", "ETHUSDT") in positions
         assert ("hyperliquid", "ETH") in positions
@@ -174,8 +176,9 @@ def test_failed_order_marks_retrying(strategies_yaml, stub_exchange, silent_noti
     stub_exchange.next_result = OrderResult(success=False, error_message="exchange down")
     c = _client(strategies_yaml)
     r = c.post("/webhook/tradingview", json=_payload("TEST_BTC"))
-    body = r.json()
-    assert body["orders"][0]["status"] == "retrying"
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "accepted"
+    # The order failed in the background task and was marked for retry.
     with session_scope() as db:
         order = db.query(Order).one()
         assert order.status == "retrying"
@@ -222,3 +225,73 @@ def test_egress_ip_endpoint_handles_lookup_failure(strategies_yaml, stub_exchang
     r = c.get("/network/egress-ip")
     assert r.status_code == 200
     assert r.json() == {"egress_ip": None}
+
+
+def test_strategy_positions_tracked(strategies_yaml, stub_exchange, silent_notifier):
+    """Per-strategy net is derived from successful orders, with a per-venue
+    breakdown + a strategy total. TEST_MULTI fans to bybit + hyperliquid; the
+    stub fills 0.001 base @ 50000 per venue (from conftest)."""
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_MULTI", quantity=0.05))
+    r = c.get("/strategy-positions")
+    assert r.status_code == 200
+    by_id = {s["strategy_id"]: s for s in r.json()}
+    assert "TEST_MULTI" in by_id
+    s = by_id["TEST_MULTI"]
+    venues = {v["exchange"]: v for v in s["venues"]}
+    assert venues["bybit"]["symbol"] == "ETHUSDT"
+    assert venues["hyperliquid"]["symbol"] == "ETH"
+    assert venues["bybit"]["net_qty_base"] == 0.001
+    assert venues["hyperliquid"]["net_qty_base"] == 0.001
+    assert abs(s["net_base"] - 0.002) < 1e-9
+    assert abs(s["net_usd"] - 100.0) < 1e-6  # 0.002 * 50000
+
+
+def test_strategy_positions_net_of_buy_and_sell(strategies_yaml, stub_exchange, silent_notifier):
+    """A sell nets against a prior buy in the per-strategy view."""
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="buy",
+                                                alert_id="b1", quantity=0.05))
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="sell",
+                                                alert_id="s1", quantity=0.05))
+    by_id = {s["strategy_id"]: s for s in c.get("/strategy-positions").json()}
+    # stub fills 0.001 each way -> net 0 for the strategy
+    assert abs(by_id["TEST_BTC"]["net_base"]) < 1e-9
+
+
+def test_sync_positions_rebaselines_to_exchange(strategies_yaml, stub_exchange, silent_notifier):
+    """Admin sync sets each strategy's ledger to its LIVE exchange position.
+    BTCUSDT is unique to TEST_BTC (synced); ETHUSDT is shared by TEST_MULTI +
+    TEST_DISABLED (skipped — can't attribute an aggregate to one strategy)."""
+    c = _client(strategies_yaml)
+    stub_exchange.positions["BTCUSDT"] = (0.05, 60000.0)   # pretend the exchange holds this
+    r = c.post("/admin/strategies/sync-positions", data={"secret": SECRET})
+    assert r.status_code == 200, r.text
+    by_id = {s["strategy_id"]: s for s in c.get("/strategy-positions").json()}
+    assert "TEST_BTC" in by_id
+    v = by_id["TEST_BTC"]["venues"][0]
+    assert (v["exchange"], v["symbol"]) == ("bybit", "BTCUSDT")
+    assert abs(v["net_qty_base"] - 0.05) < 1e-9
+    assert abs(v["net_qty_usd"] - 3000.0) < 1e-6          # 0.05 * 60000
+    assert "TEST_MULTI" not in by_id                       # shared ETHUSDT -> skipped
+
+
+def test_sync_positions_requires_secret(strategies_yaml, stub_exchange, silent_notifier):
+    c = _client(strategies_yaml)
+    r = c.post("/admin/strategies/sync-positions", data={"secret": "wrong"})
+    assert r.status_code == 401
+
+
+def test_dashboard_renders_per_strategy_section_with_data(strategies_yaml, stub_exchange,
+                                                          silent_notifier, monkeypatch):
+    """Render the dashboard with a non-empty per-strategy ledger — exercises the
+    flat-detection / venue-breakdown Jinja so a template bug can't slip through."""
+    from app import network
+    monkeypatch.setattr(network, "get_outbound_ip", lambda force_refresh=False: "1.2.3.4")
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_MULTI", quantity=0.05))
+    r = c.get("/")
+    assert r.status_code == 200
+    assert "Net positions by strategy" in r.text
+    assert "TEST_MULTI" in r.text
+    assert "Total net exposure" in r.text

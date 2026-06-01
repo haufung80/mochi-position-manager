@@ -73,3 +73,24 @@ class Position(Base):
     net_qty_usd: Mapped[float] = mapped_column(Float, default=0.0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class StrategyPosition(Base):
+    """Net position per (strategy, exchange, symbol) — like Position, but
+    attributed to the strategy whose fills produced it, so the dashboard can
+    show each strategy's own exposure. Updated on fills; can be re-baselined
+    to live exchange state via the admin 'sync to exchange' action."""
+    __tablename__ = "strategy_positions"
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "exchange", "symbol", name="uq_stratpos"),
+        Index("ix_stratpos_strategy", "strategy_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    net_qty_base: Mapped[float] = mapped_column(Float, default=0.0)
+    net_qty_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    last_price: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

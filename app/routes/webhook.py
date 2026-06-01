@@ -1,15 +1,23 @@
 """POST /webhook/tradingview — the only inbound endpoint.
 
-The handler is intentionally thin; orchestration steps are broken out into
-small helpers so each concern (auth, persist alert, fan out) is testable
-and readable in isolation.
+The handler must answer FAST: TradingView's webhook delivery times out after
+a few seconds, so a slow response is reported as a failure even when the order
+actually filled. We therefore do only the cheap, must-be-synchronous work in
+the request path — parse, authorise, dedup-gate, and persist the alert (all
+local, sub-millisecond) — and hand the slow exchange round-trips to a
+background task. TradingView gets an immediate "accepted"; the orders fill a
+beat later and show up in the logs / dashboard exactly as before.
+
+Why background tasks (not inline): the exchange SDKs (pybit, hyperliquid) make
+blocking HTTP calls. Run inline in this async handler they (a) make the
+response too slow for TradingView and (b) freeze the event loop. FastAPI runs
+*sync* background functions in a threadpool, which solves both.
 """
 from __future__ import annotations
 import json
 import logging
-from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
 from ..config import Settings, get_settings
@@ -64,34 +72,30 @@ def _persist_alert(db, alert: TradingViewAlert, body: dict,
     return row
 
 
-def _fan_out(db, alert_row: Alert, alert: TradingViewAlert,
-             route) -> list[dict[str, Any]]:
-    """Place one order per enabled venue. Returns per-venue summaries."""
-    summaries = []
+def _run_fan_out(alert_id: int, route, quantity: float) -> None:
+    """Runs AFTER the HTTP response is sent (FastAPI BackgroundTask → threadpool,
+    so the blocking exchange SDK calls never touch the event loop).
+
+    One independent transaction per venue, so a failure on one exchange can't
+    roll back another's fill. `execute_order` persists each Order, drives it
+    through success / retrying / dead, and emits its own notifier events.
+    """
     for venue in route.enabled_venues():
-        order = execute_order(
-            db, alert_row, venue,
-            quantity=alert.quantity or 0.0,
-        )
-        summaries.append({
-            "exchange": venue.exchange,
-            "symbol": venue.symbol,
-            "order_id": order.id,
-            "qty_base": order.qty_base,
-            "status": order.status,
-            "attempts": order.attempts,
-        })
-    return summaries
-
-
-def _overall_status(order_summaries: list[dict[str, Any]]) -> str:
-    """'accepted' if any venue succeeded or is retrying; 'all_failed' otherwise."""
-    statuses = {s["status"] for s in order_summaries}
-    return "accepted" if (statuses & {"success", "retrying"}) else "all_failed"
+        try:
+            with session_scope() as db:
+                alert = db.get(Alert, alert_id)
+                if alert is None:
+                    log.error("background fan-out: alert %s vanished", alert_id)
+                    return
+                execute_order(db, alert, venue, quantity=quantity)
+        except Exception:
+            log.exception("fan-out: order failed alert=%s ex=%s",
+                          alert_id, venue.exchange)
 
 
 @router.post("/webhook/tradingview")
 async def tradingview_webhook(request: Request,
+                              background_tasks: BackgroundTasks,
                               settings: Settings = Depends(get_settings)):
     body = await _parse_body(request)
     alert = _validate(body)
@@ -102,32 +106,33 @@ async def tradingview_webhook(request: Request,
     route = request.app.state.strategy_router.get(alert.strategy_id)
     notifier = get_notifier()
 
+    # --- fast + synchronous: dedup-gate + persist the alert in a short txn ---
     try:
         with session_scope() as db:
             alert_row = _persist_alert(db, alert, body, key, source_ip)
-
-            if route is None:
-                notifier.unknown_strategy(alert.strategy_id)
-                return {"status": "skipped", "reason": "unknown_strategy",
-                        "alert_id": alert_row.id, "idempotency_key": key}
-
-            if not route.enabled_venues():
-                notifier.disabled_strategy(alert.strategy_id)
-                return {"status": "skipped", "reason": "no_enabled_venues",
-                        "alert_id": alert_row.id, "idempotency_key": key,
-                        "strategy_id": alert.strategy_id}
-
-            summaries = _fan_out(db, alert_row, alert, route)
-            return {
-                "status": _overall_status(summaries),
-                "alert_id": alert_row.id,
-                "idempotency_key": key,
-                "strategy_id": alert.strategy_id,
-                "orders": summaries,
-            }
-
+            alert_id = alert_row.id
     except IntegrityError:
-        log.info("Duplicate alert ignored key=%s strat=%s",
-                 key, alert.strategy_id)
-        notifier.duplicate_alert(alert.strategy_id, key)
+        log.info("Duplicate alert ignored key=%s strat=%s", key, alert.strategy_id)
+        background_tasks.add_task(notifier.duplicate_alert, alert.strategy_id, key)
         return {"status": "duplicate", "idempotency_key": key}
+
+    if route is None:
+        background_tasks.add_task(notifier.unknown_strategy, alert.strategy_id)
+        return {"status": "skipped", "reason": "unknown_strategy",
+                "alert_id": alert_id, "idempotency_key": key}
+
+    if not route.enabled_venues():
+        background_tasks.add_task(notifier.disabled_strategy, alert.strategy_id)
+        return {"status": "skipped", "reason": "no_enabled_venues",
+                "alert_id": alert_id, "idempotency_key": key,
+                "strategy_id": alert.strategy_id}
+
+    # --- slow exchange round-trips happen AFTER we answer TradingView ---
+    background_tasks.add_task(_run_fan_out, alert_id, route, alert.quantity or 0.0)
+    return {
+        "status": "accepted",
+        "alert_id": alert_id,
+        "idempotency_key": key,
+        "strategy_id": alert.strategy_id,
+        "venues": [v.exchange for v in route.enabled_venues()],
+    }

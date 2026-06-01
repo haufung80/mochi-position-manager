@@ -215,6 +215,23 @@
     {% endif %}
   </div>
 
+  <h2>Sync positions to exchange</h2>
+  <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
+    Re-baseline each strategy's tracked net position to its <strong>live exchange
+    position</strong> — clears stale residue (e.g. cutover artifacts) so the
+    dashboard matches reality. Read-only on the exchange; <strong>places no orders</strong>.
+    <form method="POST" action="/admin/strategies/sync-positions"
+          onsubmit="return confirm('Re-baseline per-strategy positions to live exchange state? (no orders placed)');"
+          style="margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <input type="password" name="secret" placeholder="webhook secret" required
+             style="background:#1a1d24; border:1px solid #ffd54a; color:#e6e6e6; padding:8px; border-radius:4px;">
+      <button type="submit"
+              style="background:#2a9d5b; color:#021; border:none; padding:8px 14px; border-radius:4px; font-weight:bold; cursor:pointer;">
+        Sync to exchange
+      </button>
+    </form>
+  </div>
+
   <h2 class="muted">TradingView alert template</h2>
   <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
     Paste this into the alert's <em>Message</em> field, replacing the secret:
@@ -224,13 +241,20 @@
   "strategy_id": "MR_VOTING_BTC_6H",
   "action": "{{ '{{strategy.order.action}}' }}",
   "quantity": {{ '{{strategy.order.contracts}}' }},
-  "alert_id": "{{ '{{strategy.order.id}}-{{timenow}}' }}"
+  "alert_id": "{{ '{{time}}' }}"
 }</pre>
     <code>{{ '{{strategy.order.contracts}}' }}</code> is the order size in
     <strong>base-asset units</strong> (e.g. 0.001 = 0.001 BTC), as computed by
     your pine-script sizing logic — NOT a USD amount.<br>
     <code>{{ '{{strategy.order.action}}' }}</code> auto-fills as
     <code>buy</code> / <code>sell</code>.<br>
+    <code>{{ '{{time}}' }}</code> in <code>alert_id</code> is the dedup key —
+    a bar that repaints and re-fires the same signal collapses to one alert.
+    Keep it to a <strong>single</strong> placeholder: TradingView's editor flags
+    a JSON warning if you concatenate several (e.g.
+    <code>{{ '{{ticker}}_{{interval}}_{{time}}' }}</code>). strategy_id already
+    makes the key unique per strategy, so <code>{{ '{{time}}' }}</code> alone is
+    enough.<br>
     Per-signal sizing is fully driven by TradingView — change your strategy's
     sizing logic and the middleware honours it without any config change here.<br>
     If your pine script sizes in dollars, convert in pine before sending:

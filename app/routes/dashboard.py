@@ -7,11 +7,40 @@ from fastapi.templating import Jinja2Templates
 
 from .. import network
 from ..db import session_scope
-from ..models import Alert, Order, Position
+from ..models import Alert, Order, Position, StrategyPosition
 
 router = APIRouter()
 _templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
+
+
+def _strategy_positions(db) -> list[dict]:
+    """Net position per strategy, read from the stored StrategyPosition ledger.
+
+    The ledger is updated on every fill and can be re-baselined to live
+    exchange state via the admin "sync to exchange" action — so unlike an
+    order-history derivation, stale residue can be cleared on demand. Grouped
+    per strategy with a per-venue breakdown plus a strategy total.
+    """
+    rows = (
+        db.query(StrategyPosition)
+        .order_by(StrategyPosition.strategy_id, StrategyPosition.exchange)
+        .all()
+    )
+    by_strat: dict[str, dict] = {}
+    for r in rows:
+        e = by_strat.setdefault(
+            r.strategy_id,
+            {"strategy_id": r.strategy_id, "venues": [], "net_base": 0.0, "net_usd": 0.0},
+        )
+        e["venues"].append({
+            "exchange": r.exchange, "symbol": r.symbol,
+            "net_qty_base": r.net_qty_base, "net_qty_usd": r.net_qty_usd,
+            "last_price": r.last_price,
+        })
+        e["net_base"] += r.net_qty_base
+        e["net_usd"] += r.net_qty_usd
+    return list(by_strat.values())
 
 
 @router.get("/health")
@@ -86,6 +115,7 @@ def orders_json(
 def dashboard(request: Request):
     with session_scope() as db:
         positions = db.query(Position).order_by(Position.exchange, Position.symbol).all()
+        strategy_positions = _strategy_positions(db)
         recent_alerts = db.query(Alert).order_by(Alert.received_at.desc()).limit(25).all()
         recent_orders = db.query(Order).order_by(Order.created_at.desc()).limit(25).all()
         retrying = db.query(Order).filter(Order.status == "retrying").count()
@@ -96,6 +126,7 @@ def dashboard(request: Request):
             {
                 "request": request,
                 "positions": positions,
+                "strategy_positions": strategy_positions,
                 "alerts": recent_alerts,
                 "orders": recent_orders,
                 "retrying": retrying,
@@ -104,6 +135,12 @@ def dashboard(request: Request):
                 "outbound_ip": network.get_outbound_ip(),
             },
         )
+
+
+@router.get("/strategy-positions", response_class=JSONResponse)
+def strategy_positions_json():
+    with session_scope() as db:
+        return _strategy_positions(db)
 
 
 @router.get("/network/egress-ip", response_class=JSONResponse)

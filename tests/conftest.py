@@ -69,6 +69,8 @@ def stub_exchange(monkeypatch):
             self.calls = []
             self.next_result = OrderResult(success=True, exchange_order_id="FAKE_1",
                                            filled_qty_base=0.001, avg_price=50000.0)
+            # symbol -> (signed_qty, mark_price), returned by get_position()
+            self.positions = {}
 
         def market_order(self, symbol, side, quantity, leverage=1.0):
             self.calls.append(("market", symbol, side, quantity, leverage))
@@ -77,6 +79,10 @@ def stub_exchange(monkeypatch):
         def close_position(self, symbol):
             self.calls.append(("close", symbol))
             return OrderResult(success=True, exchange_order_id="CLOSED")
+
+        def get_position(self, symbol):
+            self.calls.append(("get_position", symbol))
+            return self.positions.get(symbol, (0.0, 0.0))
 
     fake = FakeExchange()
 

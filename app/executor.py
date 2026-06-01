@@ -25,16 +25,18 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .exchanges.registry import get_registry
-from .models import Alert, Order, Position
+from .models import Alert, Order, Position, StrategyPosition
 from .notifier import get_notifier
 from .routing import VenueRoute
 from .schemas import OrderResult
 
 log = logging.getLogger(__name__)
 
-# The middleware does not configure leverage — the exchange's account-level
-# margin mode applies. Adapters still accept this parameter for SDK compat.
-DEFAULT_LEVERAGE: float = 1.0
+# Leverage applied to every order: each adapter sets it on the symbol
+# (Bybit set_leverage / HL update_leverage) right before placing the order.
+# Takes effect per symbol on its NEXT order — open positions keep their
+# current leverage until then.
+DEFAULT_LEVERAGE: float = 2.0
 
 
 def _utcnow() -> datetime:
@@ -47,23 +49,29 @@ def _next_retry_delay(attempts: int) -> int:
     return min(delay, s.retry_max_delay_sec)
 
 
-def _apply_fill_to_position(db: Session, exchange: str, symbol: str,
-                            side: str, qty_base: float, price: float) -> None:
-    pos = (
-        db.query(Position)
-        .filter(Position.exchange == exchange, Position.symbol == symbol)
-        .one_or_none()
-    )
-    if pos is None:
-        pos = Position(exchange=exchange, symbol=symbol)
-        db.add(pos)
+def _bump_position(db: Session, model, keys: dict,
+                   signed_delta: float, price: float) -> None:
+    """Find-or-create a ledger row and apply a signed fill delta."""
+    row = db.query(model).filter_by(**keys).one_or_none()
+    if row is None:
+        row = model(**keys)
+        db.add(row)
         db.flush()
+    row.net_qty_base += signed_delta
+    row.net_qty_usd = row.net_qty_base * price
+    row.last_price = price
+    row.updated_at = _utcnow()
 
+
+def _apply_fill_to_position(db: Session, strategy_id: str, exchange: str, symbol: str,
+                            side: str, qty_base: float, price: float) -> None:
+    """Update BOTH ledgers: the per-(exchange,symbol) total and the
+    per-(strategy,exchange,symbol) breakdown."""
     signed = qty_base if side == "buy" else -qty_base
-    pos.net_qty_base += signed
-    pos.net_qty_usd = pos.net_qty_base * price
-    pos.last_price = price
-    pos.updated_at = _utcnow()
+    _bump_position(db, Position, {"exchange": exchange, "symbol": symbol}, signed, price)
+    _bump_position(db, StrategyPosition,
+                   {"strategy_id": strategy_id, "exchange": exchange, "symbol": symbol},
+                   signed, price)
 
 
 def _new_order(alert_id: int, venue: VenueRoute, side: str,
@@ -104,7 +112,7 @@ def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
     order.next_retry_at = None
     if result.avg_price > 0 and filled_qty > 0:
         _apply_fill_to_position(
-            db, venue.exchange, venue.symbol,
+            db, alert.strategy_id, venue.exchange, venue.symbol,
             side, filled_qty, result.avg_price,
         )
     get_notifier().order_succeeded(

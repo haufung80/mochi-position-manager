@@ -22,3 +22,9 @@ class Exchange(Protocol):
         NOT used by the regular webhook path (TradingView only sends
         buy/sell). Reserved for future admin endpoints."""
         ...
+
+    def get_position(self, symbol: str) -> tuple[float, float]:
+        """Live position for `symbol`: (signed_base_qty, mark_price).
+        Positive qty = long, negative = short, 0.0 = flat. Read-only; used to
+        reconcile the internal ledger to real exchange state."""
+        ...

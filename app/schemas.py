@@ -18,7 +18,7 @@ class TradingViewAlert(BaseModel):
           "strategy_id": "MR_VOTING_BTC_6H",
           "action": "{{strategy.order.action}}",
           "quantity": {{strategy.order.contracts}},
-          "alert_id": "{{strategy.order.id}}-{{timenow}}"
+          "alert_id": "{{time}}"
         }
 
     Actions: TradingView's `{{strategy.order.action}}` always resolves to
@@ -33,6 +33,16 @@ class TradingViewAlert(BaseModel):
 
     Note: this is NOT a USD amount. If your pine script sizes orders in dollars,
     convert to base in pine before sending (e.g. `qty := cash_size / close`).
+
+    `alert_id` is the dedup key (see app/dedup.py). The app prefixes it with
+    strategy_id, so `{{time}}` alone (the triggering bar's timestamp) is enough
+    to make the key unique per bar: a candle that repaints and re-fires the same
+    signal collapses to one alert, while the next bar's signal goes through.
+    Keep alert_id to a SINGLE placeholder — TradingView's alert editor flags a
+    JSON warning when several are concatenated (e.g.
+    `{{ticker}}_{{interval}}_{{time}}`). For stop-and-reverse strategies that
+    close and re-enter on the same bar you'd also need the action; TradingView
+    still lets you save through that warning since the fired payload is valid.
     """
     secret: str
     strategy_id: str = Field(..., min_length=1, max_length=128)

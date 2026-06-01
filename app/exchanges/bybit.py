@@ -159,3 +159,15 @@ class BybitExchange:
         except Exception as e:
             log.exception("Bybit close_position failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    def get_position(self, symbol: str) -> tuple[float, float]:
+        """(signed_base_qty, mark_price) for the symbol; (0.0, 0.0) if flat."""
+        resp = self._client.get_positions(category=CATEGORY, symbol=symbol)
+        for p in (resp.get("result") or {}).get("list") or []:
+            size = float(p.get("size", 0) or 0)
+            if size == 0:
+                continue
+            signed = size if p.get("side") == "Buy" else -size
+            mark = float(p.get("markPrice") or p.get("avgPrice") or 0.0)
+            return signed, mark
+        return 0.0, 0.0

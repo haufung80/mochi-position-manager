@@ -1,0 +1,38 @@
+# Production stack for a single VM (AWS Lightsail instance, etc.).
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Caddy terminates HTTPS (auto Let's Encrypt cert for your domain) and reverse-
+# proxies to the app. The app is NOT exposed to the host directly — only Caddy's
+# 80/443 are public. SQLite + strategies.yaml live on ./data on the host disk,
+# so they survive container restarts and redeploys.
+services:
+  app:
+    build: .
+    container_name: mochi-app
+    restart: always
+    env_file: .env
+    environment:
+      DATABASE_URL: "sqlite:////app/data/middleware.db"
+      STRATEGIES_FILE: "/app/data/strategies.yaml"
+    volumes:
+      - ./data:/app/data          # persistent: DB + strategies.yaml
+    expose:
+      - "8000"                     # internal only; Caddy reaches it on the compose network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: mochi-caddy
+    restart: always
+    ports:
+      - "80:80"                    # needed for Let's Encrypt HTTP-01 challenge
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # persisted certs — don't lose these
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  caddy_data:
+  caddy_config:

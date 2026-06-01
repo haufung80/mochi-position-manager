@@ -88,6 +88,35 @@
     </table>
   </div>
 
+  <h2>Net positions by strategy</h2>
+  <div class="card">
+    {% set total_usd = strategy_positions|map(attribute='net_usd')|sum %}
+    <p style="color:#9aa; margin:0 0 12px;">
+      Total net exposure across strategies:
+      <b style="color:#e6e6e6;">${{ "%.2f"|format(total_usd) }}</b>
+    </p>
+    <table>
+      <tr><th>Strategy</th><th>Net position</th><th>Net $</th><th>By venue</th></tr>
+      {% for s in strategy_positions %}
+        {% set flat = (s.venues|map(attribute='net_qty_base')|select|list|length) == 0 %}
+        <tr{% if flat %} style="color:#666;"{% endif %}>
+          <td class="mono">{{ s.strategy_id }}</td>
+          <td class="mono">{% if flat %}flat{% else %}{{ "%.6f"|format(s.net_base) }}{% endif %}</td>
+          <td class="mono">{% if flat %}—{% else %}${{ "%.2f"|format(s.net_usd) }}{% endif %}</td>
+          <td class="mono" style="font-size:12px; color:#9aa;">
+            {%- if flat -%}—{%- else -%}
+              {%- for v in s.venues -%}
+                {{ v.exchange }} {{ "%.4f"|format(v.net_qty_base) }}{% if not loop.last %} &middot; {% endif %}
+              {%- endfor -%}
+            {%- endif -%}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" style="color:#888;">No strategy positions yet.</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+
   <h2>Recent orders</h2>
   <div class="card">
     <table>

@@ -1,0 +1,9 @@
+# Replace example.com with YOUR domain.
+# Its DNS A record must point to this server's static IP, and ports 80 + 443
+# must be open, before Caddy can obtain the Let's Encrypt certificate.
+#
+# Caddy auto-provisions + auto-renews HTTPS for this hostname and reverse-proxies
+# to the app container (service name `app`, port 8000) over the compose network.
+mochi-position-manager.duckdns.org {
+    reverse_proxy app:8000
+}
