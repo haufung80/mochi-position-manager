@@ -14,6 +14,18 @@ _templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
 
 
+def _fmt_qty(v) -> str:
+    """Format a base-asset quantity without trailing zeros: 0.290000 -> '0.29'."""
+    try:
+        s = f"{float(v):.8f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(v)
+    return s or "0"
+
+
+templates.env.filters["qty"] = _fmt_qty
+
+
 def _strategy_positions(db, routes) -> list[dict]:
     """Net position per strategy, populated from the stored StrategyPosition
     ledger but listing EVERY configured strategy — so a freshly added strategy

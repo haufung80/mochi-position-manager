@@ -283,6 +283,16 @@ def test_sync_positions_requires_secret(strategies_yaml, stub_exchange, silent_n
     assert r.status_code == 401
 
 
+def test_qty_formatter_strips_trailing_zeros():
+    from app.routes.dashboard import _fmt_qty
+    assert _fmt_qty(0.29) == "0.29"
+    assert _fmt_qty(-0.003) == "-0.003"
+    assert _fmt_qty(5.8) == "5.8"
+    assert _fmt_qty(-2.9) == "-2.9"
+    assert _fmt_qty(0.0) == "0"
+    assert _fmt_qty(0.002) == "0.002"
+
+
 def test_configured_strategy_shows_flat_without_fills(strategies_yaml, stub_exchange, silent_notifier):
     """Every configured strategy appears in the per-strategy view — flat if it
     has no fills yet — so a freshly added strategy shows up immediately."""
