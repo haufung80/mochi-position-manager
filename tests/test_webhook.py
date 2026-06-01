@@ -273,13 +273,25 @@ def test_sync_positions_rebaselines_to_exchange(strategies_yaml, stub_exchange, 
     assert (v["exchange"], v["symbol"]) == ("bybit", "BTCUSDT")
     assert abs(v["net_qty_base"] - 0.05) < 1e-9
     assert abs(v["net_qty_usd"] - 3000.0) < 1e-6          # 0.05 * 60000
-    assert "TEST_MULTI" not in by_id                       # shared ETHUSDT -> skipped
+    # TEST_MULTI shares ETHUSDT (skipped by sync) -> listed (configured) but flat
+    assert abs(by_id["TEST_MULTI"]["net_base"]) < 1e-9
 
 
 def test_sync_positions_requires_secret(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
     r = c.post("/admin/strategies/sync-positions", data={"secret": "wrong"})
     assert r.status_code == 401
+
+
+def test_configured_strategy_shows_flat_without_fills(strategies_yaml, stub_exchange, silent_notifier):
+    """Every configured strategy appears in the per-strategy view — flat if it
+    has no fills yet — so a freshly added strategy shows up immediately."""
+    c = _client(strategies_yaml)
+    by_id = {s["strategy_id"]: s for s in c.get("/strategy-positions").json()}
+    for sid in ("TEST_BTC", "TEST_MULTI", "TEST_DISABLED"):
+        assert sid in by_id, f"{sid} should be listed even with no fills"
+        assert by_id[sid]["net_base"] == 0.0
+        assert by_id[sid]["configured"] is True
 
 
 def test_dashboard_renders_per_strategy_section_with_data(strategies_yaml, stub_exchange,

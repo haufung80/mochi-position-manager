@@ -14,33 +14,52 @@ _templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
 
 
-def _strategy_positions(db) -> list[dict]:
-    """Net position per strategy, read from the stored StrategyPosition ledger.
+def _strategy_positions(db, routes) -> list[dict]:
+    """Net position per strategy, populated from the stored StrategyPosition
+    ledger but listing EVERY configured strategy — so a freshly added strategy
+    shows up immediately (flat) without waiting for a fill or a sync.
 
     The ledger is updated on every fill and can be re-baselined to live
-    exchange state via the admin "sync to exchange" action — so unlike an
-    order-history derivation, stale residue can be cleared on demand. Grouped
-    per strategy with a per-venue breakdown plus a strategy total.
+    exchange state via the admin "sync to exchange" action. Any ledgered
+    strategy that's no longer configured is appended (marked unconfigured) so
+    stray positions stay visible.
     """
-    rows = (
-        db.query(StrategyPosition)
-        .order_by(StrategyPosition.strategy_id, StrategyPosition.exchange)
-        .all()
-    )
-    by_strat: dict[str, dict] = {}
-    for r in rows:
-        e = by_strat.setdefault(
-            r.strategy_id,
-            {"strategy_id": r.strategy_id, "venues": [], "net_base": 0.0, "net_usd": 0.0},
-        )
-        e["venues"].append({
-            "exchange": r.exchange, "symbol": r.symbol,
-            "net_qty_base": r.net_qty_base, "net_qty_usd": r.net_qty_usd,
-            "last_price": r.last_price,
-        })
-        e["net_base"] += r.net_qty_base
-        e["net_usd"] += r.net_qty_usd
-    return list(by_strat.values())
+    ledger = {
+        (r.strategy_id, r.exchange, r.symbol): r
+        for r in db.query(StrategyPosition).all()
+    }
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    for route in routes:
+        seen.add(route.strategy_id)
+        venues, net_base, net_usd = [], 0.0, 0.0
+        for v in route.venues:
+            row = ledger.get((route.strategy_id, v.exchange, v.symbol))
+            qb = row.net_qty_base if row else 0.0
+            qu = row.net_qty_usd if row else 0.0
+            venues.append({"exchange": v.exchange, "symbol": v.symbol,
+                           "net_qty_base": qb, "net_qty_usd": qu,
+                           "last_price": row.last_price if row else 0.0})
+            net_base += qb
+            net_usd += qu
+        out.append({"strategy_id": route.strategy_id, "venues": venues,
+                    "net_base": net_base, "net_usd": net_usd, "configured": True})
+
+    # Ledgered strategies that are no longer configured — keep them visible.
+    orphans: dict[str, dict] = {}
+    for (sid, ex, sym), row in ledger.items():
+        if sid in seen:
+            continue
+        e = orphans.setdefault(sid, {"strategy_id": sid, "venues": [],
+                                     "net_base": 0.0, "net_usd": 0.0, "configured": False})
+        e["venues"].append({"exchange": ex, "symbol": sym,
+                            "net_qty_base": row.net_qty_base,
+                            "net_qty_usd": row.net_qty_usd, "last_price": row.last_price})
+        e["net_base"] += row.net_qty_base
+        e["net_usd"] += row.net_qty_usd
+    out.extend(v for _, v in sorted(orphans.items()))
+    return out
 
 
 @router.get("/health")
@@ -115,7 +134,7 @@ def orders_json(
 def dashboard(request: Request):
     with session_scope() as db:
         positions = db.query(Position).order_by(Position.exchange, Position.symbol).all()
-        strategy_positions = _strategy_positions(db)
+        strategy_positions = _strategy_positions(db, request.app.state.strategy_router.all())
         recent_alerts = db.query(Alert).order_by(Alert.received_at.desc()).limit(25).all()
         recent_orders = db.query(Order).order_by(Order.created_at.desc()).limit(25).all()
         retrying = db.query(Order).filter(Order.status == "retrying").count()
@@ -138,9 +157,9 @@ def dashboard(request: Request):
 
 
 @router.get("/strategy-positions", response_class=JSONResponse)
-def strategy_positions_json():
+def strategy_positions_json(request: Request):
     with session_scope() as db:
-        return _strategy_positions(db)
+        return _strategy_positions(db, request.app.state.strategy_router.all())
 
 
 @router.get("/network/egress-ip", response_class=JSONResponse)
