@@ -269,10 +269,10 @@ def test_sync_positions_rebaselines_to_exchange(strategies_yaml, stub_exchange, 
     assert r.status_code == 200, r.text
     by_id = {s["strategy_id"]: s for s in c.get("/strategy-positions").json()}
     assert "TEST_BTC" in by_id
-    v = by_id["TEST_BTC"]["venues"][0]
-    assert (v["exchange"], v["symbol"]) == ("bybit", "BTCUSDT")
-    assert abs(v["net_qty_base"] - 0.05) < 1e-9
-    assert abs(v["net_qty_usd"] - 3000.0) < 1e-6          # 0.05 * 60000
+    vbyx = {v["exchange"]: v for v in by_id["TEST_BTC"]["venues"]}
+    assert vbyx["bybit"]["symbol"] == "BTCUSDT"
+    assert abs(vbyx["bybit"]["net_qty_base"] - 0.05) < 1e-9
+    assert abs(vbyx["bybit"]["net_qty_usd"] - 3000.0) < 1e-6   # 0.05 * 60000
     # TEST_MULTI shares ETHUSDT (skipped by sync) -> listed (configured) but flat
     assert abs(by_id["TEST_MULTI"]["net_base"]) < 1e-9
 

@@ -38,6 +38,29 @@ def test_multi_venue_strategy(strategies_yaml):
     }
 
 
+def test_venue_order_is_canonical_regardless_of_yaml(tmp_path):
+    """Venues load in SUPPORTED_EXCHANGES order no matter how the YAML lists
+    them — so the dashboard, per-strategy view, and fan-out stay consistent."""
+    p = tmp_path / "order.yaml"
+    p.write_text(
+        "strategies:\n"
+        "  A:\n"
+        "    base_asset: BTC\n"
+        "    venues:\n"
+        "      bybit: true\n"          # bybit first in YAML
+        "      hyperliquid: true\n"
+        "  B:\n"
+        "    base_asset: ETH\n"
+        "    venues:\n"
+        "      hyperliquid: true\n"    # hyperliquid first in YAML
+        "      bybit: true\n"
+    )
+    r = StrategyRouter(p)
+    order_a = [v.exchange for v in r.get("A").venues]
+    order_b = [v.exchange for v in r.get("B").venues]
+    assert order_a == order_b == list(SUPPORTED_EXCHANGES)
+
+
 def test_unknown_returns_none(strategies_yaml):
     r = StrategyRouter(strategies_yaml)
     assert r.get("UNKNOWN") is None

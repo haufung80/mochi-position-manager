@@ -80,6 +80,9 @@ def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
     if not venues:
         raise ValueError("at least one supported venue must be declared")
 
+    # Canonical venue order (SUPPORTED_EXCHANGES) regardless of YAML key order,
+    # so the dashboard / per-strategy view / fan-out are consistent.
+    venues.sort(key=lambda v: SUPPORTED_EXCHANGES.index(v.exchange))
     return StrategyRoute(strategy_id=sid, base_asset=base, venues=tuple(venues))
 
 
