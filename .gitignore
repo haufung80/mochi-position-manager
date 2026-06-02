@@ -7,5 +7,11 @@ venv/
 data/
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 strategies.yaml
 .DS_Store
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
