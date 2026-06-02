@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     strategies_file: str = "strategies.yaml"
 
+    # IANA tz name used to render timestamps on the dashboard. Storage stays UTC;
+    # this only affects display. e.g. "America/Toronto", "UTC", "Asia/Singapore".
+    display_timezone: str = "America/Toronto"
+
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

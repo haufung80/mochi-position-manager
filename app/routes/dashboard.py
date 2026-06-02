@@ -1,17 +1,49 @@
 from __future__ import annotations
+import logging
+from datetime import timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from .. import network
+from ..config import get_settings
 from ..db import session_scope
 from ..models import Alert, Order, Position, StrategyPosition
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 _templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
+
+
+def _display_tz():
+    """Resolve the configured display timezone, falling back to UTC if the tz
+    database can't find it (e.g. slim image without tzdata installed)."""
+    name = get_settings().display_timezone
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ModuleNotFoundError, ValueError, KeyError):
+        log.warning("display_timezone %r unavailable; rendering times in UTC", name)
+        return timezone.utc
+
+
+def _fmt_when(dt, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
+    """Render a stored timestamp in the configured display timezone.
+
+    Timestamps are written as UTC but SQLite drops tzinfo, so a naive value is
+    assumed to be UTC. None renders empty (some columns are nullable)."""
+    if dt is None:
+        return ""
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_display_tz()).strftime(fmt)
+
+
+templates.env.filters["when"] = _fmt_when
 
 
 def _fmt_qty(v) -> str:

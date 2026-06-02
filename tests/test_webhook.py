@@ -314,6 +314,26 @@ def test_usd_formatter_clamps_negative_zero():
     assert _fmt_usd(348.85) == "348.85"
 
 
+def test_when_filter_renders_in_display_timezone():
+    """Stored UTC timestamps render in the configured display tz (America/Toronto
+    by default). Storage stays UTC; only the dashboard view shifts. Fixed
+    instants keep this DST-stable."""
+    from datetime import datetime, timezone
+    from app.routes.dashboard import _fmt_when
+
+    # Summer -> Toronto is EDT (UTC-4): 15:00:17 UTC == 11:00:17 EDT
+    summer = datetime(2026, 6, 2, 15, 0, 17, tzinfo=timezone.utc)
+    assert _fmt_when(summer) == "2026-06-02 11:00:17 EDT"
+    # Winter -> Toronto is EST (UTC-5): 15:00:00 UTC == 10:00:00 EST
+    winter = datetime(2026, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    assert _fmt_when(winter) == "2026-01-15 10:00:00 EST"
+    # SQLite drops tzinfo -> a naive value is assumed UTC
+    assert _fmt_when(datetime(2026, 6, 2, 15, 0, 17)) == "2026-06-02 11:00:17 EDT"
+    # custom format + None
+    assert _fmt_when(summer, "%H:%M:%S") == "11:00:17"
+    assert _fmt_when(None) == ""
+
+
 def test_net_positions_table_no_negative_zero_and_dims_flat(strategies_yaml, stub_exchange,
                                                             silent_notifier, monkeypatch):
     """The per-symbol Net positions table must not render '$-0.00' for a dust

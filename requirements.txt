@@ -13,5 +13,8 @@ hyperliquid-python-sdk==0.23.0   # ≥ 0.10 pulls in modern eth-account (0.13+),
                                   # broke on Python 3.11 (inspect.getargspec).
 jinja2==3.1.4
 python-multipart==0.0.12
+tzdata==2024.2                    # zoneinfo fallback DB — slim images ship no
+                                  # system tzdata, so dashboard tz conversion
+                                  # (America/Toronto) needs this.
 pytest==8.3.3
 pytest-asyncio==0.24.0

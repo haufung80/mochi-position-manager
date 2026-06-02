@@ -81,7 +81,7 @@
           <td class="mono">{{ p.net_qty_base|qty }}</td>
           <td class="mono">${{ p.net_qty_usd|usd }}</td>
           <td class="mono">{{ p.last_price }}</td>
-          <td class="mono">{{ p.updated_at.strftime("%Y-%m-%d %H:%M:%S") if p.updated_at else "" }}</td>
+          <td class="mono">{{ p.updated_at|when }}</td>
         </tr>
       {% else %}
         <tr><td colspan="6" style="color:#888;">No positions yet.</td></tr>
@@ -124,7 +124,7 @@
       <tr><th>When</th><th>Strategy → Exchange</th><th>Side</th><th>Qty $</th><th>Status</th><th>Attempts</th><th>Error</th></tr>
       {% for o in orders %}
         <tr>
-          <td class="mono">{{ o.created_at.strftime("%H:%M:%S") }}</td>
+          <td class="mono">{{ o.created_at|when("%H:%M:%S") }}</td>
           <td>{{ o.exchange }}/{{ o.symbol }}</td>
           <td>{{ o.side }}{% if o.reduce_only %} (close){% endif %}</td>
           <td class="mono">${{ "%.0f"|format(o.qty_usd) }}</td>
@@ -142,7 +142,7 @@
       <tr><th>When</th><th>Strategy</th><th>Action</th><th>Idempotency key</th><th>Source IP</th></tr>
       {% for a in alerts %}
         <tr>
-          <td class="mono">{{ a.received_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+          <td class="mono">{{ a.received_at|when }}</td>
           <td>{{ a.strategy_id }}</td>
           <td>{{ a.action }}</td>
           <td class="mono">{{ a.idempotency_key }}</td>
