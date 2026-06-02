@@ -98,7 +98,7 @@
     <table>
       <tr><th>Strategy</th><th>Net position</th><th>Net $</th><th>By venue</th></tr>
       {% for s in strategy_positions %}
-        {% set flat = (s.venues|map(attribute='net_qty_base')|select|list|length) == 0 %}
+        {% set flat = s.flat %}
         <tr{% if flat %} style="color:#666;"{% endif %}>
           <td class="mono">{{ s.strategy_id }}{% if not s.configured %} <span style="color:#e0a030; font-size:11px;">· unconfigured</span>{% endif %}</td>
           <td class="mono">{% if flat %}flat{% else %}{{ s.net_base|qty }}{% endif %}</td>

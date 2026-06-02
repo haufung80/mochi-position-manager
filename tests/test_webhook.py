@@ -293,6 +293,57 @@ def test_qty_formatter_strips_trailing_zeros():
     assert _fmt_qty(0.002) == "0.002"
 
 
+def test_qty_formatter_normalizes_negative_zero():
+    """Float dust that rounds to 0 at 8 dp must render as a clean '0', not '-0'."""
+    from app.routes.dashboard import _fmt_qty
+    assert _fmt_qty(-1e-9) == "0"
+    assert _fmt_qty(-0.0) == "0"
+    assert _fmt_qty(1e-12) == "0"
+    assert _fmt_qty(-1e-12) == "0"
+
+
+def test_venue_and_strategy_flat_thresholds():
+    """Dust reads as flat; a real position (even a $5 min-order sliver) does not.
+    A strategy is flat only when EVERY venue is flat."""
+    from app.routes.dashboard import _venue_flat, _strategy_flat
+    # dust / closed
+    assert _venue_flat(0.0, 0.0)
+    assert _venue_flat(-1e-9, -7e-7)      # -1e-9 BNB residue from a round-trip
+    assert _venue_flat(5e-5, 0.0)         # sub-threshold base, no price
+    # real positions are NOT flat
+    assert not _venue_flat(0.001, 100.0)  # 0.001 BTC @ $100k
+    assert not _venue_flat(0.58, 406.0)   # 0.58 BNB
+    assert not _venue_flat(0.0, 5.0)      # $5 notional (exchange min order)
+    assert not _venue_flat(0.5, 0.0)      # real base qty, stale 0 price
+    # strategy: flat iff all venues flat
+    assert _strategy_flat([{"net_qty_base": -1e-9, "net_qty_usd": -7e-7},
+                           {"net_qty_base": 0.0, "net_qty_usd": 0.0}])
+    assert not _strategy_flat([{"net_qty_base": -1e-9, "net_qty_usd": -7e-7},
+                               {"net_qty_base": 0.5, "net_qty_usd": 350.0}])
+
+
+def test_strategy_position_dust_reads_as_flat(strategies_yaml, stub_exchange, silent_notifier):
+    """A near-zero residual left after closing a position must read as flat —
+    not an un-dimmed '-$0.00'. Regression for the Jinja `select` truthiness bug
+    (BNB_MACD_REV_LONG_15m showed -0$ and was not dimmed)."""
+    from app.routes.dashboard import _strategy_positions
+    from app.executor import _apply_fill_to_position
+
+    # Buy then sell a hair more -> a tiny negative dust residue in the ledger.
+    with session_scope() as db:
+        _apply_fill_to_position(db, "TEST_BTC", "bybit", "BTCUSDT", "buy", 0.05, 60000.0)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "TEST_BTC", "bybit", "BTCUSDT",
+                                "sell", 0.05000000001, 60000.0)
+
+    router = StrategyRouter(strategies_yaml)
+    with session_scope() as db:
+        by_id = {s["strategy_id"]: s for s in _strategy_positions(db, router.all())}
+
+    assert by_id["TEST_BTC"]["flat"] is True
+    assert 0 < abs(by_id["TEST_BTC"]["net_base"]) < 1e-6   # genuinely dust, not exactly 0
+
+
 def test_position_increments_accumulate_via_upsert():
     """Atomic insert-or-increment: the per-symbol Position sums across
     strategies; each StrategyPosition tracks only its own fills."""

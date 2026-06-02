@@ -15,15 +15,42 @@ templates = Jinja2Templates(directory=str(_templates_dir))
 
 
 def _fmt_qty(v) -> str:
-    """Format a base-asset quantity without trailing zeros: 0.290000 -> '0.29'."""
+    """Format a base-asset quantity without trailing zeros: 0.290000 -> '0.29'.
+
+    Float dust that rounds to zero at 8 dp (e.g. the -1e-9 residue a buy/sell
+    round-trip can leave in the ledger) must render as a clean '0', never '-0'.
+    """
     try:
         s = f"{float(v):.8f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
         return str(v)
-    return s or "0"
+    if s in ("", "-", "-0"):
+        return "0"
+    return s
 
 
 templates.env.filters["qty"] = _fmt_qty
+
+# A venue counts as "flat" — position fully closed, only float/rounding dust
+# left in the fill-based ledger — below these thresholds. Exchange minimum order
+# sizes are ~$5+ of notional, so a $1 cutoff sits safely between a real position
+# and the sub-cent residue a buy/sell round-trip leaves behind. The base-qty
+# guard only matters in the shouldn't-happen case of a ledger row whose
+# last_price is 0 (net_usd would read 0 despite a real quantity); 1e-4 sits
+# between dust and the smallest real position (~1e-3 base).
+_FLAT_USD_EPS = 1.0
+_FLAT_BASE_EPS = 1e-4
+
+
+def _venue_flat(net_qty_base: float, net_qty_usd: float) -> bool:
+    return abs(net_qty_usd) < _FLAT_USD_EPS and abs(net_qty_base) < _FLAT_BASE_EPS
+
+
+def _strategy_flat(venues: list[dict]) -> bool:
+    """A strategy is flat when every venue is flat. Computed here, not in the
+    template, so dust can't slip past Jinja's truthiness-based `select` filter
+    (which reads a -1e-9 residual as a live position)."""
+    return all(_venue_flat(v["net_qty_base"], v["net_qty_usd"]) for v in venues)
 
 
 def _strategy_positions(db, routes) -> list[dict]:
@@ -56,7 +83,8 @@ def _strategy_positions(db, routes) -> list[dict]:
             net_base += qb
             net_usd += qu
         out.append({"strategy_id": route.strategy_id, "venues": venues,
-                    "net_base": net_base, "net_usd": net_usd, "configured": True})
+                    "net_base": net_base, "net_usd": net_usd, "configured": True,
+                    "flat": _strategy_flat(venues)})
 
     # Ledgered strategies that are no longer configured — keep them visible.
     orphans: dict[str, dict] = {}
@@ -70,7 +98,9 @@ def _strategy_positions(db, routes) -> list[dict]:
                             "net_qty_usd": row.net_qty_usd, "last_price": row.last_price})
         e["net_base"] += row.net_qty_base
         e["net_usd"] += row.net_qty_usd
-    out.extend(v for _, v in sorted(orphans.items()))
+    for _, e in sorted(orphans.items()):
+        e["flat"] = _strategy_flat(e["venues"])
+        out.append(e)
     return out
 
 
