@@ -75,10 +75,11 @@
     <table>
       <tr><th>Exchange</th><th>Symbol</th><th>Net qty (base)</th><th>Net $</th><th>Last px</th><th>Updated</th></tr>
       {% for p in positions %}
-        <tr>
+        {% set flat = p.net_qty_base|isflat(p.net_qty_usd) %}
+        <tr{% if flat %} style="color:#666;"{% endif %}>
           <td>{{ p.exchange }}</td><td>{{ p.symbol }}</td>
           <td class="mono">{{ p.net_qty_base|qty }}</td>
-          <td class="mono">${{ "%.2f"|format(p.net_qty_usd) }}</td>
+          <td class="mono">${{ p.net_qty_usd|usd }}</td>
           <td class="mono">{{ p.last_price }}</td>
           <td class="mono">{{ p.updated_at.strftime("%Y-%m-%d %H:%M:%S") if p.updated_at else "" }}</td>
         </tr>
@@ -93,7 +94,7 @@
     {% set total_usd = strategy_positions|map(attribute='net_usd')|sum %}
     <p style="color:#9aa; margin:0 0 12px;">
       Total net exposure across strategies:
-      <b style="color:#e6e6e6;">${{ "%.2f"|format(total_usd) }}</b>
+      <b style="color:#e6e6e6;">${{ total_usd|usd }}</b>
     </p>
     <table>
       <tr><th>Strategy</th><th>Net position</th><th>Net $</th><th>By venue</th></tr>
@@ -102,7 +103,7 @@
         <tr{% if flat %} style="color:#666;"{% endif %}>
           <td class="mono">{{ s.strategy_id }}{% if not s.configured %} <span style="color:#e0a030; font-size:11px;">· unconfigured</span>{% endif %}</td>
           <td class="mono">{% if flat %}flat{% else %}{{ s.net_base|qty }}{% endif %}</td>
-          <td class="mono">{% if flat %}—{% else %}${{ "%.2f"|format(s.net_usd) }}{% endif %}</td>
+          <td class="mono">{% if flat %}—{% else %}${{ s.net_usd|usd }}{% endif %}</td>
           <td class="mono" style="font-size:12px; color:#9aa;">
             {%- if flat -%}—{%- else -%}
               {%- for v in s.venues -%}

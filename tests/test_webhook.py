@@ -302,6 +302,42 @@ def test_qty_formatter_normalizes_negative_zero():
     assert _fmt_qty(-1e-12) == "0"
 
 
+def test_usd_formatter_clamps_negative_zero():
+    """Sub-cent dust must render '0.00' (no minus); real amounts pass through."""
+    from app.routes.dashboard import _fmt_usd
+    assert _fmt_usd(-2.8e-14) == "0.00"
+    assert _fmt_usd(-0.0) == "0.00"
+    assert _fmt_usd(0.0) == "0.00"
+    assert _fmt_usd(-0.004) == "0.00"     # sub-cent -> clamped
+    assert _fmt_usd(-0.006) == "-0.01"    # rounds to a cent -> kept
+    assert _fmt_usd(-214.79) == "-214.79"
+    assert _fmt_usd(348.85) == "348.85"
+
+
+def test_net_positions_table_no_negative_zero_and_dims_flat(strategies_yaml, stub_exchange,
+                                                            silent_notifier, monkeypatch):
+    """The per-symbol Net positions table must not render '$-0.00' for a dust
+    residual, and the dust row must be dimmed (color:#666)."""
+    import re
+    from app import network
+    from app.executor import _apply_fill_to_position
+    monkeypatch.setattr(network, "get_outbound_ip", lambda force_refresh=False: "1.2.3.4")
+
+    # Buy then sell a hair more -> a tiny negative dust residue in the Position ledger.
+    with session_scope() as db:
+        _apply_fill_to_position(db, "X", "bybit", "BNBUSDT", "buy", 0.05, 678.1)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "X", "bybit", "BNBUSDT", "sell", 0.05000000001, 678.1)
+
+    c = _client(strategies_yaml)
+    r = c.get("/")
+    assert r.status_code == 200
+    assert "-0.00" not in r.text                       # no negative-zero dollar anywhere
+    # the BNBUSDT row's opening <tr> carries the dim style
+    m = re.search(r"(<tr[^>]*>)(?:(?!</tr>).)*?BNBUSDT", r.text, re.S)
+    assert m and "color:#666" in m.group(1)
+
+
 def test_venue_and_strategy_flat_thresholds():
     """Dust reads as flat; a real position (even a $5 min-order sliver) does not.
     A strategy is flat only when EVERY venue is flat."""

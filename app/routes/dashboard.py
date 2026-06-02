@@ -31,6 +31,21 @@ def _fmt_qty(v) -> str:
 
 templates.env.filters["qty"] = _fmt_qty
 
+
+def _fmt_usd(v) -> str:
+    """Format a USD amount at 2 dp, clamping sub-cent dust to a clean '0.00'
+    so a -1e-14 residual renders '$0.00', never '$-0.00'."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if abs(f) < 0.005:  # rounds to 0.00 at 2 dp anyway — drop the sign
+        f = 0.0
+    return f"{f:.2f}"
+
+
+templates.env.filters["usd"] = _fmt_usd
+
 # A venue counts as "flat" — position fully closed, only float/rounding dust
 # left in the fill-based ledger — below these thresholds. Exchange minimum order
 # sizes are ~$5+ of notional, so a $1 cutoff sits safely between a real position
@@ -44,6 +59,11 @@ _FLAT_BASE_EPS = 1e-4
 
 def _venue_flat(net_qty_base: float, net_qty_usd: float) -> bool:
     return abs(net_qty_usd) < _FLAT_USD_EPS and abs(net_qty_base) < _FLAT_BASE_EPS
+
+
+# Exposed to the template so the per-symbol "Net positions" table dims flat
+# rows using the SAME threshold as the per-strategy view.
+templates.env.filters["isflat"] = _venue_flat
 
 
 def _strategy_flat(venues: list[dict]) -> bool:
