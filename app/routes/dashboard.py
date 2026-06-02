@@ -4,7 +4,7 @@ from datetime import timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func
@@ -19,6 +19,9 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 _templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
+
+# Live trading views must never be served stale from a browser/proxy cache.
+_NO_STORE = "no-store, must-revalidate"
 
 
 def _display_tz():
@@ -223,7 +226,8 @@ def health():
 
 
 @router.get("/positions", response_class=JSONResponse)
-def positions_json():
+def positions_json(response: Response):
+    response.headers["Cache-Control"] = _NO_STORE
     with session_scope() as db:
         rows = db.query(Position).order_by(Position.exchange, Position.symbol).all()
         return [
@@ -240,7 +244,8 @@ def positions_json():
 
 
 @router.get("/alerts", response_class=JSONResponse)
-def alerts_json(limit: int = Query(100, ge=1, le=1000)):
+def alerts_json(response: Response, limit: int = Query(100, ge=1, le=1000)):
+    response.headers["Cache-Control"] = _NO_STORE
     with session_scope() as db:
         rows = db.query(Alert).order_by(Alert.received_at.desc()).limit(limit).all()
         return [
@@ -258,9 +263,11 @@ def alerts_json(limit: int = Query(100, ge=1, le=1000)):
 
 @router.get("/orders", response_class=JSONResponse)
 def orders_json(
+    response: Response,
     status: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
 ):
+    response.headers["Cache-Control"] = _NO_STORE
     with session_scope() as db:
         q = db.query(Order).order_by(Order.created_at.desc())
         if status:
@@ -301,7 +308,7 @@ def dashboard(request: Request):
         dead = db.query(Order).filter(Order.status == "dead").count()
         execq = _execution_quality(db)
         routes = request.app.state.strategy_router.all()
-        return templates.TemplateResponse(
+        resp = templates.TemplateResponse(
             "dashboard.html",
             {
                 "request": request,
@@ -316,10 +323,14 @@ def dashboard(request: Request):
                 "outbound_ip": network.get_outbound_ip(),
             },
         )
+        # Live trading data — never let a browser/proxy serve a stale dashboard.
+        resp.headers["Cache-Control"] = _NO_STORE
+        return resp
 
 
 @router.get("/strategy-positions", response_class=JSONResponse)
-def strategy_positions_json(request: Request):
+def strategy_positions_json(request: Request, response: Response):
+    response.headers["Cache-Control"] = _NO_STORE
     with session_scope() as db:
         return _strategy_positions(db, request.app.state.strategy_router.all())
 
@@ -332,9 +343,3 @@ def egress_ip(refresh: bool = False):
     Pass ?refresh=true to bypass the 5-minute cache.
     """
     return {"egress_ip": network.get_outbound_ip(force_refresh=refresh)}
-
-
-@router.post("/admin/reload-strategies")
-def reload_strategies(request: Request):
-    request.app.state.strategy_router.reload()
-    return {"status": "ok", "count": len(request.app.state.strategy_router.all())}

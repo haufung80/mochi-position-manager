@@ -208,3 +208,20 @@ def test_toggle_unsupported_exchange_returns_400(client, strategies_file):
     r = client.post("/admin/strategies/toggle/X/binance",
                     data={"secret": SECRET})
     assert r.status_code == 400
+
+
+# ---------- reload-strategies ----------
+# Regression guard: a no-auth duplicate of this route once lived in
+# dashboard.py and shadowed the secret-protected one (it was registered
+# first). If that ever returns, a wrong secret would be ignored and yield
+# 200 instead of 401 — so the wrong-secret case is the real assertion.
+
+def test_reload_strategies_wrong_secret_rejected(client):
+    r = client.post("/admin/reload-strategies", data={"secret": "wrong"})
+    assert r.status_code == 401
+
+
+def test_reload_strategies_with_secret_ok(client):
+    r = client.post("/admin/reload-strategies", data={"secret": SECRET})
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "count": 0}

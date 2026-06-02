@@ -123,6 +123,17 @@ def test_alert_payload_drives_qty(strategies_yaml, stub_exchange, silent_notifie
     assert qty_calls == [0.002, 0.005]
 
 
+def test_orders_fire_at_2x_leverage(strategies_yaml, stub_exchange, silent_notifier):
+    """The account is run at 2x. Each adapter sets leverage on the symbol right
+    before the market order, so the value must reach market_order(). Asserted as
+    a literal (not the DEFAULT_LEVERAGE constant) so a silent change to it fails
+    here and forces a deliberate decision."""
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.001))
+    lev_calls = [c[4] for c in stub_exchange.calls if c[0] == "market"]
+    assert lev_calls == [2.0]
+
+
 def test_fan_out_creates_one_order_per_enabled_venue(strategies_yaml, stub_exchange, silent_notifier):
     c = _client(strategies_yaml)
     r = c.post("/webhook/tradingview", json=_payload("TEST_MULTI", quantity=0.05))
