@@ -22,6 +22,10 @@ class Alert(Base):
     strategy_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(16), nullable=False)  # buy / sell / close
     raw_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    # Signal price from the TV payload ({{close}} of the triggering bar); the
+    # reference we measure fill slippage against. Nullable: older alerts and any
+    # payload without a `price` field leave it unset.
+    signal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
     source_ip: Mapped[str] = mapped_column(String(64), default="")
 
@@ -45,6 +49,15 @@ class Order(Base):
     qty_base: Mapped[float] = mapped_column(Float, default=0.0)  # filled in once we know price
     reduce_only: Mapped[bool] = mapped_column(default=False)
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
+
+    # --- execution quality (live-vs-backtest monitoring) ---
+    # signal_price: copied from the alert ({{close}}); fill_price: actual VWAP
+    # fill from the exchange. slippage = fill vs signal. commission: real fee
+    # charged for this fill, in commission_asset units (USDT bybit / USDC HL).
+    signal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
 
     # pending -> success | failed | retrying | dead
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)

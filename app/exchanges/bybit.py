@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Literal
 
@@ -15,6 +16,13 @@ CATEGORY = "linear"  # USDT perpetuals
 
 class BybitExchange:
     name = "bybit"
+
+    # A just-placed market order's executions can lag the place_order ack by a
+    # beat. Poll briefly to capture the real fill price + fee. This runs in the
+    # background fan-out (after TradingView already got its response), so the
+    # extra ~sub-second is not on any user-facing path.
+    FILL_POLL_ATTEMPTS = 6
+    FILL_POLL_DELAY = 0.25
 
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, dry_run: bool = False):
         self.dry_run = dry_run
@@ -57,6 +65,35 @@ class BybitExchange:
         if q < min_qty:
             raise RuntimeError(f"Bybit: quantity {q} below minOrderQty {min_qty} for {symbol}")
         return format(q.normalize(), "f")
+
+    def _fill_details(self, symbol: str, order_id: str, want_qty: float):
+        """Poll execution records for `order_id` and aggregate the REAL fill:
+        (vwap_price, total_fee, fee_currency, filled_qty). Returns None if no
+        execution surfaced within the poll window — caller keeps the mark-price
+        fallback and a zero fee. Never raises into the order path."""
+        best = None
+        for _ in range(self.FILL_POLL_ATTEMPTS):
+            try:
+                resp = self._client.get_executions(
+                    category=CATEGORY, symbol=symbol, orderId=order_id, limit=50,
+                )
+                rows = (resp.get("result") or {}).get("list") or []
+            except Exception as e:
+                log.warning("Bybit get_executions failed (continuing): %s", e)
+                rows = []
+            tot = sum(float(r.get("execQty", 0) or 0) for r in rows)
+            if tot > 0:
+                notional = sum(
+                    float(r.get("execPrice", 0) or 0) * float(r.get("execQty", 0) or 0)
+                    for r in rows
+                )
+                fee = sum(float(r.get("execFee", 0) or 0) for r in rows)
+                ccy = next((r.get("feeCurrency") for r in rows if r.get("feeCurrency")), "") or "USDT"
+                best = (notional / tot, fee, ccy, tot)
+                if tot + 1e-9 >= want_qty:  # full fill captured — stop early
+                    return best
+            time.sleep(self.FILL_POLL_DELAY)
+        return best
 
     def _ensure_leverage(self, symbol: str, leverage: float) -> None:
         if leverage <= 0:
@@ -117,11 +154,26 @@ class BybitExchange:
                     raw=resp,
                 )
             order_id = (resp.get("result") or {}).get("orderId", "")
+
+            # Enrich with the REAL fill price + fee from executions. Best-effort:
+            # the order has already placed successfully; a lookup failure just
+            # leaves the mark-price estimate and a zero fee.
+            fill_price, commission, commission_asset = price, 0.0, ""
+            filled_qty = float(qty_str)
+            try:
+                det = self._fill_details(symbol, order_id, float(qty_str))
+                if det:
+                    fill_price, commission, commission_asset, filled_qty = det
+            except Exception as e:
+                log.warning("Bybit fill enrichment failed (continuing): %s", e)
+
             return OrderResult(
                 success=True,
                 exchange_order_id=order_id,
-                filled_qty_base=float(qty_str),
-                avg_price=price,
+                filled_qty_base=filled_qty,
+                avg_price=fill_price,
+                commission=commission,
+                commission_asset=commission_asset,
                 raw=resp,
             )
         except Exception as e:

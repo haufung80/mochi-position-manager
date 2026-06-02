@@ -400,6 +400,135 @@ def test_strategy_position_dust_reads_as_flat(strategies_yaml, stub_exchange, si
     assert 0 < abs(by_id["TEST_BTC"]["net_base"]) < 1e-6   # genuinely dust, not exactly 0
 
 
+def test_slippage_bps_is_side_adjusted():
+    """Positive = worse than signal; sign flips for sells; None when unpriced."""
+    from app.routes.dashboard import _slip_bps
+    assert round(_slip_bps(100.5, 100.0, "buy"), 1) == 50.0    # bought above signal -> adverse
+    assert round(_slip_bps(99.5, 100.0, "buy"), 1) == -50.0    # bought below -> improvement
+    assert round(_slip_bps(99.5, 100.0, "sell"), 1) == 50.0    # sold below -> adverse
+    assert round(_slip_bps(100.5, 100.0, "sell"), 1) == -50.0  # sold above -> improvement
+    assert _slip_bps(None, 100.0, "buy") is None
+    assert _slip_bps(100.0, None, "buy") is None
+    assert _slip_bps(100.0, 0.0, "buy") is None
+
+
+def test_fee_formatter_trims_to_six_dp():
+    from app.routes.dashboard import _fmt_fee
+    assert _fmt_fee(0.2715) == "0.2715"
+    assert _fmt_fee(0.271500) == "0.2715"
+    assert _fmt_fee(1) == "1"
+    assert _fmt_fee(0.0) == "0"
+    assert _fmt_fee(None) == "0"
+
+
+def test_bybit_fill_details_aggregates_executions(monkeypatch):
+    """VWAP price + summed fee across partial executions for one order."""
+    from app.exchanges.bybit import BybitExchange
+    monkeypatch.setattr(BybitExchange, "FILL_POLL_DELAY", 0)
+    ex = BybitExchange.__new__(BybitExchange)  # skip __init__ (no network/pybit client)
+
+    class FakeClient:
+        def get_executions(self, **kw):
+            return {"result": {"list": [
+                {"execQty": "0.3", "execPrice": "100.0", "execFee": "0.030", "feeCurrency": "USDT"},
+                {"execQty": "0.2", "execPrice": "110.0", "execFee": "0.022", "feeCurrency": "USDT"},
+            ]}}
+    ex._client = FakeClient()
+
+    avg, fee, ccy, tot = ex._fill_details("BTCUSDT", "oid1", 0.5)
+    assert abs(tot - 0.5) < 1e-9
+    assert abs(avg - 104.0) < 1e-9      # (0.3*100 + 0.2*110) / 0.5
+    assert abs(fee - 0.052) < 1e-9
+    assert ccy == "USDT"
+
+
+def test_hyperliquid_fill_fee_matches_oid(monkeypatch):
+    from app.exchanges.hyperliquid import HyperliquidExchange
+    monkeypatch.setattr(HyperliquidExchange, "FILL_POLL_DELAY", 0)
+    ex = HyperliquidExchange.__new__(HyperliquidExchange)  # skip __init__ (no network)
+    ex._account_address = "0xabc"
+
+    class FakeInfo:
+        def user_fills(self, addr):
+            return [
+                {"oid": 111, "fee": "0.01", "feeToken": "USDC"},
+                {"oid": 111, "fee": "0.02", "feeToken": "USDC"},
+                {"oid": 999, "fee": "9.9", "feeToken": "USDC"},
+            ]
+    ex._info = FakeInfo()
+
+    fee, token = ex._fill_fee("111")
+    assert abs(fee - 0.03) < 1e-9
+    assert token == "USDC"
+    assert ex._fill_fee("123") == (0.0, "USDC")  # no match -> zero
+
+
+def test_order_records_signal_price_fill_and_commission(strategies_yaml, stub_exchange,
+                                                        silent_notifier):
+    """Signal price flows alert -> order; fill price + real commission land on
+    the order; the alert keeps the signal price too."""
+    stub_exchange.next_result = OrderResult(
+        success=True, exchange_order_id="X1", filled_qty_base=0.001,
+        avg_price=50123.0, commission=0.05, commission_asset="USDT")
+    c = _client(strategies_yaml)
+    body = _payload("TEST_BTC", quantity=0.05)
+    body["price"] = 50000.0  # signal price ({{close}})
+    assert c.post("/webhook/tradingview", json=body).status_code == 200
+
+    with session_scope() as db:
+        o = db.query(Order).filter(Order.status == "success").one()
+        assert o.signal_price == 50000.0
+        assert o.fill_price == 50123.0
+        assert abs(o.commission - 0.05) < 1e-12
+        assert o.commission_asset == "USDT"
+        assert db.query(Alert).one().signal_price == 50000.0
+
+
+def test_orders_json_includes_execution_fields(strategies_yaml, stub_exchange, silent_notifier):
+    stub_exchange.next_result = OrderResult(
+        success=True, exchange_order_id="X1", filled_qty_base=0.001,
+        avg_price=50500.0, commission=0.07, commission_asset="USDT")
+    c = _client(strategies_yaml)
+    body = _payload("TEST_BTC", quantity=0.05)
+    body["price"] = 50000.0
+    c.post("/webhook/tradingview", json=body)
+
+    o = c.get("/orders").json()[0]
+    assert o["signal_price"] == 50000.0
+    assert o["fill_price"] == 50500.0
+    assert o["commission"] == 0.07
+    assert o["commission_asset"] == "USDT"
+    assert o["slippage_bps"] is not None and o["slippage_bps"] > 0  # bought above signal
+
+
+def test_execution_quality_aggregates_fees_and_slippage(strategies_yaml, stub_exchange,
+                                                        silent_notifier):
+    from app.routes.dashboard import _execution_quality
+    stub_exchange.next_result = OrderResult(
+        success=True, exchange_order_id="X", filled_qty_base=0.001,
+        avg_price=50500.0, commission=0.07, commission_asset="USDT")
+    c = _client(strategies_yaml)
+    body = _payload("TEST_BTC", quantity=0.05)
+    body["price"] = 50000.0
+    c.post("/webhook/tradingview", json=body)
+
+    with session_scope() as db:
+        eq = _execution_quality(db)
+    by_ex = {f["exchange"]: f for f in eq["fees_by_exchange"]}
+    assert abs(by_ex["bybit"]["total"] - 0.07) < 1e-9
+    assert by_ex["bybit"]["asset"] == "USDT"
+    assert eq["total_fees"] > 0
+    assert eq["avg_slippage_bps"] is not None and eq["avg_slippage_bps"] > 0
+
+
+def test_sqlite_additive_migration_is_idempotent():
+    """Running the column migration repeatedly must never raise (columns already
+    present after create_all / a prior run)."""
+    from app.db import _migrate_sqlite_columns
+    _migrate_sqlite_columns()
+    _migrate_sqlite_columns()
+
+
 def test_position_increments_accumulate_via_upsert():
     """Atomic insert-or-increment: the per-symbol Position sums across
     strategies; each StrategyPosition tracks only its own fills."""
@@ -583,3 +712,4 @@ def test_dashboard_renders_per_strategy_section_with_data(strategies_yaml, stub_
     assert "Net positions by strategy" in r.text
     assert "TEST_MULTI" in r.text
     assert "Total net exposure" in r.text
+    assert "Execution quality" in r.text   # new section renders even with no priced fills

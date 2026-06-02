@@ -65,6 +65,7 @@ def _persist_alert(db, alert: TradingViewAlert, body: dict,
         strategy_id=alert.strategy_id,
         action=alert.action,
         raw_payload=json.dumps(body),
+        signal_price=alert.price,
         source_ip=source_ip,
     )
     db.add(row)

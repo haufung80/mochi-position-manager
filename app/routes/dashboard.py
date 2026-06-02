@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import func
 
 from .. import network
 from ..config import get_settings
@@ -44,6 +45,36 @@ def _fmt_when(dt, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
 
 
 templates.env.filters["when"] = _fmt_when
+
+
+def _slip_bps(fill, signal, side: str = "buy"):
+    """Side-adjusted execution slippage in basis points: positive = WORSE than
+    the signal price (paid up on a buy / sold cheap on a sell), negative = price
+    improvement. None when either price is missing/zero."""
+    try:
+        fill = float(fill)
+        signal = float(signal)
+    except (TypeError, ValueError):
+        return None
+    if signal <= 0 or fill <= 0:
+        return None
+    raw = (fill - signal) / signal * 1e4
+    return raw if side == "buy" else -raw
+
+
+def _fmt_fee(v) -> str:
+    """Fees are small — show up to 6 dp, trailing zeros stripped (0.271500 -> '0.2715')."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "0"
+    if abs(f) < 1e-12:
+        return "0"
+    return f"{f:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+templates.env.filters["slipbps"] = _slip_bps
+templates.env.filters["fee"] = _fmt_fee
 
 
 def _fmt_qty(v) -> str:
@@ -156,6 +187,36 @@ def _strategy_positions(db, routes) -> list[dict]:
     return out
 
 
+def _execution_quality(db) -> dict:
+    """Stats for the 'Execution quality' panel: total commission per exchange
+    (all-time successful fills) and mean slippage over the most recent fills
+    that recorded both a signal and a fill price."""
+    fee_rows = (db.query(Order.exchange,
+                         func.sum(Order.commission),
+                         func.count(Order.id),
+                         func.max(Order.commission_asset))
+                .filter(Order.status == "success", Order.commission > 0)
+                .group_by(Order.exchange).all())
+    fees = sorted(
+        ({"exchange": e, "total": float(t or 0.0), "n": int(n), "asset": a or ""}
+         for e, t, n, a in fee_rows),
+        key=lambda r: r["exchange"],
+    )
+    fill_rows = (db.query(Order)
+                 .filter(Order.status == "success",
+                         Order.signal_price.isnot(None),
+                         Order.fill_price.isnot(None))
+                 .order_by(Order.created_at.desc()).limit(200).all())
+    slips = [s for s in (_slip_bps(o.fill_price, o.signal_price, o.side) for o in fill_rows)
+             if s is not None]
+    return {
+        "fees_by_exchange": fees,
+        "total_fees": sum(r["total"] for r in fees),
+        "avg_slippage_bps": (sum(slips) / len(slips)) if slips else None,
+        "slippage_sample": len(slips),
+    }
+
+
 @router.get("/health")
 def health():
     return {"status": "ok"}
@@ -216,6 +277,11 @@ def orders_json(
                 "status": o.status,
                 "attempts": o.attempts,
                 "exchange_order_id": o.exchange_order_id,
+                "signal_price": o.signal_price,
+                "fill_price": o.fill_price,
+                "slippage_bps": _slip_bps(o.fill_price, o.signal_price, o.side),
+                "commission": o.commission,
+                "commission_asset": o.commission_asset,
                 "error": o.error_message,
                 "next_retry_at": o.next_retry_at.isoformat() if o.next_retry_at else None,
                 "created_at": o.created_at.isoformat(),
@@ -233,6 +299,7 @@ def dashboard(request: Request):
         recent_orders = db.query(Order).order_by(Order.created_at.desc()).limit(25).all()
         retrying = db.query(Order).filter(Order.status == "retrying").count()
         dead = db.query(Order).filter(Order.status == "dead").count()
+        execq = _execution_quality(db)
         routes = request.app.state.strategy_router.all()
         return templates.TemplateResponse(
             "dashboard.html",
@@ -244,6 +311,7 @@ def dashboard(request: Request):
                 "orders": recent_orders,
                 "retrying": retrying,
                 "dead": dead,
+                "execq": execq,
                 "routes": routes,
                 "outbound_ip": network.get_outbound_ip(),
             },

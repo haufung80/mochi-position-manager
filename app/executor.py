@@ -89,9 +89,11 @@ def _apply_fill_to_position(db: Session, strategy_id: str, exchange: str, symbol
 
 
 def _new_order(alert_id: int, venue: VenueRoute, side: str,
-               quantity: float) -> Order:
+               quantity: float, signal_price: float | None = None) -> Order:
     """Create a pending Order row. qty_base is the source of truth (from TV);
-    qty_usd is left at 0 and filled in once we know the fill price."""
+    qty_usd is left at 0 and filled in once we know the fill price.
+    signal_price is the alert's reference price ({{close}}), carried here so the
+    fill's slippage can be measured per order without a join."""
     return Order(
         alert_id=alert_id,
         exchange=venue.exchange,
@@ -101,6 +103,7 @@ def _new_order(alert_id: int, venue: VenueRoute, side: str,
         qty_usd=0.0,
         reduce_only=False,
         leverage=DEFAULT_LEVERAGE,
+        signal_price=signal_price,
         status="pending",
         attempts=0,
     )
@@ -122,6 +125,9 @@ def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
     order.exchange_order_id = result.exchange_order_id
     order.qty_base = filled_qty
     order.qty_usd = filled_qty * result.avg_price  # derived for dashboard
+    order.fill_price = result.avg_price or None    # actual VWAP fill
+    order.commission = result.commission or 0.0
+    order.commission_asset = result.commission_asset or ""
     order.error_message = ""
     order.next_retry_at = None
     if result.avg_price > 0 and filled_qty > 0:
@@ -180,7 +186,8 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
     """
     side = alert.action.lower()  # "buy" | "sell"
 
-    order = existing_order or _new_order(alert.id, venue, side, quantity)
+    order = existing_order or _new_order(alert.id, venue, side, quantity,
+                                         getattr(alert, "signal_price", None))
     if existing_order is None:
         db.add(order)
         db.flush()

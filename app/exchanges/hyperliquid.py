@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import time
 from typing import Literal
 
 from eth_account import Account
@@ -15,6 +16,12 @@ Side = Literal["buy", "sell"]
 
 class HyperliquidExchange:
     name = "hyperliquid"
+
+    # The order response carries the fill price (avgPx) but not the fee — that
+    # surfaces via user_fills, which can lag the order ack slightly. Poll briefly.
+    # Runs in the background fan-out, so the latency is not user-facing.
+    FILL_POLL_ATTEMPTS = 6
+    FILL_POLL_DELAY = 0.25
 
     def __init__(
         self,
@@ -48,6 +55,26 @@ class HyperliquidExchange:
         if symbol not in all_mids:
             raise RuntimeError(f"Hyperliquid: symbol not found: {symbol}")
         return float(all_mids[symbol])
+
+    def _fill_fee(self, oid: str) -> tuple[float, str]:
+        """Sum the fees for fills belonging to `oid` from user_fills.
+        Returns (total_fee, fee_token). Best-effort: returns (0.0, 'USDC') if
+        nothing matches in the poll window. Never raises into the order path."""
+        if not self._account_address or not oid:
+            return 0.0, "USDC"
+        for _ in range(self.FILL_POLL_ATTEMPTS):
+            try:
+                fills = self._info.user_fills(self._account_address) or []
+            except Exception as e:
+                log.warning("HL user_fills failed (continuing): %s", e)
+                fills = []
+            matched = [f for f in fills if str(f.get("oid")) == str(oid)]
+            if matched:
+                fee = sum(float(f.get("fee", 0) or 0) for f in matched)
+                token = matched[0].get("feeToken") or "USDC"
+                return fee, token
+            time.sleep(self.FILL_POLL_DELAY)
+        return 0.0, "USDC"
 
     def _round_size(self, symbol: str, qty: float) -> float:
         """Snap a base-asset quantity to HL's per-asset szDecimals grid."""
@@ -121,11 +148,22 @@ class HyperliquidExchange:
                     avg_px = float(f.get("avgPx", price))
                 elif "error" in st:
                     return OrderResult(success=False, error_message=str(st["error"]), raw=resp)
+
+            # avgPx above is the real fill; fees aren't in the order response, so
+            # look them up. Best-effort — the order already filled regardless.
+            commission, commission_asset = 0.0, ""
+            try:
+                commission, commission_asset = self._fill_fee(oid)
+            except Exception as e:
+                log.warning("HL fee enrichment failed (continuing): %s", e)
+
             return OrderResult(
                 success=True,
                 exchange_order_id=oid,
                 filled_qty_base=filled or qty_base,
                 avg_price=avg_px,
+                commission=commission,
+                commission_asset=commission_asset,
                 raw=resp,
             )
         except Exception as e:

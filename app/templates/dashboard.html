@@ -118,19 +118,60 @@
     </table>
   </div>
 
+  <h2>Execution quality</h2>
+  <div class="card">
+    <p style="color:#9aa; margin:0 0 12px;">
+      Avg slippage:
+      {% if execq.avg_slippage_bps is none %}
+        <b style="color:#e6e6e6;">—</b> <span style="color:#666;">(no priced fills yet)</span>
+      {% else %}
+        <b style="color:{% if execq.avg_slippage_bps > 0.5 %}#f87171{% elif execq.avg_slippage_bps < -0.5 %}#4ade80{% else %}#e6e6e6{% endif %};">{{ "%+.1f"|format(execq.avg_slippage_bps) }} bps</b>
+        <span style="color:#666;">over last {{ execq.slippage_sample }} fills</span>
+      {% endif %}
+      &nbsp;·&nbsp; Total commission paid:
+      <b style="color:#e6e6e6;">≈ {{ "%.4f"|format(execq.total_fees) }}</b>
+      <span style="color:#666;">(USDT+USDC)</span>
+    </p>
+    <table>
+      <tr><th>Exchange</th><th>Commission paid</th><th>Filled orders</th></tr>
+      {% for f in execq.fees_by_exchange %}
+        <tr>
+          <td>{{ f.exchange }}</td>
+          <td class="mono">{{ f.total|fee }} {{ f.asset }}</td>
+          <td>{{ f.n }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="3" style="color:#888;">No commissions recorded yet — populates as new orders fill.</td></tr>
+      {% endfor %}
+    </table>
+    <p style="color:#666; font-size:11px; margin:10px 0 0;">
+      Slippage = actual fill price vs the alert's signal price, side-adjusted:
+      <span style="color:#f87171;">+ = worse than signal</span>,
+      <span style="color:#4ade80;">− = price improvement</span>.
+      Commission is the real fee charged by each venue (USDT on Bybit, USDC on Hyperliquid).
+    </p>
+  </div>
+
   <h2>Recent orders</h2>
   <div class="card">
     <table>
-      <tr><th>When</th><th>Strategy → Exchange</th><th>Side</th><th>Qty $</th><th>Status</th><th>Attempts</th><th>Error</th></tr>
+      <tr><th>When</th><th>Exchange / Symbol</th><th>Side</th><th>Qty $</th>
+          <th>Signal</th><th>Fill</th><th>Slippage</th><th>Fee</th>
+          <th>Status</th><th>Att</th><th>Error</th></tr>
       {% for o in orders %}
         <tr>
           <td class="mono">{{ o.created_at|when("%H:%M:%S") }}</td>
           <td>{{ o.exchange }}/{{ o.symbol }}</td>
           <td>{{ o.side }}{% if o.reduce_only %} (close){% endif %}</td>
           <td class="mono">${{ "%.0f"|format(o.qty_usd) }}</td>
+          <td class="mono">{% if o.signal_price %}{{ o.signal_price|qty }}{% else %}—{% endif %}</td>
+          <td class="mono">{% if o.fill_price %}{{ o.fill_price|qty }}{% else %}—{% endif %}</td>
+          {% set sb = o.fill_price|slipbps(o.signal_price, o.side) %}
+          <td class="mono">{% if sb is none %}<span style="color:#666;">—</span>{% else %}<span style="color:{% if sb > 0.5 %}#f87171{% elif sb < -0.5 %}#4ade80{% else %}#9aa{% endif %};">{{ "%+.1f"|format(sb) }}</span>{% endif %}</td>
+          <td class="mono">{% if o.commission %}{{ o.commission|fee }} {{ o.commission_asset }}{% else %}<span style="color:#666;">—</span>{% endif %}</td>
           <td><span class="pill {{ o.status }}">{{ o.status }}</span></td>
           <td>{{ o.attempts }}</td>
-          <td class="mono err">{{ o.error_message[:80] if o.error_message else "" }}</td>
+          <td class="mono err">{{ o.error_message[:60] if o.error_message else "" }}</td>
         </tr>
       {% endfor %}
     </table>

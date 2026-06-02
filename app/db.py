@@ -39,9 +39,38 @@ if _settings.database_url.startswith("sqlite"):
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
+# Additive columns introduced after the initial schema. create_all() only
+# creates MISSING tables — it never alters an existing one — so a live SQLite DB
+# won't gain these columns on deploy without an explicit ADD COLUMN. Each entry
+# is idempotent (skipped if the column already exists) and additive only.
+_SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "alerts": [("signal_price", "FLOAT")],
+    "orders": [
+        ("signal_price", "FLOAT"),
+        ("fill_price", "FLOAT"),
+        ("commission", "FLOAT NOT NULL DEFAULT 0.0"),
+        ("commission_asset", "VARCHAR(16) NOT NULL DEFAULT ''"),
+    ],
+}
+
+
+def _migrate_sqlite_columns() -> None:
+    """Add new nullable/defaulted columns to existing SQLite tables in place.
+    No-op when a column is already present, so it's safe to run on every boot."""
+    if not _settings.database_url.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        for table, cols in _SQLITE_ADDITIVE_COLUMNS.items():
+            present = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            for name, ddl in cols:
+                if name not in present:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
 def init_db() -> None:
     from . import models  # noqa: F401 — ensure models are registered
     Base.metadata.create_all(bind=engine)
+    _migrate_sqlite_columns()
 
 
 @contextmanager

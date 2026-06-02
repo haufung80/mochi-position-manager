@@ -59,10 +59,19 @@ class TradingViewAlert(BaseModel):
 
 
 class OrderResult(BaseModel):
-    """Normalized result returned by every exchange adapter."""
+    """Normalized result returned by every exchange adapter.
+
+    `avg_price` is the ACTUAL volume-weighted fill price (not a pre-trade mark),
+    so it can be compared against the signal price for slippage. `commission` is
+    the real fee charged for this fill, in `commission_asset` units (USDT on
+    Bybit linear, USDC on Hyperliquid). Both are best-effort: adapters fetch them
+    after the order fills, and fall back to 0 / mark price if the lookup fails —
+    the order itself is never blocked on enrichment."""
     success: bool
     exchange_order_id: str = ""
     filled_qty_base: float = 0.0
     avg_price: float = 0.0
+    commission: float = 0.0
+    commission_asset: str = ""
     error_message: str = ""
     raw: dict | None = None
