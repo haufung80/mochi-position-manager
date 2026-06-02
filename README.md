@@ -31,13 +31,18 @@ TradingView alert
        ▼
 ┌─────────────────────────────────────┐
 │  POST /webhook/tradingview          │
+│  fast + synchronous (sub-second):   │
 │   1. Validate secret + schema       │
 │   2. Insert Alert (UNIQUE idemp_key)│──► duplicate? return 200 {duplicate}
 │   3. Look up route in strategies.yaml│──► unknown/disabled? log + Telegram
-│   4. Call exchange adapter (market) │
-│   5. On success: update Position    │
-│   6. On failure: mark retrying      │
+│   4. return 200 {accepted}          │  ◄── TradingView gets an answer NOW
 └────────────┬────────────────────────┘
+             │ background task (threadpool — blocking SDK calls):
+             ▼
+   fan out across the strategy's enabled venues, one txn each:
+     • Call exchange adapter (market order)
+     • On success: update Position + StrategyPosition ledgers
+     • On failure: mark retrying
              │
              │ background:
              ▼
@@ -49,7 +54,8 @@ TradingView alert
                                        Telegram: "🚨 Order DEAD"
 ```
 
-**Persistence**: SQLite (`./data/middleware.db`) with three tables — `alerts`, `orders`, `positions`.
+**Persistence**: SQLite (`./data/middleware.db`, WAL mode) with four tables — `alerts`, `orders`,
+`positions` (net per exchange+symbol), and `strategy_positions` (net per strategy+exchange+symbol).
 No external services required.
 
 ---
@@ -57,7 +63,7 @@ No external services required.
 ## Quick start (local dev)
 
 ```bash
-cd tradingview_middleware
+cd mochi-position-manager
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
@@ -79,6 +85,7 @@ curl -X POST http://localhost:8000/webhook/tradingview \
     "secret": "your-webhook-secret",
     "strategy_id": "MR_VOTING_BTC_6H",
     "action": "buy",
+    "quantity": 0.001,
     "alert_id": "test-1"
   }'
 ```
@@ -116,113 +123,109 @@ In TradingView → Alert → *Notifications* tab:
   "secret": "your-webhook-secret",
   "strategy_id": "MR_VOTING_BTC_6H",
   "action": "{{strategy.order.action}}",
-  "alert_id": "{{strategy.order.id}}-{{timenow}}",
-  "bar_time": "{{timenow}}",
+  "quantity": {{strategy.order.contracts}},
+  "alert_id": "{{time}}",
   "price": {{close}}
 }
 ```
 
 > **Important.** Use `{{strategy.order.action}}` in pinescript strategies — it auto-fills as `buy` or `sell`.
-> For pure indicator alerts (not strategies), hardcode `"action": "buy"` / `"sell"` / `"close"`.
+> For pure indicator alerts (not strategies), hardcode `"action": "buy"` / `"sell"`.
 
-The middleware accepts these `action` values:
-- `buy`, `sell` — opens a market order in that direction
-- `close` — flat the position via `reduce_only` on the exchange
-- `close_long`, `close_short` — direction-specific closes
+Payload fields the middleware reads:
+- `action` — `buy` or `sell` only. The middleware always places a plain **market order** in that
+  direction. On one-way-mode perps (Bybit/HL defaults) a sell against an open long naturally closes it;
+  a sell against a flat position opens a short. Your pine script owns the entry/exit action sequence.
+- `quantity` — **required, > 0**, in **base-asset units** (e.g. `0.001` = 0.001 BTC), surfaced via
+  `{{strategy.order.contracts}}`. This is NOT a USD amount — if your pine script sizes in dollars,
+  convert to base before sending (`qty := cash_size / close`).
+- `alert_id` — the dedup key. Keep it a **single** placeholder; `{{time}}` (the bar's timestamp) is
+  enough to collapse a repainting bar's re-fires to one alert while letting the next bar through.
+- `price` — optional `{{close}}`; recorded as the signal price to measure fill slippage against.
 
 ---
 
-## Deploy to Fly.io
+## Deploy (AWS Lightsail)
 
-Fly.io is the recommended cloud target — free tier covers this exact workload (1 shared-cpu-1x VM + 3GB persistent volume), Dockerfile-native, automatic HTTPS, and the persistent volume keeps SQLite intact across deploys.
+The live instance runs on a single **AWS Lightsail** VM in the Singapore region (for sub-10ms latency
+to Bybit's matching engine), as a two-container Docker Compose stack (`docker-compose.prod.yml`):
 
-### One-time setup
+- **app** — the FastAPI middleware. Not exposed to the host; only reachable on the internal compose network.
+- **caddy** — reverse proxy that terminates HTTPS, auto-provisioning + renewing a Let's Encrypt cert
+  for `mochi-position-manager.duckdns.org`. Only its 80/443 are public.
 
-```bash
-# 1. Install flyctl
-brew install flyctl                                 # macOS
-# curl -L https://fly.io/install.sh | sh            # Linux/WSL
+SQLite (`middleware.db`) and `strategies.yaml` live on the host at `./data` (bind-mounted to
+`/app/data`), so they survive restarts and redeploys. Caddy's certs persist in the `caddy_data` named
+volume — **don't delete it** or you'll burn Let's Encrypt rate limits re-issuing.
 
-# 2. Sign in (or sign up — payment card required even on free tier, but won't be charged within limits)
-fly auth login
-
-# 3. Provision the app (uses fly.toml in this repo)
-fly launch --no-deploy --copy-config --name mochi-position-manager --region sin
-
-# 4. Create the persistent volume (SQLite + strategies.yaml live here)
-fly volumes create data --size 1 --region sin
-
-# 5. Set secrets — these never appear in logs or fly.toml
-fly secrets set WEBHOOK_SECRET="$(openssl rand -hex 32)"
-fly secrets set BYBIT_API_KEY=xxx BYBIT_API_SECRET=xxx
-fly secrets set HYPERLIQUID_PRIVATE_KEY=0xabc... HYPERLIQUID_ACCOUNT_ADDRESS=0xdef...
-fly secrets set TELEGRAM_BOT_TOKEN=123:abc TELEGRAM_CHAT_ID=456789
-
-# 6. First deploy
-fly deploy
-
-# 7. Upload your strategies.yaml to the persistent volume
-fly ssh console -C "cp /app/strategies.yaml.example /app/data/strategies.yaml"
-fly ssh console -C "vi /app/data/strategies.yaml"   # edit in place
-fly apps restart                                    # router reloads on boot
-```
-
-Your app is now live at `https://mochi-position-manager.fly.dev` — point TradingView alerts at `https://mochi-position-manager.fly.dev/webhook/tradingview`.
-
-### Verifying the deploy
+### One-time setup (on the VM)
 
 ```bash
-fly status                                       # machine health, IP, region
-fly logs                                         # tail logs
-curl https://mochi-position-manager.fly.dev/health
-curl https://mochi-position-manager.fly.dev/positions
-open https://mochi-position-manager.fly.dev/      # the dashboard
+# DNS: point mochi-position-manager.duckdns.org at the VM's static IP; open ports 80 + 443.
+git clone https://github.com/haufung80/mochi-position-manager.git
+cd mochi-position-manager
+
+cp .env.example .env                              # real API keys, DRY_RUN=false, WEBHOOK_SECRET, Telegram
+mkdir -p data
+cp strategies.yaml.example data/strategies.yaml   # then edit, or manage via the /admin UI
+
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Ongoing updates
+Secrets are read from `.env` on the box (`env_file: .env` in the compose file) — they never enter the
+image or git.
 
-- **Code changes**: `git push` to `main` — the bundled GitHub Action (`.github/workflows/fly-deploy.yml`) runs `flyctl deploy` automatically. Set `FLY_API_TOKEN` in GitHub repo *Settings → Secrets and variables → Actions* (`fly tokens create deploy` to mint one).
-- **Manual deploy**: `fly deploy` from your machine.
-- **Strategy changes**: `fly ssh console -C "vi /app/data/strategies.yaml"`, then `fly apps restart`.
-- **Inspect the SQLite DB**: `fly ssh console`, then `apt install sqlite3 -y && sqlite3 /app/data/middleware.db`.
-- **Rollback**: `fly releases` to list, `fly deploy --image registry.fly.io/mochi-position-manager:deployment-XXXX` to pin.
+### Deploying code changes
 
-### Region choice
+There is **no CI deploy**: `git push` to `main` does nothing to the server. Deploy is manual — SSH to
+the VM, then:
 
-`primary_region` defaults to `sin` (Singapore) in `fly.toml` because Bybit's matching engine is in Singapore — sub-10ms latency from your middleware → exchange. Other reasonable picks:
+```bash
+cd mochi-position-manager
+git pull
+docker compose -f docker-compose.prod.yml up -d --build
+```
 
-| Region | Best for |
-|---|---|
-| `sin` | Bybit, Asia-resident users (default) |
-| `nrt` | Bybit (Tokyo failover), Japan |
-| `iad` | Hyperliquid (Arbitrum sequencer), US users |
-| `fra` | EU users |
+The `./data` bind-mount means the ledger DB and strategies survive the rebuild.
 
-Edit `primary_region` in `fly.toml` and `fly deploy` to move.
+### Operating it
 
-### Cost guard-rails
+```bash
+docker compose -f docker-compose.prod.yml logs -f app    # tail app logs
+docker compose -f docker-compose.prod.yml restart app    # restart app only
+curl https://mochi-position-manager.duckdns.org/health
+open  https://mochi-position-manager.duckdns.org/        # the dashboard
+sqlite3 data/middleware.db                               # inspect the ledger
+```
 
-- **Always-on**: `auto_stop_machines = "off"` in `fly.toml` — a stopped machine would return 502 to TradingView and silently drop alerts. Do not change unless you're OK missing signals.
-- **Free tier**: a single `shared-cpu-1x` 256MB VM + 3GB volume + outbound bandwidth fits in the free allowance for low-volume use (a few hundred alerts/day).
-- **Scale up**: edit `[[vm]] memory = "512mb"` if you start seeing OOM in `fly logs` — unlikely for this workload.
+> **Legacy:** `fly.toml` remains from an earlier Fly.io deployment the project migrated off. It's
+> vestigial — the live deploy is Lightsail, as above.
 
 ---
 
 ## `strategies.yaml`
 
+A strategy declares a canonical `base_asset` and the `venues` it fans out to. The exchange-native
+symbol is resolved at load time (`BTC` → `BTCUSDT` on Bybit, `BTC` on Hyperliquid). Per-signal order
+**size is NOT stored here** — it comes from the TradingView alert payload (`quantity`, in base-asset
+units), so your pine-script sizing logic owns it per signal.
+
 ```yaml
 strategies:
   MR_VOTING_BTC_6H:
-    exchange: bybit         # bybit | hyperliquid
-    symbol: BTCUSDT         # exchange-native: bybit→BTCUSDT, hyperliquid→BTC
-    quantity_usd: 500       # $ notional per entry
-    leverage: 3
-    enabled: true
+    base_asset: BTC          # canonical ticker — one of: BTC / ETH / SOL / BNB
+    venues:
+      bybit: true            # fan out to both venues; flip to false to disable one
+      hyperliquid: false
 ```
 
-Reload without restarting:
+Supported base assets and venues live in `app/exchanges/symbols.py` — to add an exchange, add one
+entry there plus an adapter under `app/exchanges/`.
+
+Edit via the admin UI at `/admin/strategies` (create/update/delete/toggle, plus "sync positions"), or
+edit the file and reload without restarting:
 ```bash
-curl -X POST http://localhost:8000/admin/reload-strategies
+curl -X POST http://localhost:8000/admin/reload-strategies -d "secret=your-webhook-secret"
 ```
 
 ---
@@ -247,9 +250,14 @@ unknown strategy IDs (likely misconfigured TV alert), and successful fills.
 | GET  | `/` | HTML dashboard (positions, recent alerts, recent orders) |
 | GET  | `/health` | Liveness probe |
 | GET  | `/positions` | JSON: net position per (exchange, symbol) |
+| GET  | `/strategy-positions` | JSON: net position per (strategy, exchange, symbol) |
 | GET  | `/alerts?limit=100` | JSON: recent alerts |
 | GET  | `/orders?status=retrying` | JSON: orders, filterable |
-| POST | `/admin/reload-strategies` | Re-read `strategies.yaml` without restart |
+| GET  | `/network/egress-ip` | JSON: the app's outbound IP (for exchange API allowlists) |
+| GET  | `/admin/strategies` | HTML UI to create / update / delete / toggle strategies |
+| POST | `/admin/strategies`, `/admin/strategies/delete/{sid}`, `/admin/strategies/toggle/{sid}/{exchange}` | Strategy mutations (require `secret` form field) |
+| POST | `/admin/strategies/sync-positions` | Re-baseline per-strategy ledger to live exchange state |
+| POST | `/admin/reload-strategies` | Re-read `strategies.yaml` without restart (requires `secret`) |
 
 ---
 
@@ -260,8 +268,10 @@ unknown strategy IDs (likely misconfigured TV alert), and successful fills.
   exchange state. If you trade the same account manually, the two will drift.
 - **Dead-lettered orders are not auto-replayed.** After `RETRY_MAX_ATTEMPTS` (default 4), the order is marked
   `dead` and Telegram-pings you. You manually decide whether to replay (DB update) or skip.
-- **Idempotency.** Set `alert_id` to something unique per *intended fire* — `{{strategy.order.id}}-{{timenow}}`
-  is what's recommended. If you omit it, the middleware falls back to a hash of
+- **Idempotency.** Set `alert_id` to a **single** placeholder unique per intended fire — `{{time}}` (the
+  triggering bar's timestamp) is recommended; TradingView's alert editor flags a JSON warning if you
+  concatenate several placeholders. The key collapses a repainting bar's re-fires to one alert while
+  letting the next bar through. If you omit `alert_id`, the middleware falls back to a hash of
   `(strategy_id, action, bar_time)`.
 - **Dry-run mode.** Set `DRY_RUN=true` to log every order without touching exchanges. Position ledger still
   updates so you can verify routing end-to-end.
@@ -274,35 +284,41 @@ unknown strategy IDs (likely misconfigured TV alert), and successful fills.
 .venv/bin/python -m pytest tests/ -v
 ```
 
-Covers: dedup logic, YAML routing, full webhook → executor → position flow (with mocked exchange),
-duplicate handling, unknown/disabled strategies, failure → retry transition, close-action ledger zeroing.
+Covers: dedup logic, YAML routing, multi-venue fan-out, full webhook → executor → position flow (with a
+mocked exchange), duplicate handling, unknown/disabled strategies, failure → retry transition, and the
+admin strategy CRUD endpoints. Tests force `DRY_RUN` + a temp SQLite DB (see `tests/conftest.py`).
 
 ---
 
 ## Project layout
 
 ```
-tradingview_middleware/
+mochi-position-manager/
 ├── app/
 │   ├── main.py              FastAPI app + lifespan (boots retry worker)
 │   ├── config.py            pydantic-settings (env-driven)
-│   ├── db.py                SQLAlchemy session + init
-│   ├── models.py            Alert / Order / Position tables
+│   ├── db.py                SQLAlchemy session + init + additive SQLite migrations (WAL)
+│   ├── models.py            Alert / Order / Position / StrategyPosition tables
 │   ├── schemas.py           TradingView payload + OrderResult
-│   ├── routing.py           YAML → StrategyRoute lookup
+│   ├── routing.py           YAML → in-memory StrategyRoute / VenueRoute cache
+│   ├── strategy_store.py    YAML read/write (atomic) — single source for on-disk shape
 │   ├── dedup.py             idempotency_key
-│   ├── executor.py          Alert + Route → exchange call → DB update
+│   ├── executor.py          Alert + Venue → exchange call → DB update (one venue)
 │   ├── retry_worker.py      Async background poller for retrying orders
+│   ├── reconcile.py         Re-baseline per-strategy ledger to live exchange positions
+│   ├── network.py           Outbound egress-IP lookup
 │   ├── notifier.py          Telegram client
 │   ├── exchanges/
 │   │   ├── base.py          Exchange protocol
+│   │   ├── symbols.py       Canonical base asset → exchange-native symbol (source of truth)
 │   │   ├── bybit.py         pybit V5 adapter
 │   │   ├── hyperliquid.py   hyperliquid-python-sdk adapter
 │   │   └── registry.py      Lazy singleton per exchange
 │   ├── routes/
-│   │   ├── webhook.py       POST /webhook/tradingview
-│   │   └── dashboard.py     GET / + JSON endpoints
-│   └── templates/dashboard.html
+│   │   ├── webhook.py       POST /webhook/tradingview (fast path + background fan-out)
+│   │   ├── dashboard.py     GET / + JSON endpoints
+│   │   └── admin.py         /admin/strategies HTML CRUD (secret-gated)
+│   └── templates/           dashboard.html + admin_strategies.html
 ├── tests/
 ├── strategies.yaml.example
 ├── .env.example
