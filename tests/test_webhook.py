@@ -319,6 +319,139 @@ def test_position_increments_accumulate_via_upsert():
         assert abs(s2.net_qty_base + 0.005) < 1e-9         # S2 only (short)
 
 
+# ---------- JSON read endpoints ----------
+
+def test_json_read_endpoints(strategies_yaml, stub_exchange, silent_notifier):
+    """/positions, /alerts, /orders return the recorded activity + honor filters."""
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.05, alert_id="je1"))
+
+    positions = c.get("/positions").json()
+    assert any(p["exchange"] == "bybit" and p["symbol"] == "BTCUSDT" for p in positions)
+
+    alerts = c.get("/alerts").json()
+    assert alerts[0]["strategy_id"] == "TEST_BTC"
+    assert "idempotency_key" in alerts[0] and "received_at" in alerts[0]
+
+    orders = c.get("/orders").json()
+    assert orders[0]["exchange"] == "bybit" and orders[0]["status"] == "success"
+
+    assert all(o["status"] == "success" for o in c.get("/orders?status=success").json())
+    assert c.get("/orders?status=dead").json() == []
+
+
+# ---------- executor dead-letter path ----------
+
+def test_order_dead_letters_after_max_attempts(strategies_yaml, stub_exchange,
+                                                silent_notifier, monkeypatch):
+    """When an order exhausts retries it goes 'dead' and fires order_dead."""
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "retry_max_attempts", 1)  # die on first failure
+    stub_exchange.next_result = OrderResult(success=False, error_message="exchange down")
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", alert_id="dead1"))
+    with session_scope() as db:
+        order = db.query(Order).one()
+        assert order.status == "dead"
+        assert order.next_retry_at is None
+        assert order.attempts >= 1
+    assert any(call[0] == "order_dead" for call in silent_notifier.calls)
+
+
+# ---------- reconcile read-failure skip ----------
+
+def test_sync_skips_on_read_failure(strategies_yaml, stub_exchange, silent_notifier):
+    """If get_position() raises, sync skips that venue and reports the reason
+    instead of trading on unknown state."""
+    from app import reconcile
+
+    def boom(symbol):
+        if symbol == "BTCUSDT":
+            raise RuntimeError("api down")
+        return (0.0, 0.0)
+    stub_exchange.get_position = boom
+
+    result = reconcile.sync_strategy_positions(StrategyRouter(strategies_yaml))
+    skipped = {(s["strategy_id"], s["symbol"]): s["reason"] for s in result["skipped"]}
+    assert ("TEST_BTC", "BTCUSDT") in skipped
+    assert "read failed" in skipped[("TEST_BTC", "BTCUSDT")]
+
+
+# ---------- notifier message formatters ----------
+
+def test_notifier_formatters_build_messages(monkeypatch):
+    from app.notifier import TelegramNotifier, _fmt_qty
+    n = TelegramNotifier(token="t", chat_id="c")
+    sent = []
+    monkeypatch.setattr(n, "send", lambda text, **kw: sent.append(text))
+    n.order_succeeded("S1", "bybit", "BTCUSDT", "buy", 0.005, 96000.0)
+    n.order_failed("S1", "bybit", "BTCUSDT", "sell", 0.005, 2, "boom")
+    n.order_dead("S1", "bybit", "BTCUSDT", "sell", 0.005, 4, "boom")
+    n.duplicate_alert("S1", "k1")
+    n.unknown_strategy("WAT")
+    n.disabled_strategy("S1")
+    assert len(sent) == 6
+    assert any("Order filled" in t and "BTC" in t for t in sent)
+    assert any("FAILED" in t for t in sent)
+    assert any("DEAD" in t for t in sent)
+    assert any("Duplicate" in t for t in sent)
+    assert any("Unknown strategy" in t for t in sent)
+    assert any("Disabled strategy" in t for t in sent)
+    # _fmt_qty strips the quote suffix and adds ~USD when a price is given
+    assert _fmt_qty(0.005, "BTCUSDT", 96000.0) == "0.005 BTC (~$480.00)"
+    assert _fmt_qty(0.005, "BTC") == "0.005 BTC"
+
+
+# ---------- retry worker replay ----------
+
+def test_retry_worker_replays_due_order(strategies_yaml, stub_exchange, silent_notifier):
+    """A due 'retrying' order is re-executed and (stub succeeds) lands 'success',
+    with attempts incremented and the position updated."""
+    from datetime import datetime, timezone, timedelta
+    from app.retry_worker import _run_due_retries
+
+    with session_scope() as db:
+        a = Alert(idempotency_key="r1", strategy_id="TEST_BTC", action="buy",
+                  raw_payload="{}", source_ip="")
+        db.add(a)
+        db.flush()
+        db.add(Order(
+            alert_id=a.id, exchange="bybit", symbol="BTCUSDT", side="buy",
+            qty_usd=0.0, qty_base=0.01, status="retrying", attempts=1,
+            next_retry_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        ))
+
+    _run_due_retries()  # stub fills successfully
+
+    with session_scope() as db:
+        o = db.query(Order).one()
+        assert o.status == "success"
+        assert o.attempts == 2
+        assert db.query(Position).filter_by(exchange="bybit", symbol="BTCUSDT").count() == 1
+
+
+def test_retry_worker_skips_not_yet_due(strategies_yaml, stub_exchange, silent_notifier):
+    """An order whose next_retry_at is in the future is left alone."""
+    from datetime import datetime, timezone, timedelta
+    from app.retry_worker import _run_due_retries
+
+    with session_scope() as db:
+        a = Alert(idempotency_key="r2", strategy_id="TEST_BTC", action="buy",
+                  raw_payload="{}", source_ip="")
+        db.add(a)
+        db.flush()
+        db.add(Order(
+            alert_id=a.id, exchange="bybit", symbol="BTCUSDT", side="buy",
+            qty_usd=0.0, qty_base=0.01, status="retrying", attempts=1,
+            next_retry_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+        ))
+
+    _run_due_retries()
+
+    with session_scope() as db:
+        assert db.query(Order).one().status == "retrying"  # untouched
+
+
 def test_configured_strategy_shows_flat_without_fills(strategies_yaml, stub_exchange, silent_notifier):
     """Every configured strategy appears in the per-strategy view — flat if it
     has no fills yet — so a freshly added strategy shows up immediately."""
