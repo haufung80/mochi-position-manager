@@ -177,11 +177,24 @@ image or git.
 
 ### Deploying code changes
 
-There is **no CI deploy**: `git push` to `main` does nothing to the server. Deploy is manual — SSH to
-the VM, then:
+**CI/CD (recommended):** `.github/workflows/ci-cd.yml` runs the test suite + coverage gate
+(`pytest --cov=app --cov-fail-under=75`) on every PR and push to `main`. When **main** goes green it
+auto-deploys to the Lightsail box over SSH (`git pull --ff-only && docker compose -f docker-compose.prod.yml up -d --build`)
+and health-checks it — so a merge to `main` ships. A red test/coverage run blocks the deploy.
+
+One-time, add three repo secrets under **Settings → Secrets and variables → Actions** (until they
+exist the deploy job safely no-ops while tests still gate):
+
+| Secret | Value |
+|---|---|
+| `LIGHTSAIL_HOST` | the VM's IP / hostname |
+| `LIGHTSAIL_USER` | SSH user (e.g. `ubuntu`) |
+| `LIGHTSAIL_SSH_KEY` | full contents of the private key `.pem` |
+
+**Manual fallback** — SSH to the VM, then:
 
 ```bash
-cd mochi-position-manager
+cd ~/mochi          # the repo checkout on the box
 git pull
 docker compose -f docker-compose.prod.yml up -d --build
 ```

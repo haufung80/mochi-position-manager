@@ -18,3 +18,4 @@ tzdata==2024.2                    # zoneinfo fallback DB — slim images ship no
                                   # (America/Toronto) needs this.
 pytest==8.3.3
 pytest-asyncio==0.24.0
+pytest-cov==7.1.0                  # coverage gate in CI (.github/workflows/ci-cd.yml)

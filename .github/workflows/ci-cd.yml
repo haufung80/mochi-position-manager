@@ -1,0 +1,77 @@
+name: CI/CD
+
+# Tests + coverage gate on every PR and every push to main.
+# A green main auto-deploys to the Lightsail prod box over SSH.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # One CI run per ref; never cancel an in-flight run mid-deploy.
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # matches the prod image (Dockerfile: python:3.11-slim)
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests + coverage gate (fails under 75%)
+        run: |
+          pytest tests/ -q \
+            --cov=app --cov-report=term-missing --cov-fail-under=75
+
+  deploy:
+    name: Deploy to prod (Lightsail)
+    needs: test                                   # only deploy if tests + coverage passed
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-prod                          # never two deploys at once
+      cancel-in-progress: false
+    steps:
+      - name: Check deploy secrets are configured
+        id: precheck
+        env:
+          KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::warning::Deploy secrets not set — skipping deploy. Add LIGHTSAIL_HOST, LIGHTSAIL_USER and LIGHTSAIL_SSH_KEY in repo Settings → Secrets and variables → Actions."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy over SSH
+        if: steps.precheck.outputs.ready == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USER }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+          script_stop: true                        # abort on first failing command
+          script: |
+            set -e
+            cd ~/mochi
+            git pull --ff-only origin main
+            docker compose -f docker-compose.prod.yml up -d --build
+            docker compose -f docker-compose.prod.yml ps
+
+      - name: Health check
+        if: steps.precheck.outputs.ready == 'true'
+        run: |
+          curl -fsS --retry 6 --retry-delay 5 --retry-connrefused \
+            https://mochi-position-manager.duckdns.org/health

@@ -136,7 +136,13 @@ reverse proxy that terminates HTTPS for `mochi-position-manager.duckdns.org` (au
 SQLite (`middleware.db`) + `strategies.yaml` live on the host at `./data` (bind-mounted to `/app/data`),
 so they survive restarts/redeploys; Caddy's certs persist in the `caddy_data` volume.
 
-Deploy is **manual — there is no CI deploy.** A `git push` to `main` does NOT touch the server. On the
-box: `git pull && docker compose -f docker-compose.prod.yml up -d --build`. (`fly.toml` is a leftover
-from the earlier Fly.io setup the project migrated off — vestigial.) See README.md for full
+**CI/CD (`.github/workflows/ci-cd.yml`):** every PR and push to `main` runs the suite with a coverage
+gate (`pytest --cov=app --cov-fail-under=75`). On a green **push to main** the workflow SSH-deploys to
+the box (`git pull --ff-only && docker compose -f docker-compose.prod.yml up -d --build`) and
+health-checks it. Needs repo secrets `LIGHTSAIL_HOST` / `LIGHTSAIL_USER` / `LIGHTSAIL_SSH_KEY`; absent
+them the deploy job no-ops (tests still gate). **Keep `main` green — a red test/coverage run blocks the
+deploy.** The box checkout lives at `/home/ubuntu/mochi`.
+
+**Manual fallback** (on the box): `cd ~/mochi && git pull && docker compose -f docker-compose.prod.yml
+up -d --build`. (`fly.toml` is a vestige of the earlier Fly.io setup.) See README.md for full
 deploy/TradingView-alert setup.
