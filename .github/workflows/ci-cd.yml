@@ -7,6 +7,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:        # manual "Run workflow" button (also deploys when run on main)
 
 concurrency:
   # One CI run per ref; never cancel an in-flight run mid-deploy.
@@ -37,7 +38,7 @@ jobs:
   deploy:
     name: Deploy to prod (Lightsail)
     needs: test                                   # only deploy if tests + coverage passed
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-prod                          # never two deploys at once
