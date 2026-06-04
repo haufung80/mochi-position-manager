@@ -79,6 +79,7 @@ def test_post_creates_strategy_with_single_venue(client, strategies_file):
     entry = data["strategies"]["MR_BTC_6H"]
     assert entry == {
         "base_asset": "BTC",
+        "sar": False,
         "venues": {"hyperliquid": True, "bybit": False},
     }
     assert "quantity_usd" not in entry  # NOT in YAML schema anymore
@@ -225,3 +226,71 @@ def test_reload_strategies_with_secret_ok(client):
     r = client.post("/admin/reload-strategies", data={"secret": SECRET})
     assert r.status_code == 200
     assert r.json() == {"status": "ok", "count": 0}
+
+
+# ---------- SAR (stop-and-reverse) flag ----------
+# Label-only marker today; no order-behaviour change. These lock in the
+# config/UI plumbing so it can't silently regress.
+
+def test_post_creates_strategy_with_sar(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "SAR_ONE", "base_asset": "BTC",
+        "venue_bybit": "on", "sar": "on",
+    }, follow_redirects=False)
+    data = yaml.safe_load(strategies_file.read_text())
+    assert data["strategies"]["SAR_ONE"]["sar"] is True
+    assert client.app.state.strategy_router.get("SAR_ONE").sar is True
+
+
+def test_sar_defaults_false_when_unchecked(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "PLAIN", "base_asset": "BTC",
+        "venue_bybit": "on",
+    }, follow_redirects=False)
+    data = yaml.safe_load(strategies_file.read_text())
+    assert data["strategies"]["PLAIN"]["sar"] is False
+    assert client.app.state.strategy_router.get("PLAIN").sar is False
+
+
+def test_toggle_sar_flips_state(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "venue_bybit": "on",
+    }, follow_redirects=False)
+    assert client.app.state.strategy_router.get("X").sar is False
+
+    r = client.post("/admin/strategies/toggle-sar/X",
+                    data={"secret": SECRET}, follow_redirects=False)
+    assert r.status_code == 303
+    assert client.app.state.strategy_router.get("X").sar is True
+
+    client.post("/admin/strategies/toggle-sar/X",
+                data={"secret": SECRET}, follow_redirects=False)
+    assert client.app.state.strategy_router.get("X").sar is False
+
+
+def test_toggle_sar_unknown_strategy_404(client):
+    r = client.post("/admin/strategies/toggle-sar/NOPE", data={"secret": SECRET})
+    assert r.status_code == 404
+
+
+def test_toggle_sar_wrong_secret_rejected(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "venue_bybit": "on",
+    }, follow_redirects=False)
+    r = client.post("/admin/strategies/toggle-sar/X", data={"secret": "wrong"})
+    assert r.status_code == 401
+
+
+def test_list_renders_sar_toggle(client, strategies_file):
+    """Render the strategy table with a route present — exercises the new SAR
+    pill cell (other render tests use an empty list)."""
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "venue_bybit": "on", "sar": "on",
+    }, follow_redirects=False)
+    r = client.get("/admin/strategies")
+    assert r.status_code == 200
+    assert "/admin/strategies/toggle-sar/X" in r.text   # SAR toggle form rendered
+    assert 'name="sar"' in r.text                        # SAR checkbox in the add form

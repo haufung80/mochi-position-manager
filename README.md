@@ -208,12 +208,14 @@ sqlite3 data/middleware.db                               # inspect the ledger
 A strategy declares a canonical `base_asset` and the `venues` it fans out to. The exchange-native
 symbol is resolved at load time (`BTC` → `BTCUSDT` on Bybit, `BTC` on Hyperliquid). Per-signal order
 **size is NOT stored here** — it comes from the TradingView alert payload (`quantity`, in base-asset
-units), so your pine-script sizing logic owns it per signal.
+units), so your pine-script sizing logic owns it per signal. An optional `sar` flag marks a
+stop-and-reverse / always-in-market strategy — a **label only** today, it doesn't change order handling.
 
 ```yaml
 strategies:
   MR_VOTING_BTC_6H:
     base_asset: BTC          # canonical ticker — one of: BTC / ETH / SOL / BNB
+    sar: false               # optional; stop-and-reverse marker (label only)
     venues:
       bybit: true            # fan out to both venues; flip to false to disable one
       hyperliquid: false

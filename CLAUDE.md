@@ -33,13 +33,16 @@ There is no linter/formatter configured and no pytest config file; pytest discov
   retry policy, `DRY_RUN`, `DISPLAY_TIMEZONE`. `get_settings()` is `@lru_cache`d — tests call
   `get_settings.cache_clear()` after mutating env.
 - **`strategies.yaml`** → routing only. **Schema (current):** per-strategy `base_asset` +
-  `venues: {exchange: bool}`. The README's `exchange/symbol/quantity_usd/leverage` shape is OUTDATED.
-  Per-signal order **quantity comes from the TradingView payload** (base-asset units), never from YAML.
+  `venues: {exchange: bool}` + optional `sar: bool` (stop-and-reverse marker — **label only**, no
+  order-behaviour change yet; parsed into `StrategyRoute.sar`). The README's
+  `exchange/symbol/quantity_usd/leverage` shape is OUTDATED. Per-signal order **quantity comes from the
+  TradingView payload** (base-asset units), never from YAML.
 
 ```yaml
 strategies:
   MR_VOTING_BTC_6H:
     base_asset: BTC          # canonical: BTC / ETH / SOL / BNB (app/exchanges/symbols.py)
+    sar: false               # optional; stop-and-reverse marker (label only)
     venues:
       bybit: true            # symbol resolved at load time: BTC -> BTCUSDT (bybit), BTC (hyperliquid)
       hyperliquid: false

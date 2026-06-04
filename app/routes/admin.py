@@ -60,6 +60,12 @@ def _validate_base_asset(asset: str) -> str:
     return asset
 
 
+def _form_bool(form, key: str) -> bool:
+    """Truthiness of an HTML form field. Unchecked checkboxes are absent from
+    the payload, so a missing key reads as False."""
+    return str(form.get(key, "")).lower() in ("on", "true", "1", "yes")
+
+
 # ---------- endpoints ----------
 
 @router.get("/strategies", response_class=HTMLResponse)
@@ -86,20 +92,18 @@ async def save_strategy(request: Request):
     sid = _validate_strategy_id(str(form.get("strategy_id", "")))
     base = _validate_base_asset(str(form.get("base_asset", "")))
 
-    venues = {
-        ex: str(form.get(f"venue_{ex}", "")).lower() in ("on", "true", "1", "yes")
-        for ex in SUPPORTED_EXCHANGES
-    }
+    venues = {ex: _form_bool(form, f"venue_{ex}") for ex in SUPPORTED_EXCHANGES}
     if not any(venues.values()):
         # All-off is allowed (pause without losing config); log so it's not silent.
         log.warning("admin: strategy %s saved with all venues disabled", sid)
 
+    sar = _form_bool(form, "sar")
     is_update = strategy_store.upsert_strategy(
-        _strategies_path(), sid, base_asset=base, venues=venues,
+        _strategies_path(), sid, base_asset=base, venues=venues, sar=sar,
     )
     _reload_router(request)
-    log.info("admin: %s strategy %s base=%s venues=%s",
-             "updated" if is_update else "created", sid, base, venues)
+    log.info("admin: %s strategy %s base=%s venues=%s sar=%s",
+             "updated" if is_update else "created", sid, base, venues, sar)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 
@@ -125,6 +129,18 @@ def toggle_venue(sid: str, exchange: str, request: Request,
         raise HTTPException(404, f"strategy_id not found: {sid}")
     _reload_router(request)
     log.info("admin: toggled %s/%s -> %s", sid, exchange, new_val)
+    return RedirectResponse(url="/admin/strategies", status_code=303)
+
+
+@router.post("/strategies/toggle-sar/{sid}", response_class=HTMLResponse)
+def toggle_sar(sid: str, request: Request, secret: str = Form(...)):
+    """Flip a strategy's stop-and-reverse marker (label only — no order change)."""
+    _require_secret(secret)
+    new_val = strategy_store.toggle_sar(_strategies_path(), sid)
+    if new_val is None:
+        raise HTTPException(404, f"strategy_id not found: {sid}")
+    _reload_router(request)
+    log.info("admin: toggled SAR %s -> %s", sid, new_val)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 

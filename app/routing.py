@@ -34,6 +34,7 @@ class StrategyRoute:
     strategy_id: str
     base_asset: str
     venues: tuple[VenueRoute, ...]
+    sar: bool = False   # stop-and-reverse marker; label only (no order-behaviour change)
 
     def enabled_venues(self) -> tuple[VenueRoute, ...]:
         return tuple(v for v in self.venues if v.enabled)
@@ -83,7 +84,8 @@ def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
     # Canonical venue order (SUPPORTED_EXCHANGES) regardless of YAML key order,
     # so the dashboard / per-strategy view / fan-out are consistent.
     venues.sort(key=lambda v: SUPPORTED_EXCHANGES.index(v.exchange))
-    return StrategyRoute(strategy_id=sid, base_asset=base, venues=tuple(venues))
+    return StrategyRoute(strategy_id=sid, base_asset=base, venues=tuple(venues),
+                         sar=bool(cfg.get("sar", False)))
 
 
 class StrategyRouter:

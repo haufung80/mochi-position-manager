@@ -12,9 +12,12 @@
 # configured but skips orders — useful for pausing one venue while keeping
 # the other running.
 #
+# `sar` (optional, default false) marks a stop-and-reverse / always-in-market
+# strategy. It is a LABEL only today — it does NOT change order behaviour.
+#
 # Per-signal position size is NOT configured here. It comes from the
-# TradingView alert payload's `quantity_usd` field, supplied by your
-# pine-script sizing logic. Tweak your strategy's sizing → reflects
+# TradingView alert payload's `quantity` field (base-asset units), supplied by
+# your pine-script sizing logic. Tweak your strategy's sizing → reflects
 # immediately, no middleware redeploy.
 
 strategies:
@@ -32,6 +35,7 @@ strategies:
 
   VWAP_ATR_BTC_4H:
     base_asset: BTC
+    sar: true                # stop-and-reverse / always-in-market (label only)
     venues:
       hyperliquid: true
       bybit: true

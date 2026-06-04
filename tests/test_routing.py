@@ -66,6 +66,27 @@ def test_unknown_returns_none(strategies_yaml):
     assert r.get("UNKNOWN") is None
 
 
+def test_sar_flag_parsed_and_defaults_false(tmp_path):
+    """SAR is an optional per-strategy marker; absent key → False (so legacy
+    entries on disk keep working)."""
+    p = tmp_path / "sar.yaml"
+    p.write_text(
+        "strategies:\n"
+        "  WITH_SAR:\n"
+        "    base_asset: BTC\n"
+        "    sar: true\n"
+        "    venues:\n"
+        "      bybit: true\n"
+        "  NO_SAR:\n"
+        "    base_asset: ETH\n"
+        "    venues:\n"
+        "      bybit: true\n"
+    )
+    r = StrategyRouter(p)
+    assert r.get("WITH_SAR").sar is True
+    assert r.get("NO_SAR").sar is False
+
+
 # ---------- symbol mapping ----------
 
 def test_symbol_for_known_exchanges():

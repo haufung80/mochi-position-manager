@@ -8,6 +8,7 @@ YAML schema:
     strategies:
       MR_VOTING_BTC_6H:
         base_asset: BTC          # canonical ticker (BTC / ETH / SOL / BNB)
+        sar: false               # stop-and-reverse marker (optional; label only)
         venues:
           hyperliquid: true      # symbol resolved at runtime via symbol_for()
           bybit: false
@@ -63,7 +64,8 @@ def save(path: Path, data: dict[str, Any]) -> None:
 
 
 def upsert_strategy(path: Path, strategy_id: str, *,
-                    base_asset: str, venues: dict[str, bool]) -> bool:
+                    base_asset: str, venues: dict[str, bool],
+                    sar: bool = False) -> bool:
     """Insert or update a single strategy entry. Returns True if it was an
     update (i.e. existed before), False if newly created."""
     data = load(path)
@@ -71,6 +73,7 @@ def upsert_strategy(path: Path, strategy_id: str, *,
     is_update = strategy_id in strategies
     strategies[strategy_id] = {
         "base_asset": base_asset,
+        "sar": bool(sar),
         "venues": dict(venues),
     }
     save(path, data)
@@ -104,5 +107,18 @@ def toggle_venue(path: Path, strategy_id: str, exchange: str) -> bool | None:
     else:
         new_val = not bool(current)
         venues[exchange] = new_val
+    save(path, data)
+    return new_val
+
+
+def toggle_sar(path: Path, strategy_id: str) -> bool | None:
+    """Flip a strategy's stop-and-reverse marker. Returns the new state, or
+    None if the strategy doesn't exist."""
+    data = load(path)
+    strategies = data.get("strategies", {})
+    if strategy_id not in strategies:
+        return None
+    new_val = not bool(strategies[strategy_id].get("sar", False))
+    strategies[strategy_id]["sar"] = new_val
     save(path, data)
     return new_val
