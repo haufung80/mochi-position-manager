@@ -13,6 +13,7 @@ from .routes.webhook import router as webhook_router
 from .routes.dashboard import router as dashboard_router
 from .routes.admin import router as admin_router
 from .retry_worker import retry_loop
+from .funding_worker import funding_loop
 
 
 def _configure_logging(level: str) -> None:
@@ -47,16 +48,20 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(
         retry_loop(app.state.strategy_router, stop_event=stop_event)
     )
+    funding_task = asyncio.create_task(
+        funding_loop(app.state.strategy_router, stop_event=stop_event)
+    )
     log.info("Middleware ready. dry_run=%s", settings.dry_run)
     try:
         yield
     finally:
         stop_event.set()
-        worker_task.cancel()
-        try:
-            await worker_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in (worker_task, funding_task):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 app = FastAPI(

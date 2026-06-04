@@ -7,6 +7,7 @@ from typing import Literal
 from pybit.unified_trading import HTTP
 
 from ..schemas import OrderResult
+from .symbols import base_asset_of, canonical_step_size
 
 log = logging.getLogger(__name__)
 
@@ -223,3 +224,41 @@ class BybitExchange:
             mark = float(p.get("markPrice") or p.get("avgPrice") or 0.0)
             return signed, mark
         return 0.0, 0.0
+
+    def get_price(self, symbol: str) -> float:
+        try:
+            return self._mark_price(symbol)
+        except Exception as e:
+            log.warning("Bybit get_price failed for %s: %s", symbol, e)
+            return 0.0
+
+    def get_step_size(self, symbol: str) -> float:
+        """Bybit lot-size grid (qtyStep). Falls back to the canonical map."""
+        try:
+            step = self._instrument(symbol).get("lotSizeFilter", {}).get("qtyStep")
+            if step:
+                return float(step)
+        except Exception as e:
+            log.warning("Bybit get_step_size failed for %s (using canonical): %s", symbol, e)
+        return canonical_step_size(base_asset_of(self.name, symbol))
+
+    def get_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
+        """Funding settlements from the account transaction log. NOTE: Bybit v5
+        records funding as type=SETTLEMENT with the amount in `funding` (signed;
+        negative = paid). Best-effort — returns [] on failure."""
+        try:
+            resp = self._client.get_transaction_log(
+                category=CATEGORY, symbol=symbol, type="SETTLEMENT",
+                startTime=start_ms, endTime=end_ms, limit=200,
+            )
+            rows = (resp.get("result") or {}).get("list") or []
+        except Exception as e:
+            log.warning("Bybit get_funding failed for %s: %s", symbol, e)
+            return []
+        out: list[dict] = []
+        for r in rows:
+            ts = int(r.get("transactionTime") or 0)
+            amt = float(r.get("funding") or r.get("change") or 0.0)
+            if ts and amt:
+                out.append({"time_ms": ts, "amount": amt})
+        return out

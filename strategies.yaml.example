@@ -1,47 +1,63 @@
-# Per-strategy routing config.
+# Per-strategy routing + sizing config.
 #
 # Key = strategy_id sent by TradingView in the alert payload.
 # ONE TradingView alert → ONE strategy here → fans out to N enabled exchanges.
 #
-# `base_asset` is the canonical ticker. Supported: BTC, ETH, SOL, BNB.
+# `base_asset` is the canonical ticker. Supported: BTC, ETH, SOL, BNB, XRP.
 # The middleware maps it to each exchange's native symbol automatically:
-#   - Hyperliquid:        BTC,    ETH,    SOL,    BNB     (bare ticker)
-#   - Bybit linear perp:  BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT
+#   - Hyperliquid:        BTC,    ETH,    SOL,    BNB,   XRP     (bare ticker)
+#   - Bybit linear perp:  BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT
 #
-# `venues` maps exchange name → enabled (bool). `false` keeps the row
-# configured but skips orders — useful for pausing one venue while keeping
-# the other running.
+# `venues` maps exchange name → enabled (bool). `false` keeps the row configured
+# but skips orders — useful for pausing one venue while keeping the other running.
 #
-# `sar` (optional, default false) marks a stop-and-reverse / always-in-market
-# strategy. It is a LABEL only today — it does NOT change order behaviour.
+# EXECUTION MODE — `sar` (optional, default false) chooses how orders are sized:
 #
-# Per-signal position size is NOT configured here. It comes from the
-# TradingView alert payload's `quantity` field (base-asset units), supplied by
-# your pine-script sizing logic. Tweak your strategy's sizing → reflects
-# immediately, no middleware redeploy.
+#   sar: true  → ALERT-DRIVEN. The middleware submits the alert's `quantity`
+#                (base-asset units, e.g. {{strategy.order.contracts}}) as-is. Use
+#                for stop-and-reverse / always-in-market pine strategies that send
+#                the full (doubled, on a flip) size themselves. `position_size` is
+#                ignored. `quantity` is REQUIRED on the alert.
+#
+#   sar: false → MANAGED. The middleware sizes the position itself, PER VENUE:
+#                  • flat   → open floor(position_size / price / step) units
+#                             (USDT NOTIONAL cap, rounded down to the lot step)
+#                  • opposite signal → close the position to flat
+#                  • same-direction signal → rejected (no pyramiding) + alert
+#                The alert's `quantity` is OPTIONAL and IGNORED.
+#
+# `position_size` (optional, USDT notional, MANAGED strategies only): the max
+# position to open per venue. If omitted, the strategy runs in PAPER mode —
+# orders use one minimum unit and a Telegram warning fires, so you can roll out
+# sizing from the /admin UI without risking full size.
 
 strategies:
+  # Managed: open up to $1000 notional per venue, close on the opposite signal.
   MR_VOTING_BTC_6H:
     base_asset: BTC
+    position_size: 1000
     venues:
       hyperliquid: true
       bybit: false
 
+  # Managed but UNCONFIGURED size -> paper mode (min unit + Telegram warning).
   DON_CHANNEL_ETH_1H:
     base_asset: ETH
     venues:
       hyperliquid: true
       bybit: true
 
+  # Alert-driven (stop-and-reverse): quantity comes from the TradingView alert.
   VWAP_ATR_BTC_4H:
     base_asset: BTC
-    sar: true                # stop-and-reverse / always-in-market (label only)
+    sar: true
     venues:
       hyperliquid: true
       bybit: true
 
-  SMA_CROSS_SOL_1H:
-    base_asset: SOL
+  XRP_BREAKOUT_4H:
+    base_asset: XRP
+    position_size: 500
     venues:
+      bybit: true
       hyperliquid: false
-      bybit: false

@@ -66,6 +66,21 @@ def _form_bool(form, key: str) -> bool:
     return str(form.get(key, "")).lower() in ("on", "true", "1", "yes")
 
 
+def _validate_position_size(raw: str) -> float | None:
+    """Parse the optional position_size form field (USDT notional). Blank → None
+    (paper mode). Raises 400 on a non-numeric or non-positive value."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        v = float(raw)
+    except ValueError:
+        raise HTTPException(400, "position_size must be a number (USDT) or blank")
+    if v <= 0:
+        raise HTTPException(400, "position_size must be > 0 (or blank for paper mode)")
+    return v
+
+
 # ---------- endpoints ----------
 
 @router.get("/strategies", response_class=HTMLResponse)
@@ -98,12 +113,14 @@ async def save_strategy(request: Request):
         log.warning("admin: strategy %s saved with all venues disabled", sid)
 
     sar = _form_bool(form, "sar")
+    position_size = _validate_position_size(str(form.get("position_size", "")))
     is_update = strategy_store.upsert_strategy(
         _strategies_path(), sid, base_asset=base, venues=venues, sar=sar,
+        position_size=position_size,
     )
     _reload_router(request)
-    log.info("admin: %s strategy %s base=%s venues=%s sar=%s",
-             "updated" if is_update else "created", sid, base, venues, sar)
+    log.info("admin: %s strategy %s base=%s venues=%s sar=%s size=%s",
+             "updated" if is_update else "created", sid, base, venues, sar, position_size)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 

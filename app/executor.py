@@ -19,6 +19,7 @@ opens a short. The pine script is responsible for the action sequence.
 """
 from __future__ import annotations
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -38,6 +39,17 @@ log = logging.getLogger(__name__)
 # Takes effect per symbol on its NEXT order — open positions keep their
 # current leverage until then.
 DEFAULT_LEVERAGE: float = 2.0
+
+# Below this |net base qty| a position is treated as flat (float-fill dust).
+_POSITION_EPS: float = 1e-9
+
+# Serializes the per-strategy ledger read-modify-write across the webhook
+# threadpool + retry/funding worker threads (one process). Held across a
+# snapshot-refreshing commit -> fresh read -> apply -> commit, because SQLite
+# deferred transactions + WAL do NOT stop a stale read from overwriting a newer
+# commit (lost update). The aggregate Position row uses the atomic in-SQL UPSERT
+# and doesn't need this.
+_LEDGER_LOCK = threading.Lock()
 
 
 def _utcnow() -> datetime:
@@ -79,13 +91,84 @@ def _bump_position(db: Session, model, keys: dict,
 
 def _apply_fill_to_position(db: Session, strategy_id: str, exchange: str, symbol: str,
                             side: str, qty_base: float, price: float) -> None:
-    """Update BOTH ledgers: the per-(exchange,symbol) total and the
-    per-(strategy,exchange,symbol) breakdown."""
+    """Update BOTH ledgers on a fill, serialized by `_LEDGER_LOCK`:
+      * Position (aggregate per exchange/symbol): atomic in-SQL UPSERT.
+      * StrategyPosition (per strategy): read-modify-write (avg-entry + realized
+        PnL need the PRIOR avg, so it can't be a single additive UPSERT).
+
+    The lock and the FIRST commit are load-bearing: committing refreshes this
+    session's read snapshot so the StrategyPosition SELECT sees the latest
+    committed state, and holding the lock through the final commit stops a
+    concurrent fill on the same row from losing an update. (The caller's Order
+    changes, set just before this in `_on_success`, are flushed by that first
+    commit — Order success + ledger still land together.)
+    """
     signed = qty_base if side == "buy" else -qty_base
-    _bump_position(db, Position, {"exchange": exchange, "symbol": symbol}, signed, price)
-    _bump_position(db, StrategyPosition,
-                   {"strategy_id": strategy_id, "exchange": exchange, "symbol": symbol},
-                   signed, price)
+    with _LEDGER_LOCK:
+        db.commit()   # persist caller's pending changes + start a fresh snapshot
+        _bump_position(db, Position, {"exchange": exchange, "symbol": symbol}, signed, price)
+        _apply_strategy_fill(db, strategy_id, exchange, symbol, signed, qty_base, price)
+        db.commit()
+
+
+def _apply_strategy_fill(db: Session, strategy_id: str, exchange: str, symbol: str,
+                         signed: float, qty: float, price: float) -> None:
+    """Apply one fill to the per-strategy ledger with avg-entry + realized PnL.
+
+    Handles increase (weighted-avg entry), partial close, full close, and
+    cross-zero reversal (close the old leg, open the remainder at the fill price).
+    Realized PnL is USDT, gross of fees (fees live on Order / FundingEvent).
+
+    MUST run under `_LEDGER_LOCK` with a freshly-committed snapshot (see
+    `_apply_fill_to_position`) — the read-modify-write is otherwise racy.
+    """
+    row = (db.query(StrategyPosition)
+             .filter_by(strategy_id=strategy_id, exchange=exchange, symbol=symbol)
+             .one_or_none())
+    now = _utcnow()
+    if row is None:
+        db.add(StrategyPosition(
+            strategy_id=strategy_id, exchange=exchange, symbol=symbol,
+            net_qty_base=signed, net_qty_usd=signed * price, last_price=price,
+            avg_entry_price=price, realized_pnl=0.0, updated_at=now))
+        return
+
+    new_net, new_avg, realized_delta = _fill_math(
+        row.net_qty_base, row.avg_entry_price, signed, qty, price)
+    row.realized_pnl += realized_delta
+    row.avg_entry_price = new_avg
+    row.net_qty_base = new_net
+    row.net_qty_usd = new_net * price
+    row.last_price = price
+    row.updated_at = now
+
+
+def _fill_math(old_net: float, old_avg: float, signed: float, qty: float,
+               price: float) -> tuple[float, float, float]:
+    """Pure avg-entry + realized-PnL accounting for ONE fill. Returns
+    (new_net, new_avg_entry, realized_delta). Shared by the live ledger update
+    and the performance-page equity-curve replay so the math has one home.
+
+    Cases: open-from-flat, same-direction increase (weighted-avg entry),
+    partial/full close (realize on the closed portion), and cross-zero reversal
+    (realize the old leg, open the remainder at the fill price)."""
+    new_net = old_net + signed
+    if abs(old_net) < _POSITION_EPS:
+        return new_net, price, 0.0                           # opening from flat
+    if (old_net > 0) == (signed > 0):                        # increase same direction
+        new_avg = (abs(old_net) * old_avg + qty * price) / (abs(old_net) + qty)
+        return new_net, new_avg, 0.0
+    # reduce / close / reverse
+    closed = min(qty, abs(old_net))
+    direction = 1.0 if old_net > 0 else -1.0
+    realized_delta = direction * (price - old_avg) * closed
+    if qty > abs(old_net) + _POSITION_EPS:
+        new_avg = price                                      # reversal: new leg at fill
+    elif abs(new_net) < _POSITION_EPS:
+        new_avg = 0.0                                        # fully flat
+    else:
+        new_avg = old_avg                                    # partial close
+    return new_net, new_avg, realized_delta
 
 
 def _new_order(alert_id: int, venue: VenueRoute, side: str,
@@ -107,6 +190,19 @@ def _new_order(alert_id: int, venue: VenueRoute, side: str,
         status="pending",
         attempts=0,
     )
+
+
+def record_rejected_order(db: Session, alert: Alert, venue: VenueRoute,
+                          side: str, reason: str) -> Order:
+    """Persist a managed signal the portfolio manager refused to act on
+    (double-down / unsized / price unavailable). Audit-only: qty 0, status
+    'rejected', never retried, ledger untouched — so the dropped signal is
+    visible on the dashboard instead of vanishing."""
+    order = _new_order(alert.id, venue, side, 0.0, alert.signal_price)
+    order.status = "rejected"
+    order.error_message = reason
+    db.add(order)
+    return order
 
 
 def _call_exchange(venue: VenueRoute, side: str, quantity: float) -> OrderResult:

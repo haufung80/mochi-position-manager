@@ -20,12 +20,14 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
+from .. import portfolio
 from ..config import Settings, get_settings
 from ..db import session_scope
 from ..dedup import idempotency_key
-from ..executor import execute_order
+from ..executor import execute_order, record_rejected_order
 from ..models import Alert
 from ..notifier import get_notifier
+from ..portfolio import Decision
 from ..schemas import TradingViewAlert
 
 log = logging.getLogger(__name__)
@@ -78,8 +80,9 @@ def _run_fan_out(alert_id: int, route, quantity: float) -> None:
     so the blocking exchange SDK calls never touch the event loop).
 
     One independent transaction per venue, so a failure on one exchange can't
-    roll back another's fill. `execute_order` persists each Order, drives it
-    through success / retrying / dead, and emits its own notifier events.
+    roll back another's fill. For each venue the portfolio manager decides the
+    order intent (managed sizing for sar=false; the alert's quantity for sar=true),
+    then `execute_order` persists + drives the Order through success/retrying/dead.
     """
     for venue in route.enabled_venues():
         try:
@@ -88,10 +91,28 @@ def _run_fan_out(alert_id: int, route, quantity: float) -> None:
                 if alert is None:
                     log.error("background fan-out: alert %s vanished", alert_id)
                     return
-                execute_order(db, alert, venue, quantity=quantity)
+                _dispatch_venue(db, alert, route, venue, quantity)
         except Exception:
             log.exception("fan-out: order failed alert=%s ex=%s",
                           alert_id, venue.exchange)
+
+
+def _dispatch_venue(db, alert: Alert, route, venue, alert_quantity: float) -> None:
+    """Apply the portfolio manager's decision for ONE venue."""
+    action = alert.action.lower()
+    sizing = portfolio.decide(db, route, venue, action, alert_quantity=alert_quantity)
+    notifier = get_notifier()
+    if sizing.decision is Decision.REJECT:
+        record_rejected_order(db, alert, venue, action, sizing.reason)
+        notifier.order_rejected(route.strategy_id, venue.exchange, venue.symbol,
+                                action, sizing.reason)
+        log.info("portfolio REJECT %s/%s/%s: %s",
+                 route.strategy_id, venue.exchange, venue.symbol, sizing.reason)
+        return
+    if sizing.paper:
+        notifier.paper_trade(route.strategy_id, venue.exchange, venue.symbol,
+                             action, sizing.qty)
+    execute_order(db, alert, venue, quantity=sizing.qty)
 
 
 @router.post("/webhook/tradingview")
@@ -106,6 +127,12 @@ async def tradingview_webhook(request: Request,
     key = idempotency_key(alert)
     route = request.app.state.strategy_router.get(alert.strategy_id)
     notifier = get_notifier()
+
+    # Alert-driven (sar=true) strategies MUST carry a quantity; managed
+    # (sar=false) strategies size themselves, so quantity is optional/ignored there.
+    if route is not None and route.sar and not alert.quantity:
+        raise HTTPException(status_code=422,
+                            detail="quantity required for sar=true (alert-driven) strategy")
 
     # --- fast + synchronous: dedup-gate + persist the alert in a short txn ---
     try:

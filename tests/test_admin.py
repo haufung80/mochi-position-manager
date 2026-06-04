@@ -294,3 +294,33 @@ def test_list_renders_sar_toggle(client, strategies_file):
     assert r.status_code == 200
     assert "/admin/strategies/toggle-sar/X" in r.text   # SAR toggle form rendered
     assert 'name="sar"' in r.text                        # SAR checkbox in the add form
+
+
+# ---------- position_size (managed sizing) ----------
+
+def test_post_persists_position_size(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "MGD", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "1500",
+    }, follow_redirects=False)
+    data = yaml.safe_load(strategies_file.read_text())
+    assert data["strategies"]["MGD"]["position_size"] == 1500.0
+    assert client.app.state.strategy_router.get("MGD").position_size == 1500.0
+
+
+def test_blank_position_size_is_paper(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "PAP", "base_asset": "BTC",
+        "venue_bybit": "on",
+    }, follow_redirects=False)
+    data = yaml.safe_load(strategies_file.read_text())
+    assert "position_size" not in data["strategies"]["PAP"]   # omitted when blank
+    assert client.app.state.strategy_router.get("PAP").position_size is None
+
+
+def test_invalid_position_size_rejected(client):
+    r = client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "-5",
+    })
+    assert r.status_code == 400

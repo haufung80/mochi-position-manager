@@ -87,11 +87,40 @@ def test_sar_flag_parsed_and_defaults_false(tmp_path):
     assert r.get("NO_SAR").sar is False
 
 
+def test_position_size_parsed(strategies_yaml):
+    r = StrategyRouter(strategies_yaml)
+    assert r.get("TEST_MANAGED").position_size == 1000.0
+    assert r.get("TEST_BTC").position_size is None      # unset -> paper mode
+    assert r.get("TEST_SAR").sar is True
+
+
+def test_position_size_invalid_or_nonpositive_is_none(tmp_path):
+    p = tmp_path / "ps.yaml"
+    p.write_text(
+        "strategies:\n"
+        "  BAD:\n    base_asset: BTC\n    position_size: oops\n    venues:\n      bybit: true\n"
+        "  ZERO:\n    base_asset: ETH\n    position_size: 0\n    venues:\n      bybit: true\n"
+    )
+    r = StrategyRouter(p)
+    assert r.get("BAD").position_size is None
+    assert r.get("ZERO").position_size is None
+
+
 # ---------- symbol mapping ----------
 
 def test_symbol_for_known_exchanges():
     assert symbol_for("hyperliquid", "BTC") == "BTC"
     assert symbol_for("bybit", "BTC") == "BTCUSDT"
+    assert symbol_for("bybit", "XRP") == "XRPUSDT"        # new ticker
+    assert symbol_for("hyperliquid", "XRP") == "XRP"
+
+
+def test_canonical_step_sizes():
+    from app.exchanges.symbols import canonical_step_size, base_asset_of
+    assert canonical_step_size("BTC") == 0.001
+    assert canonical_step_size("XRP") == 0.1
+    assert base_asset_of("bybit", "XRPUSDT") == "XRP"     # reverse map
+    assert base_asset_of("hyperliquid", "XRP") == "XRP"
     assert symbol_for("hyperliquid", "ETH") == "ETH"
     assert symbol_for("bybit", "SOL") == "SOLUSDT"
     assert symbol_for("bybit", "BNB") == "BNBUSDT"

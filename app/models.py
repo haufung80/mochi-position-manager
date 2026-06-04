@@ -106,4 +106,27 @@ class StrategyPosition(Base):
     net_qty_base: Mapped[float] = mapped_column(Float, default=0.0)
     net_qty_usd: Mapped[float] = mapped_column(Float, default=0.0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
+    # Volume-weighted entry price of the OPEN position + cumulative realized PnL
+    # (USDT, gross of fees — fees are tracked on Order + FundingEvent).
+    avg_entry_price: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class FundingEvent(Base):
+    """One funding payment per (exchange, symbol, funding_time), polled from the
+    exchange so the performance page can sum funding without an API call per
+    request. `amount` is signed USDT/USDC: positive = received, negative = paid.
+    The unique constraint makes the poller idempotent (insert-or-ignore)."""
+    __tablename__ = "funding_events"
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", "funding_time", name="uq_funding_event"),
+        Index("ix_funding_exchange_symbol", "exchange", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    funding_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)

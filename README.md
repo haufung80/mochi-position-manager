@@ -218,24 +218,38 @@ sqlite3 data/middleware.db                               # inspect the ledger
 
 ## `strategies.yaml`
 
-A strategy declares a canonical `base_asset` and the `venues` it fans out to. The exchange-native
-symbol is resolved at load time (`BTC` → `BTCUSDT` on Bybit, `BTC` on Hyperliquid). Per-signal order
-**size is NOT stored here** — it comes from the TradingView alert payload (`quantity`, in base-asset
-units), so your pine-script sizing logic owns it per signal. An optional `sar` flag marks a
-stop-and-reverse / always-in-market strategy — a **label only** today, it doesn't change order handling.
+A strategy declares a canonical `base_asset` (BTC / ETH / SOL / BNB / XRP) and the `venues` it fans
+out to (resolved to exchange-native symbols at load time: `BTC` → `BTCUSDT` on Bybit, `BTC` on
+Hyperliquid). The `sar` flag selects the **execution mode**:
+
+- **`sar: true` — alert-driven.** The middleware submits the alert's `quantity` (base-asset units)
+  as-is. For stop-and-reverse / always-in-market pine strategies that send the full (doubled on a flip)
+  size themselves. `quantity` is **required** on the alert; `position_size` is ignored.
+- **`sar: false` — managed (the default).** The middleware sizes the position itself, **per venue**,
+  from `position_size` (USDT notional): when flat it opens `floor(position_size / price / step)` units
+  (rounded down to the lot step); the opposite signal closes to flat; a same-direction signal is
+  rejected (no pyramiding) and Telegram-alerted. The alert's `quantity` is optional and ignored.
+  If `position_size` is **omitted**, the strategy runs in **paper mode** — orders use one minimum unit
+  and a Telegram warning fires, so you can roll out sizing from the admin UI before committing capital.
 
 ```yaml
 strategies:
-  MR_VOTING_BTC_6H:
-    base_asset: BTC          # canonical ticker — one of: BTC / ETH / SOL / BNB
-    sar: false               # optional; stop-and-reverse marker (label only)
+  MR_VOTING_BTC_6H:        # managed: open up to $1000 notional/venue, close on opposite signal
+    base_asset: BTC
+    position_size: 1000    # USDT notional, per venue (omit -> paper mode: min unit + warning)
     venues:
-      bybit: true            # fan out to both venues; flip to false to disable one
+      bybit: true
       hyperliquid: false
+  VWAP_ATR_BTC_4H:         # alert-driven: quantity comes from the TradingView alert
+    base_asset: BTC
+    sar: true
+    venues:
+      bybit: true
+      hyperliquid: true
 ```
 
-Supported base assets and venues live in `app/exchanges/symbols.py` — to add an exchange, add one
-entry there plus an adapter under `app/exchanges/`.
+Supported base assets, venues, and per-asset step sizes live in `app/exchanges/symbols.py` — to add an
+exchange, add one entry there plus an adapter under `app/exchanges/`.
 
 Edit via the admin UI at `/admin/strategies` (create/update/delete/toggle, plus "sync positions"), or
 edit the file and reload without restarting:
@@ -263,6 +277,7 @@ unknown strategy IDs (likely misconfigured TV alert), and successful fills.
 |---|---|---|
 | POST | `/webhook/tradingview` | TradingView posts here |
 | GET  | `/` | HTML dashboard (positions, recent alerts, recent orders) |
+| GET  | `/performance` | HTML: per-exchange + per-strategy PnL, equity curve, open positions, recent orders |
 | GET  | `/health` | Liveness probe |
 | GET  | `/positions` | JSON: net position per (exchange, symbol) |
 | GET  | `/strategy-positions` | JSON: net position per (strategy, exchange, symbol) |

@@ -125,7 +125,15 @@
         </div>
       </div>
       <div style="margin-top: 14px;">
-        <label>Flags</label>
+        <label>Max position size (USDT) — optional</label>
+        <input type="text" name="position_size" inputmode="decimal"
+               placeholder="e.g. 1000   (blank = paper mode: min-unit + Telegram warning)">
+        <span class="sym-hint" style="display:block; margin-top:4px;">
+          Managed strategies only (SAR off) · notional, per venue · blank ⇒ paper mode.
+        </span>
+      </div>
+      <div style="margin-top: 14px;">
+        <label>Execution</label>
         <div class="venues-block">
           <div class="venue-row">
             <input type="checkbox" name="sar" id="sar" value="on">
@@ -133,7 +141,7 @@
                    text-transform: none; font-size: 13px; letter-spacing: 0;">
               SAR (stop-and-reverse)
             </label>
-            <span class="sym-hint">label only · marks an always-in-market strategy</span>
+            <span class="sym-hint">on ⇒ alert-driven (TV quantity) · off ⇒ managed by position size</span>
           </div>
         </div>
       </div>
@@ -145,8 +153,8 @@
       </div>
       <button type="submit" style="margin-top: 14px;">Save strategy</button>
       <span class="muted" style="margin-left: 12px; font-size: 12px;">
-        Existing strategy_id will be overwritten. Position size per signal is
-        supplied by the TradingView alert, not configured here.
+        Existing strategy_id will be overwritten. SAR strategies size from the
+        TradingView alert; managed strategies size from the position size above.
       </span>
     </form>
   </div>
@@ -187,6 +195,7 @@
           <th>Strategy ID</th>
           <th>Base asset</th>
           <th>SAR</th>
+          <th>Max size</th>
           <th>Venues (click pill to toggle)</th>
           <th>Delete</th>
         </tr>
@@ -207,6 +216,11 @@
               <input type="password" name="secret" required placeholder="secret"
                      autocomplete="off">
             </form>
+          </td>
+          <td class="mono">
+            {% if r.sar %}<span class="muted">&mdash;</span>
+            {% elif r.position_size %}{{ "$%g"|format(r.position_size) }}
+            {% else %}<span style="color:#facc15;">paper</span>{% endif %}
           </td>
           <td>
             {% for v in r.venues %}

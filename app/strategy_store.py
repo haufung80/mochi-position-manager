@@ -65,17 +65,18 @@ def save(path: Path, data: dict[str, Any]) -> None:
 
 def upsert_strategy(path: Path, strategy_id: str, *,
                     base_asset: str, venues: dict[str, bool],
-                    sar: bool = False) -> bool:
+                    sar: bool = False,
+                    position_size: float | None = None) -> bool:
     """Insert or update a single strategy entry. Returns True if it was an
     update (i.e. existed before), False if newly created."""
     data = load(path)
     strategies = data.setdefault("strategies", {})
     is_update = strategy_id in strategies
-    strategies[strategy_id] = {
-        "base_asset": base_asset,
-        "sar": bool(sar),
-        "venues": dict(venues),
-    }
+    entry: dict = {"base_asset": base_asset, "sar": bool(sar)}
+    if position_size is not None:
+        entry["position_size"] = float(position_size)
+    entry["venues"] = dict(venues)
+    strategies[strategy_id] = entry
     save(path, data)
     return is_update
 

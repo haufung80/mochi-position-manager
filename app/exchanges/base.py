@@ -28,3 +28,19 @@ class Exchange(Protocol):
         Positive qty = long, negative = short, 0.0 = flat. Read-only; used to
         reconcile the internal ledger to real exchange state."""
         ...
+
+    def get_price(self, symbol: str) -> float:
+        """Latest price for `symbol` (mark on Bybit, mid on Hyperliquid). Used to
+        size managed orders from a USDT budget. Best-effort: 0.0 on failure."""
+        ...
+
+    def get_step_size(self, symbol: str) -> float:
+        """Minimum order unit (step size) for `symbol`, in base-asset units.
+        Prefers the exchange's own grid; falls back to a canonical map."""
+        ...
+
+    def get_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
+        """Funding payments for `symbol` in [start_ms, end_ms]. Each item is
+        {"time_ms": int, "amount": float} (amount signed: + received, - paid).
+        Best-effort: returns [] on failure."""
+        ...

@@ -9,6 +9,7 @@ from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 from ..schemas import OrderResult
+from .symbols import base_asset_of, canonical_step_size
 
 log = logging.getLogger(__name__)
 Side = Literal["buy", "sell"]
@@ -204,3 +205,41 @@ class HyperliquidExchange:
             mark = value / abs(szi) if szi else 0.0
             return szi, mark
         return 0.0, 0.0
+
+    def get_price(self, symbol: str) -> float:
+        try:
+            return self._mid_price(symbol)
+        except Exception as e:
+            log.warning("HL get_price failed for %s: %s", symbol, e)
+            return 0.0
+
+    def get_step_size(self, symbol: str) -> float:
+        """HL per-asset grid from szDecimals. Falls back to the canonical map."""
+        try:
+            for asset in self._info.meta().get("universe", []):
+                if asset.get("name") == symbol:
+                    return 10 ** -int(asset.get("szDecimals", 4))
+        except Exception as e:
+            log.warning("HL get_step_size failed for %s (using canonical): %s", symbol, e)
+        return canonical_step_size(base_asset_of(self.name, symbol))
+
+    def get_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
+        """Account funding history for `symbol` (HL records `delta.usdc`, signed;
+        negative = paid). Best-effort — returns [] on failure."""
+        if not self._account_address:
+            return []
+        try:
+            hist = self._info.user_funding_history(self._account_address, start_ms, end_ms) or []
+        except Exception as e:
+            log.warning("HL get_funding failed for %s: %s", symbol, e)
+            return []
+        out: list[dict] = []
+        for h in hist:
+            delta = h.get("delta") or {}
+            if delta.get("coin") != symbol:
+                continue
+            ts = int(h.get("time") or 0)
+            amt = float(delta.get("usdc") or 0.0)
+            if ts:
+                out.append({"time_ms": ts, "amount": amt})
+        return out

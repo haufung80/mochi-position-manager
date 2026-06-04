@@ -45,10 +45,18 @@ def test_rejects_invalid_action(strategies_yaml, stub_exchange, silent_notifier)
     assert r.status_code == 422
 
 
-def test_rejects_missing_qty(strategies_yaml, stub_exchange, silent_notifier):
-    """quantity is required on every alert."""
+def test_missing_qty_ok_for_managed(strategies_yaml, stub_exchange, silent_notifier):
+    """Managed (sar=false) strategies size themselves — quantity is optional."""
     c = _client(strategies_yaml)
-    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=None))
+    r = c.post("/webhook/tradingview", json=_payload("TEST_MANAGED", quantity=None))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "accepted"
+
+
+def test_missing_qty_rejected_for_sar(strategies_yaml, stub_exchange, silent_notifier):
+    """Alert-driven (sar=true) strategies require a quantity."""
+    c = _client(strategies_yaml)
+    r = c.post("/webhook/tradingview", json=_payload("TEST_SAR", quantity=None))
     assert r.status_code == 422
     assert "quantity" in r.text
 
@@ -82,8 +90,9 @@ def test_sell_against_long_closes_it(strategies_yaml, stub_exchange, silent_noti
 
 
 def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier):
+    # TEST_SAR is alert-driven (sar=true), so the alert's quantity flows through.
     c = _client(strategies_yaml)
-    r = c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.05))
+    r = c.post("/webhook/tradingview", json=_payload("TEST_SAR", quantity=0.05))
     assert r.status_code == 200, r.text
     body = r.json()
     # Response acks fast with the dispatched venues; order RESULTS land in the
@@ -99,24 +108,23 @@ def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier
     with session_scope() as db:
         assert db.query(Alert).count() == 1
         order = db.query(Order).one()
-        assert (order.exchange, order.symbol) == ("bybit", "BTCUSDT")
+        assert (order.exchange, order.symbol) == ("bybit", "SOLUSDT")
         assert order.status == "success"
         # order.qty_base after fill = whatever the exchange actually filled
         # (stub returns its hardcoded filled_qty_base=0.001 from conftest)
         assert order.qty_base == 0.001
         pos = db.query(Position).one()
-        assert (pos.exchange, pos.symbol) == ("bybit", "BTCUSDT")
+        assert (pos.exchange, pos.symbol) == ("bybit", "SOLUSDT")
         assert pos.net_qty_base > 0
 
 
 def test_alert_payload_drives_qty(strategies_yaml, stub_exchange, silent_notifier):
-    """Different alerts can fire different quantities against the same strategy.
-    The stub returns its own filled_qty_base; what we're checking is that the
-    middleware passes through the alert's `quantity` to the exchange adapter."""
+    """sar=true strategies are alert-driven: each alert's `quantity` flows to the
+    exchange adapter unchanged (the stub returns its own filled_qty_base)."""
     c = _client(strategies_yaml)
-    c.post("/webhook/tradingview", json=_payload("TEST_BTC", alert_id="a1",
+    c.post("/webhook/tradingview", json=_payload("TEST_SAR", alert_id="a1",
                                                 quantity=0.002))
-    c.post("/webhook/tradingview", json=_payload("TEST_BTC", alert_id="a2",
+    c.post("/webhook/tradingview", json=_payload("TEST_SAR", alert_id="a2",
                                                 quantity=0.005))
     # Verify the adapter was called with each alert's quantity
     qty_calls = [c[3] for c in stub_exchange.calls if c[0] == "market"]
@@ -132,6 +140,65 @@ def test_orders_fire_at_2x_leverage(strategies_yaml, stub_exchange, silent_notif
     c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.001))
     lev_calls = [c[4] for c in stub_exchange.calls if c[0] == "market"]
     assert lev_calls == [2.0]
+
+
+# ---------- managed sizing (sar=false) end-to-end ----------
+
+def test_managed_open_sizes_from_position_size(strategies_yaml, stub_exchange, silent_notifier):
+    """sar=false + position_size: flat -> open a sized order (notional / price),
+    NOT the alert's quantity."""
+    c = _client(strategies_yaml)
+    stub_exchange.prices["XRPUSDT"] = 0.5
+    stub_exchange.step_sizes["XRPUSDT"] = 0.1
+    r = c.post("/webhook/tradingview",
+               json=_payload("TEST_MANAGED", action="buy", quantity=None))
+    assert r.json()["status"] == "accepted"
+    qty_calls = [call[3] for call in stub_exchange.calls if call[0] == "market"]
+    assert qty_calls == [2000.0]                        # 1000 / 0.5
+
+
+def test_managed_paper_uses_min_unit_and_warns(strategies_yaml, stub_exchange, silent_notifier):
+    """sar=false without position_size: paper mode -> 1 step + Telegram warning."""
+    c = _client(strategies_yaml)
+    stub_exchange.step_sizes["BTCUSDT"] = 0.001
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="buy", quantity=None))
+    qty_calls = [call[3] for call in stub_exchange.calls if call[0] == "market"]
+    assert qty_calls == [0.001]
+    assert any(call[0] == "paper_trade" for call in silent_notifier.calls)
+
+
+def test_managed_double_down_rejected(strategies_yaml, stub_exchange, silent_notifier):
+    """In a position, a same-direction signal is rejected (audit row, no fill)."""
+    c = _client(strategies_yaml)
+    stub_exchange.prices["XRPUSDT"] = 0.5
+    stub_exchange.step_sizes["XRPUSDT"] = 0.1
+    c.post("/webhook/tradingview",
+           json=_payload("TEST_MANAGED", action="buy", alert_id="o1", quantity=None))
+    c.post("/webhook/tradingview",
+           json=_payload("TEST_MANAGED", action="buy", alert_id="o2", quantity=None))
+    with session_scope() as db:
+        statuses = sorted(o.status for o in db.query(Order).all())
+    assert statuses == ["rejected", "success"]
+    assert any(call[0] == "order_rejected" for call in silent_notifier.calls)
+
+
+def test_managed_opposite_signal_closes_to_flat(strategies_yaml, stub_exchange, silent_notifier):
+    """In a long, an opposite signal closes to flat using the ledger net (actual
+    fill), not the configured size."""
+    from app.models import StrategyPosition
+    c = _client(strategies_yaml)
+    stub_exchange.prices["XRPUSDT"] = 0.5
+    stub_exchange.step_sizes["XRPUSDT"] = 0.1
+    c.post("/webhook/tradingview",
+           json=_payload("TEST_MANAGED", action="buy", alert_id="o1", quantity=None))
+    c.post("/webhook/tradingview",
+           json=_payload("TEST_MANAGED", action="sell", alert_id="o2", quantity=None))
+    with session_scope() as db:
+        row = db.query(StrategyPosition).filter_by(strategy_id="TEST_MANAGED").one()
+        assert abs(row.net_qty_base) < 1e-9             # back to flat
+    market_qtys = [call[3] for call in stub_exchange.calls if call[0] == "market"]
+    assert market_qtys[0] == 2000.0                     # open: sized from budget
+    assert market_qtys[1] == 0.001                      # close: abs(net) = stub fill
 
 
 def test_fan_out_creates_one_order_per_enabled_venue(strategies_yaml, stub_exchange, silent_notifier):

@@ -21,6 +21,22 @@ from .models import StrategyPosition
 log = logging.getLogger(__name__)
 
 
+def venue_claims(router) -> dict[tuple[str, str], list[str]]:
+    """Map each (exchange, symbol) to the strategy_ids that trade it."""
+    claims: dict[tuple[str, str], list[str]] = {}
+    for route in router.all():
+        for v in route.venues:
+            claims.setdefault((v.exchange, v.symbol), []).append(route.strategy_id)
+    return claims
+
+
+def single_owner_map(router) -> dict[tuple[str, str], str]:
+    """(exchange, symbol) -> the sole strategy that trades it. Pairs traded by
+    more than one strategy are omitted — an aggregate can't be attributed to one
+    strategy. Used for position sync and per-strategy funding attribution."""
+    return {k: ids[0] for k, ids in venue_claims(router).items() if len(ids) == 1}
+
+
 def sync_strategy_positions(router) -> dict:
     """Set each configured strategy's ledger to its live exchange position.
     Returns {"synced": [...], "skipped": [...]} for display."""
@@ -28,10 +44,7 @@ def sync_strategy_positions(router) -> dict:
 
     # Detect (exchange, symbol) claimed by more than one strategy — can't
     # attribute an aggregate exchange position to a single strategy.
-    claims: dict[tuple[str, str], list[str]] = {}
-    for route in router.all():
-        for v in route.venues:
-            claims.setdefault((v.exchange, v.symbol), []).append(route.strategy_id)
+    claims = venue_claims(router)
 
     synced: list[dict] = []
     skipped: list[dict] = []
@@ -66,6 +79,7 @@ def sync_strategy_positions(router) -> dict:
                 row.net_qty_base = qty
                 row.net_qty_usd = qty * price
                 row.last_price = price
+                row.avg_entry_price = price   # re-baseline: true entry unknown -> use mark
                 row.updated_at = now
                 synced.append({**tag, "net_qty_base": qty, "net_qty_usd": qty * price})
 

@@ -34,7 +34,10 @@ class StrategyRoute:
     strategy_id: str
     base_asset: str
     venues: tuple[VenueRoute, ...]
-    sar: bool = False   # stop-and-reverse marker; label only (no order-behaviour change)
+    sar: bool = False   # sar=true: alert-driven (existing flow); sar=false: managed sizing
+    # Max position size in USDT (notional) for managed (sar=false) strategies, per
+    # venue. None = paper mode (min-unit orders + warning). Ignored when sar=true.
+    position_size: float | None = None
 
     def enabled_venues(self) -> tuple[VenueRoute, ...]:
         return tuple(v for v in self.venues if v.enabled)
@@ -51,6 +54,18 @@ def _coerce_venue_enabled(value: object) -> bool:
     if isinstance(value, dict):
         return bool(value.get("enabled", True))
     return False
+
+
+def _coerce_position_size(value: object) -> float | None:
+    """Parse the optional `position_size` (USDT notional). None/blank/invalid or
+    non-positive → None (paper mode)."""
+    if value is None or value == "":
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
 
 
 def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
@@ -84,8 +99,12 @@ def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
     # Canonical venue order (SUPPORTED_EXCHANGES) regardless of YAML key order,
     # so the dashboard / per-strategy view / fan-out are consistent.
     venues.sort(key=lambda v: SUPPORTED_EXCHANGES.index(v.exchange))
+    ps_raw = cfg.get("position_size")
+    position_size = _coerce_position_size(ps_raw)
+    if ps_raw not in (None, "") and position_size is None:
+        log.warning("strategy %s: invalid position_size %r — running in PAPER mode", sid, ps_raw)
     return StrategyRoute(strategy_id=sid, base_asset=base, venues=tuple(venues),
-                         sar=bool(cfg.get("sar", False)))
+                         sar=bool(cfg.get("sar", False)), position_size=position_size)
 
 
 class StrategyRouter:

@@ -28,8 +28,9 @@ class TradingViewAlert(BaseModel):
     naturally closes it, and vice versa.
 
     `quantity` is the order size in **base-asset units** (e.g. 0.001 = 0.001 BTC),
-    surfaced via `{{strategy.order.contracts}}` in TradingView. Required
-    (> 0) on every alert.
+    surfaced via `{{strategy.order.contracts}}` in TradingView. Required (> 0) for
+    alert-driven (sar=true) strategies; optional and IGNORED for managed
+    (sar=false) strategies, where the middleware sizes from `position_size`.
 
     Note: this is NOT a USD amount. If your pine script sizes orders in dollars,
     convert to base in pine before sending (e.g. `qty := cash_size / close`).
@@ -47,7 +48,7 @@ class TradingViewAlert(BaseModel):
     secret: str
     strategy_id: str = Field(..., min_length=1, max_length=128)
     action: Action
-    quantity: float = Field(..., gt=0)
+    quantity: Optional[float] = Field(None, gt=0)
     alert_id: Optional[str] = None
     bar_time: Optional[str] = None
     price: Optional[float] = None

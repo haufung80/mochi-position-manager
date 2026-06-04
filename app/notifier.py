@@ -115,6 +115,27 @@ class TelegramNotifier:
             f"• `{strategy_id}` has no enabled venues — alert logged, skipped.",
         )
 
+    def paper_trade(self, strategy_id: str, exchange: str, symbol: str,
+                    side: str, quantity: float) -> None:
+        self.send(
+            "📝 *Paper trade — no position size configured*\n"
+            f"• Strategy: `{strategy_id}`\n"
+            f"• Exchange: *{exchange}* / {symbol}\n"
+            f"• {side.upper()}: {_fmt_qty(quantity, symbol)} (min unit)\n"
+            "• Set a position size in /admin/strategies to trade full size.",
+            urgent=True,
+        )
+
+    def order_rejected(self, strategy_id: str, exchange: str, symbol: str,
+                       side: str, reason: str) -> None:
+        self.send(
+            "⛔ *Order rejected (managed)*\n"
+            f"• Strategy: `{strategy_id}`\n"
+            f"• Exchange: *{exchange}* / {symbol}\n"
+            f"• {side.upper()} blocked: `{reason}`",
+            urgent=True,
+        )
+
 
 _notifier: TelegramNotifier | None = None
 

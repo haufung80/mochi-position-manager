@@ -16,7 +16,7 @@ from __future__ import annotations
 
 # Canonical base assets supported across all configured exchanges.
 # Add new ones here ONLY if every supported exchange lists the perp.
-SUPPORTED_BASE_ASSETS: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB")
+SUPPORTED_BASE_ASSETS: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB", "XRP")
 
 # Quote-currency suffix appended to base asset to form the exchange-native
 # perp symbol. Empty string means "use the bare base ticker".
@@ -45,3 +45,30 @@ def symbol_for(exchange: str, base_asset: str) -> str:
             f"(must be one of {', '.join(SUPPORTED_BASE_ASSETS)})"
         )
     return f"{base}{EXCHANGE_QUOTE_SUFFIX[ex]}"
+
+
+# Minimum order unit (step size) per base asset, in base-asset units. This is
+# the canonical FALLBACK used for managed sizing when live exchange metadata is
+# unavailable (DRY_RUN / tests). In production the adapters prefer the exchange's
+# own grid (Bybit qtyStep, Hyperliquid szDecimals); these match it for the majors.
+CANONICAL_STEP_SIZES: dict[str, float] = {
+    "BTC": 0.001,
+    "ETH": 0.01,
+    "SOL": 0.1,
+    "BNB": 0.01,
+    "XRP": 0.1,
+}
+
+
+def canonical_step_size(base_asset: str) -> float:
+    """Fallback step size for a canonical base asset (0.001 if unknown)."""
+    return CANONICAL_STEP_SIZES.get(base_asset.upper(), 0.001)
+
+
+def base_asset_of(exchange: str, symbol: str) -> str:
+    """Reverse of symbol_for: strip the exchange's quote suffix to recover the
+    canonical base asset (bybit 'XRPUSDT' -> 'XRP'; hyperliquid 'XRP' -> 'XRP')."""
+    suffix = EXCHANGE_QUOTE_SUFFIX.get(exchange.lower(), "")
+    if suffix and symbol.upper().endswith(suffix):
+        return symbol[: -len(suffix)].upper()
+    return symbol.upper()

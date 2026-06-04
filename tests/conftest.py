@@ -26,11 +26,13 @@ def _clean_db():
 
 @pytest.fixture
 def strategies_yaml(tmp_path):
-    """Current schema: per-signal qty comes from the TV alert payload, not YAML.
+    """Test strategies covering both execution modes.
 
-    TEST_BTC      — bybit only (single venue tests)
-    TEST_MULTI    — bybit + hyperliquid (fan-out tests)
+    TEST_BTC      — bybit only, managed (sar=false), NO position_size → paper mode
+    TEST_MULTI    — bybit + hyperliquid, managed (fan-out tests)
     TEST_DISABLED — both venues disabled
+    TEST_SAR      — bybit SOL, sar=true → alert-driven (quantity from TV)
+    TEST_MANAGED  — bybit XRP, managed with position_size=1000 (USDT notional)
     """
     p = tmp_path / "strategies.yaml"
     p.write_text(
@@ -50,6 +52,18 @@ strategies:
     base_asset: ETH
     venues:
       bybit: false
+      hyperliquid: false
+  TEST_SAR:
+    base_asset: SOL
+    sar: true
+    venues:
+      bybit: true
+      hyperliquid: false
+  TEST_MANAGED:
+    base_asset: XRP
+    position_size: 1000
+    venues:
+      bybit: true
       hyperliquid: false
 """
     )
@@ -71,6 +85,10 @@ def stub_exchange(monkeypatch):
                                            filled_qty_base=0.001, avg_price=50000.0)
             # symbol -> (signed_qty, mark_price), returned by get_position()
             self.positions = {}
+            # managed-sizing inputs (configurable per symbol)
+            self.prices = {}        # symbol -> latest price (default 50000.0)
+            self.step_sizes = {}    # symbol -> step size (default 0.001)
+            self.funding = {}       # symbol -> list[{"time_ms", "amount"}]
 
         def market_order(self, symbol, side, quantity, leverage=1.0):
             self.calls.append(("market", symbol, side, quantity, leverage))
@@ -83,6 +101,18 @@ def stub_exchange(monkeypatch):
         def get_position(self, symbol):
             self.calls.append(("get_position", symbol))
             return self.positions.get(symbol, (0.0, 0.0))
+
+        def get_price(self, symbol):
+            self.calls.append(("get_price", symbol))
+            return self.prices.get(symbol, 50000.0)
+
+        def get_step_size(self, symbol):
+            self.calls.append(("get_step_size", symbol))
+            return self.step_sizes.get(symbol, 0.001)
+
+        def get_funding(self, symbol, start_ms, end_ms):
+            self.calls.append(("get_funding", symbol, start_ms, end_ms))
+            return list(self.funding.get(symbol, []))
 
     fake = FakeExchange()
 

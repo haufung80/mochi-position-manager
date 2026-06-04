@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -12,7 +12,10 @@ from sqlalchemy import func
 from .. import network
 from ..config import get_settings
 from ..db import session_scope
-from ..models import Alert, Order, Position, StrategyPosition
+from ..exchanges.registry import get_registry
+from ..executor import _fill_math
+from ..models import Alert, FundingEvent, Order, Position, StrategyPosition
+from ..reconcile import single_owner_map
 
 log = logging.getLogger(__name__)
 
@@ -218,6 +221,176 @@ def _execution_quality(db) -> dict:
         "avg_slippage_bps": (sum(slips) / len(slips)) if slips else None,
         "slippage_sample": len(slips),
     }
+
+
+# ---------- live performance page ----------
+
+def _performance(db, router) -> dict:
+    """Per-strategy + per-exchange PnL breakdown.
+
+    Total = realized + unrealized + funding − commission. Slippage is a
+    DIAGNOSTIC (implementation shortfall vs the signal price): it's already
+    embedded in the fills/realized PnL, so it's shown but NOT re-deducted.
+    Funding is attributed to a strategy only when it solely owns the symbol;
+    otherwise it counts at the exchange/portfolio level only.
+    """
+    owners = single_owner_map(router)
+    strat: dict[str, dict] = {}
+    exch: dict[str, dict] = {}
+
+    def row(store: dict, key: str, label_key: str) -> dict:
+        if key not in store:
+            store[key] = {label_key: key, "realized": 0.0, "unrealized": 0.0,
+                          "commission": 0.0, "slippage": 0.0, "funding": 0.0}
+        return store[key]
+
+    open_positions: list[dict] = []
+    for sp in db.query(StrategyPosition).all():
+        s = row(strat, sp.strategy_id, "strategy_id")
+        e = row(exch, sp.exchange, "exchange")
+        s["realized"] += sp.realized_pnl or 0.0
+        e["realized"] += sp.realized_pnl or 0.0
+        if not _venue_flat(sp.net_qty_base, sp.net_qty_usd):
+            avg = sp.avg_entry_price or 0.0
+            mark = sp.last_price or 0.0
+            try:                               # best-effort live mark; fall back to last fill
+                live = get_registry().get(sp.exchange).get_price(sp.symbol)
+                if live and live > 0:
+                    mark = live
+            except Exception:                  # noqa: BLE001 — display path, never raise
+                pass
+            # Guard: a position migrated/synced in without a known entry has avg=0;
+            # net*(mark-0) would report the whole notional as bogus unrealized PnL.
+            unreal = sp.net_qty_base * (mark - avg) if avg > 0 else 0.0
+            s["unrealized"] += unreal
+            e["unrealized"] += unreal
+            open_positions.append({
+                "strategy_id": sp.strategy_id, "exchange": sp.exchange,
+                "symbol": sp.symbol, "net_qty_base": sp.net_qty_base,
+                "avg_entry_price": avg, "mark": mark, "unrealized": unreal})
+
+    for o, sid in (db.query(Order, Alert.strategy_id)
+                     .join(Alert, Order.alert_id == Alert.id)
+                     .filter(Order.status == "success").all()):
+        s = row(strat, sid, "strategy_id")
+        e = row(exch, o.exchange, "exchange")
+        s["commission"] += o.commission or 0.0
+        e["commission"] += o.commission or 0.0
+        if o.fill_price and o.signal_price:
+            sign = 1.0 if o.side == "buy" else -1.0
+            cost = (o.fill_price - o.signal_price) * (o.qty_base or 0.0) * sign
+            s["slippage"] += cost
+            e["slippage"] += cost
+
+    funding_total = 0.0
+    for ex, sym, total in (db.query(FundingEvent.exchange, FundingEvent.symbol,
+                                    func.sum(FundingEvent.amount))
+                             .group_by(FundingEvent.exchange, FundingEvent.symbol).all()):
+        total = float(total or 0.0)
+        funding_total += total
+        row(exch, ex, "exchange")["funding"] += total
+        sid = owners.get((ex, sym))
+        if sid is not None:
+            row(strat, sid, "strategy_id")["funding"] += total
+
+    def finalize(store: dict) -> list[dict]:
+        rows = []
+        for r in store.values():
+            r["total"] = r["realized"] + r["unrealized"] + r["funding"] - r["commission"]
+            rows.append(r)
+        return sorted(rows, key=lambda r: r["total"], reverse=True)
+
+    per_strategy = finalize(strat)
+    per_exchange = finalize(exch)
+    totals = {k: sum(r[k] for r in per_strategy)
+              for k in ("realized", "unrealized", "commission", "slippage")}
+    totals["funding"] = funding_total   # exchange-level total (incl. unattributed)
+    totals["total"] = (totals["realized"] + totals["unrealized"]
+                       + totals["funding"] - totals["commission"])
+    return {"per_strategy": per_strategy, "per_exchange": per_exchange,
+            "totals": totals, "open_positions": open_positions}
+
+
+def _equity_curve(db) -> list[tuple]:
+    """Cumulative PnL (USDT) from 0 in time order: per-fill realized deltas
+    (replayed via the shared fill math) minus commissions, plus funding events."""
+    events: list[tuple] = []
+    state: dict[tuple, tuple] = {}    # (sid, exchange, symbol) -> (net, avg)
+    for o, sid in (db.query(Order, Alert.strategy_id)
+                     .join(Alert, Order.alert_id == Alert.id)
+                     .filter(Order.status == "success")
+                     .order_by(Order.created_at).all()):
+        delta = -(o.commission or 0.0)
+        price = o.fill_price or 0.0
+        if price > 0 and o.qty_base:
+            key = (sid, o.exchange, o.symbol)
+            net, avg = state.get(key, (0.0, 0.0))
+            signed = o.qty_base * (1.0 if o.side == "buy" else -1.0)
+            net, avg, realized_delta = _fill_math(net, avg, signed, o.qty_base, price)
+            state[key] = (net, avg)
+            delta += realized_delta
+        events.append((o.created_at, delta))
+    for fe in db.query(FundingEvent).all():
+        events.append((fe.funding_time, fe.amount or 0.0))
+
+    events.sort(key=lambda e: e[0] or datetime.min)
+    points, cum = [], 0.0
+    for ts, d in events:
+        cum += d
+        points.append((ts, cum))
+    return points
+
+
+def _equity_svg(points, width: int = 920, height: int = 200, pad: int = 10):
+    """Map equity points to an inline-SVG polyline (+ zero baseline). None when
+    there's nothing to plot."""
+    if not points:
+        return None
+    ys = [p[1] for p in points]
+    lo, hi = min(ys + [0.0]), max(ys + [0.0])
+    span = (hi - lo) or 1.0
+    n = len(points)
+
+    def fx(i: int) -> float:
+        return pad + (width - 2 * pad) * (i / (n - 1) if n > 1 else 0.0)
+
+    def fy(v: float) -> float:
+        return pad + (height - 2 * pad) * (1 - (v - lo) / span)
+
+    poly = " ".join(f"{fx(i):.1f},{fy(v):.1f}" for i, v in enumerate(ys))
+    return {"polyline": poly, "zero_y": round(fy(0.0), 1), "width": width,
+            "height": height, "last": ys[-1], "hi": hi, "lo": lo,
+            "color": "#4ade80" if ys[-1] >= 0 else "#f87171",
+            "start_label": _fmt_when(points[0][0], "%m-%d %H:%M"),
+            "end_label": _fmt_when(points[-1][0], "%m-%d %H:%M")}
+
+
+def _recent_orders(db, limit: int = 50) -> list[dict]:
+    """Recent orders (newest first), incl. rejected/paper, with strategy + slippage."""
+    rows = (db.query(Order, Alert.strategy_id)
+              .join(Alert, Order.alert_id == Alert.id)
+              .order_by(Order.created_at.desc()).limit(limit).all())
+    return [{
+        "created_at": o.created_at, "strategy_id": sid, "exchange": o.exchange,
+        "symbol": o.symbol, "side": o.side, "qty_base": o.qty_base,
+        "fill_price": o.fill_price, "status": o.status, "commission": o.commission,
+        "commission_asset": o.commission_asset,
+        "slippage_bps": _slip_bps(o.fill_price, o.signal_price, o.side),
+        "error": o.error_message,
+    } for o, sid in rows]
+
+
+@router.get("/performance", response_class=HTMLResponse)
+def performance(request: Request):
+    with session_scope() as db:
+        perf = _performance(db, request.app.state.strategy_router)
+        equity = _equity_svg(_equity_curve(db))
+        orders = _recent_orders(db, limit=50)
+    resp = templates.TemplateResponse("performance.html", {
+        "request": request, "perf": perf, "equity": equity, "orders": orders,
+    })
+    resp.headers["Cache-Control"] = _NO_STORE
+    return resp
 
 
 @router.get("/health")
