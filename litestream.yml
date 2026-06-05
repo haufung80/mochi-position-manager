@@ -1,0 +1,18 @@
+# Litestream — continuous replication of the SQLite DB to S3-compatible storage.
+# Runs as a sidecar (see docker-compose.prod.yml) sharing ./data with the app.
+# The DB must be in WAL mode (app/db.py already sets PRAGMA journal_mode=WAL).
+#
+# ${VARS} are expanded by Litestream at runtime from the container env (set them
+# in .env on the box). Cloudflare R2 free tier is recommended:
+#   LITESTREAM_S3_REGION=auto
+#   LITESTREAM_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+dbs:
+  - path: /data/middleware.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_S3_BUCKET}
+        path: middleware.db
+        endpoint: ${LITESTREAM_S3_ENDPOINT}
+        region: ${LITESTREAM_S3_REGION}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}

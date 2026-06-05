@@ -214,6 +214,29 @@ sqlite3 data/middleware.db                               # inspect the ledger
 > **Legacy:** `fly.toml` remains from an earlier Fly.io deployment the project migrated off. It's
 > vestigial — the live deploy is Lightsail, as above.
 
+### Backups (Litestream)
+
+The SQLite DB is a single file on one VM, so the stack ships a **Litestream** sidecar
+(`docker-compose.prod.yml`) that continuously replicates it to S3-compatible storage. It **idles
+harmlessly until configured** — no backup until you set the creds.
+
+**Enable** (Cloudflare R2 free tier recommended — 10 GB free):
+1. Create an R2 bucket + an R2 API token (Cloudflare dashboard → R2 → Manage API Tokens).
+2. On the box, set in `.env` (see `.env.example` for the keys): `LITESTREAM_S3_BUCKET`,
+   `LITESTREAM_S3_ENDPOINT` (`https://<account-id>.r2.cloudflarestorage.com`), `LITESTREAM_S3_REGION=auto`,
+   `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`.
+3. `docker compose -f docker-compose.prod.yml up -d` — the `litestream` container starts replicating.
+   Confirm: `docker compose -f docker-compose.prod.yml logs -f litestream`.
+
+**Restore** (disaster recovery on a fresh box — do this *before* starting the app, so it doesn't
+create an empty DB first):
+```bash
+docker compose -f docker-compose.prod.yml run --rm --entrypoint litestream litestream \
+  restore -config /etc/litestream.yml /data/middleware.db
+```
+Requires WAL mode (already set in `app/db.py`). This is the recommended alternative to migrating off
+SQLite for a single-node deployment like this — see *Known limitations / roadmap*.
+
 ---
 
 ## `strategies.yaml`

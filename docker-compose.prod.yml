@@ -19,6 +19,27 @@ services:
     expose:
       - "8000"                     # internal only; Caddy reaches it on the compose network
 
+  # Continuous off-box backup of the SQLite DB to S3-compatible storage (e.g.
+  # Cloudflare R2 free tier). Idles harmlessly until LITESTREAM_* is set in .env.
+  # Shares the same ./data volume; the DB is in WAL mode (required by Litestream).
+  litestream:
+    image: litestream/litestream:0.3.13
+    container_name: mochi-litestream
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/data                              # same DB the app writes
+      - ./litestream.yml:/etc/litestream.yml:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        if [ -n "$$LITESTREAM_S3_BUCKET" ] && [ -n "$$LITESTREAM_ACCESS_KEY_ID" ]; then
+        exec litestream replicate -config /etc/litestream.yml;
+        else echo "litestream: LITESTREAM_* not set in .env - idling (no backup). See README.";
+        exec tail -f /dev/null; fi
+    depends_on:
+      - app
+
   caddy:
     image: caddy:2-alpine
     container_name: mochi-caddy
