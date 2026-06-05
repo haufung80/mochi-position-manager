@@ -125,14 +125,14 @@
     {% if perf.per_strategy %}
     <table>
       <thead><tr><th class="l">Strategy</th><th>Realized</th><th>Unrealized</th>
-        <th>Funding</th><th>Commission</th><th>Slippage*</th><th>Total</th></tr></thead>
+        <th>Commission</th><th>Slippage*</th><th>Total</th></tr></thead>
       <tbody>
         {% for r in perf.per_strategy %}
         <tr>
           <td class="l mono">{{ r.strategy_id }}</td>
           <td>{{ money(r.realized) }}</td>
-          <td>{{ money(r.unrealized) }}{% if r.unrealized_attributed %}<span class="muted" title="includes shared-symbol attribution">≈</span>{% endif %}</td>
-          <td>{{ money(r.funding) }}</td><td class="muted">${{ r.commission|usd }}</td>
+          <td>{{ money(r.unrealized) }}{% if r.unrealized_attributed %}<span class="muted" title="shared-symbol notional">≈</span>{% endif %}</td>
+          <td class="muted">${{ r.commission|usd }}</td>
           <td class="muted">${{ r.slippage|usd }}</td>
           <td><strong>{{ money(r.total) }}</strong></td>
         </tr>
@@ -140,9 +140,9 @@
       </tbody>
     </table>
     <div class="muted">*Slippage = execution shortfall vs signal price (diagnostic; not in Total).
-      Funding is per-strategy only when one strategy owns the symbol.
-      <b>≈</b> = unrealized on a shared symbol is an attribution (not exact); the headline Total
-      uses the exchange's actual unrealized, so per-strategy rows need not sum to it.</div>
+      Funding is <b>exchange-level</b> (can't be split per strategy) — see <b>By exchange</b>.
+      <b>≈</b> = unrealized on a shared symbol is notional (offsetting legs net out on the venue),
+      so the per-strategy sum can exceed the realizable figure in Exchange positions.</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 

@@ -291,8 +291,9 @@ def _performance(db, router) -> dict:
     Total = realized + unrealized + funding − commission. Slippage is a
     DIAGNOSTIC (implementation shortfall vs the signal price): it's already
     embedded in the fills/realized PnL, so it's shown but NOT re-deducted.
-    Funding is attributed to a strategy only when it solely owns the symbol;
-    otherwise it counts at the exchange/portfolio level only.
+    Funding is EXCHANGE-level only — the venue funds the netted position per
+    symbol, so it can't be split per strategy (it reconciles at the exchange +
+    portfolio level, not in the per-strategy rows).
 
     The headline and per-exchange rows are the SUM of the per-strategy figures, so
     the breakdown always adds up to the total. Per-strategy unrealized marks each
@@ -363,16 +364,15 @@ def _performance(db, router) -> dict:
             s["slippage"] += cost
             e["slippage"] += cost
 
+    # Funding reconciles at the EXCHANGE + portfolio level only. The venue charges
+    # it on the netted position per symbol, so it can't be split per strategy on a
+    # shared symbol — we never attribute it to a strategy row.
     funding_total = 0.0
-    for ex, sym, total in (db.query(FundingEvent.exchange, FundingEvent.symbol,
-                                    func.sum(FundingEvent.amount))
-                             .group_by(FundingEvent.exchange, FundingEvent.symbol).all()):
+    for ex, total in (db.query(FundingEvent.exchange, func.sum(FundingEvent.amount))
+                        .group_by(FundingEvent.exchange).all()):
         total = float(total or 0.0)
         funding_total += total
         row(exch, ex, "exchange")["funding"] += total
-        sid = owners.get((ex, sym))
-        if sid is not None:
-            row(strat, sid, "strategy_id")["funding"] += total
 
     def finalize(store: dict) -> list[dict]:
         rows = []

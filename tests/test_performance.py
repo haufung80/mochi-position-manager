@@ -76,10 +76,14 @@ def test_performance_numbers(client):
     assert s1["unrealized"] == pytest.approx(0.0)        # flat after round-trip
     assert s1["commission"] == pytest.approx(0.22)
     assert s1["slippage"] == pytest.approx(0.5)          # (100-99.5)*1 on the buy
-    assert s1["funding"] == pytest.approx(-0.05)         # single-owner attribution
-    # total = realized + unrealized + funding - commission (slippage NOT included)
-    assert s1["total"] == pytest.approx(20.0 - 0.05 - 0.22)
-    assert perf["totals"]["total"] == pytest.approx(19.73)
+    assert s1["funding"] == pytest.approx(0.0)           # funding is exchange-level, not per-strategy
+    # per-strategy total = realized + unrealized - commission (no funding, no slippage)
+    assert s1["total"] == pytest.approx(20.0 - 0.22)
+    # funding still counts at the exchange + portfolio level
+    bybit = next(r for r in perf["per_exchange"] if r["exchange"] == "bybit")
+    assert bybit["funding"] == pytest.approx(-0.05)
+    assert perf["totals"]["funding"] == pytest.approx(-0.05)
+    assert perf["totals"]["total"] == pytest.approx(19.73)   # incl. portfolio funding
 
 
 def test_open_position_unrealized_uses_live_mark(client, stub_exchange):
