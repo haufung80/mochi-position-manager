@@ -169,12 +169,13 @@
   <h2>Recent orders</h2>
   <div class="card">
     <table>
-      <tr><th>When</th><th>Exchange / Symbol</th><th>Side</th><th>Qty $</th>
+      <tr><th>When</th><th>Strategy</th><th>Exchange / Symbol</th><th>Side</th><th>Qty $</th>
           <th>Signal</th><th>Fill</th><th>Slippage</th><th>Fee</th>
           <th>Status</th><th>Att</th><th>Error</th></tr>
-      {% for o in orders %}
+      {% for o, sid in orders %}
         <tr>
           <td class="mono">{{ o.created_at|when("%H:%M:%S") }}</td>
+          <td class="mono">{{ sid }}</td>
           <td>{{ o.exchange }}/{{ o.symbol }}</td>
           <td>{{ o.side }}{% if o.reduce_only %} (close){% endif %}</td>
           <td class="mono">${{ "%.0f"|format(o.qty_usd) }}</td>
