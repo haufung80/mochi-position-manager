@@ -398,16 +398,15 @@ def _performance(db, router) -> dict:
             "exchange_positions": actual}
 
 
-def _equity_curve(db, unrealized: float = 0.0) -> list[tuple]:
+def _equity_curve(db, end_total=None) -> list[tuple]:
     """Cumulative PnL (USDT) from 0 in time order: per-fill realized deltas
     (replayed via the shared fill math) minus commissions, plus funding events.
 
-    A final mark-to-market point at 'now' folds in live `unrealized`, so the curve
-    ends at the real current total PnL (realized + funding − commission + unrealized)
-    instead of sitting near 0. This matters because most historical fills predate
-    fill-price capture (fill_price=0) — their realized PnL can't be replayed, so the
-    realized-only line is a flat noise band and the open position's mark-to-market is
-    where the real PnL currently lives."""
+    When `end_total` is given, a final point at 'now' is anchored to it — the true
+    current total PnL (realized + unrealized + funding − commission). This matters
+    because many historical fills predate fill-price capture (fill_price=0): their
+    realized PnL can't be replayed here, so the line itself is an approximate /
+    flat-ish band, but the endpoint is pinned to the real total."""
     events: list[tuple] = []
     state: dict[tuple, tuple] = {}    # (sid, exchange, symbol) -> (net, avg)
     for o, sid in (db.query(Order, Alert.strategy_id)
@@ -432,8 +431,8 @@ def _equity_curve(db, unrealized: float = 0.0) -> list[tuple]:
     for ts, d in events:
         cum += d
         points.append((ts, cum))
-    if unrealized and points:
-        points.append((datetime.now(timezone.utc), cum + unrealized))
+    if end_total is not None and points:
+        points.append((datetime.now(timezone.utc), end_total))
     return points
 
 
@@ -496,7 +495,7 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
 def performance(request: Request):
     with session_scope() as db:
         perf = _performance(db, request.app.state.strategy_router)
-        equity = _equity_svg(_equity_curve(db, perf["totals"]["unrealized"]))
+        equity = _equity_svg(_equity_curve(db, perf["totals"]["total"]))
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "orders": orders,

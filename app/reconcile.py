@@ -50,27 +50,30 @@ def single_owner_map(router) -> dict[tuple[str, str], str]:
     return {k: ids[0] for k, ids in venue_claims(router).items() if len(ids) == 1}
 
 
-def backfill_entries_from_klines(router) -> dict:
-    """Reconstruct `avg_entry_price` for positions built from fills that weren't
-    recorded with a price (`fill_price` 0/None — pre-execution-quality history).
+def backfill_pnl_from_klines(router) -> dict:
+    """Recompute `realized_pnl` and `avg_entry_price` for positions built from fills
+    that weren't recorded with a price (`fill_price` 0/None — pre-execution-quality
+    history), by replaying each strategy's own success fills through the shared fill
+    math and pricing any unpriced fill with the market close at that fill's minute
+    (a market order fills ~there).
 
-    Replays each strategy's own success fills through the shared fill math, pricing
-    any unpriced fill with the market close at that fill's minute (a market order
-    fills ~there). We only rewrite a position when the replayed net MATCHES the
-    stored net — i.e. the recorded fills fully explain it — so manually-set or
-    drifted rows (e.g. a target that wasn't reached) are left untouched and flagged.
+    Two different guards, because the two figures mean different things:
+    - `realized_pnl` is a HISTORICAL fact — the cumulative PnL booked on closes. It's
+      valid whenever the fills are priced, regardless of the current net, so we always
+      rewrite it. (This is what made round-trips on unpriced legs read as $0 — e.g. a
+      short covered for a profit showing realized 0.)
+    - `avg_entry_price` describes the CURRENT open position, so we only rewrite it when
+      the replayed net matches the stored net (the fills fully explain it); a manually
+      set / drifted net keeps its entry.
 
-    This fixes the per-strategy unrealized that the blended/attributed entry made
-    wrong (e.g. a long opened at $71k showing a gain because its entry was set to a
-    netted blend). Going forward fills are priced, so the live ledger stays correct.
+    Going forward fills are priced, so the live ledger stays correct without this.
     """
     oracle = get_registry().get("bybit")
     updated: list[dict] = []
     skipped: list[dict] = []
+    now = datetime.now(timezone.utc)
     with session_scope() as db:
         for sp in db.query(StrategyPosition).all():
-            if abs(sp.net_qty_base) < 1e-9:
-                continue
             tag = {"strategy_id": sp.strategy_id, "exchange": sp.exchange, "symbol": sp.symbol}
             osym = _oracle_symbol(sp.exchange, sp.symbol)
             fills = (db.query(Order).join(Alert, Order.alert_id == Alert.id)
@@ -78,7 +81,9 @@ def backfill_entries_from_klines(router) -> dict:
                                Order.exchange == sp.exchange, Order.symbol == sp.symbol,
                                Order.status == "success")
                        .order_by(Order.created_at).all())
-            net = avg = 0.0
+            if not fills:
+                continue
+            net = avg = realized = 0.0
             ok = True
             for o in fills:
                 px = o.fill_price if (o.fill_price and o.fill_price > 0) else oracle.get_kline_close(
@@ -87,20 +92,26 @@ def backfill_entries_from_klines(router) -> dict:
                     ok = False
                     break
                 signed = o.qty_base * (1.0 if o.side == "buy" else -1.0)
-                net, avg, _ = _fill_math(net, avg, signed, o.qty_base, px)
+                net, avg, rd = _fill_math(net, avg, signed, o.qty_base, px)
+                realized += rd
             if not ok:
-                skipped.append({**tag, "reason": "no fills / price lookup failed"})
+                skipped.append({**tag, "reason": "price lookup failed for a fill"})
                 continue
-            if abs(net - sp.net_qty_base) > max(1e-6, abs(sp.net_qty_base) * 0.01):
-                skipped.append({**tag, "reason":
-                                f"replay net {net:.6f} != ledger {sp.net_qty_base:.6f}"})
-                continue
-            if avg > 0 and abs(avg - (sp.avg_entry_price or 0.0)) > 0.01:
-                updated.append({**tag, "old": sp.avg_entry_price, "new": round(avg, 4)})
+            changes: dict = {}
+            if abs(realized - (sp.realized_pnl or 0.0)) > 0.01:
+                changes["realized"] = {"old": round(sp.realized_pnl or 0.0, 4), "new": round(realized, 4)}
+                sp.realized_pnl = realized
+            net_matches = abs(net - sp.net_qty_base) <= max(1e-6, abs(sp.net_qty_base) * 0.01)
+            if net_matches and avg > 0 and abs(avg - (sp.avg_entry_price or 0.0)) > 0.01:
+                changes["entry"] = {"old": round(sp.avg_entry_price or 0.0, 4), "new": round(avg, 4)}
                 sp.avg_entry_price = avg
-                sp.updated_at = datetime.now(timezone.utc)
-    log.info("backfill_entries_from_klines: %d updated, %d skipped",
-             len(updated), len(skipped))
+            if changes:
+                sp.updated_at = now
+                updated.append({**tag, **changes})
+            elif not net_matches:
+                skipped.append({**tag, "reason":
+                                f"net {net:.4f} != ledger {sp.net_qty_base:.4f} (entry kept)"})
+    log.info("backfill_pnl_from_klines: %d updated, %d skipped", len(updated), len(skipped))
     return {"updated": updated, "skipped": skipped}
 
 

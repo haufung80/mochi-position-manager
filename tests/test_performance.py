@@ -216,7 +216,7 @@ def test_backfill_entry_from_kline(tmp_path, stub_exchange):
     router = StrategyRouter(f)
     _seed_unpriced_position("S1", 0.002, 0.002, attributed_entry=62590.0)
     stub_exchange.klines["BTCUSDT"] = 71486.0             # real price at fill time
-    result = reconcile.backfill_entries_from_klines(router)
+    result = reconcile.backfill_pnl_from_klines(router)
     assert any(u["strategy_id"] == "S1" for u in result["updated"])
     with session_scope() as db:
         sp = db.query(StrategyPosition).filter_by(strategy_id="S1").one()
@@ -233,11 +233,39 @@ def test_backfill_skips_when_fills_dont_explain_net(tmp_path, stub_exchange):
     router = StrategyRouter(f)
     _seed_unpriced_position("S1", 0.002, ledger_net=0.004, attributed_entry=62590.0)
     stub_exchange.klines["BTCUSDT"] = 71486.0
-    result = reconcile.backfill_entries_from_klines(router)
+    result = reconcile.backfill_pnl_from_klines(router)
     assert any(s["strategy_id"] == "S1" for s in result["skipped"])
     with session_scope() as db:
         sp = db.query(StrategyPosition).filter_by(strategy_id="S1").one()
         assert sp.avg_entry_price == pytest.approx(62590.0)   # unchanged
+
+
+def test_backfill_realized_recomputed_from_kline(tmp_path, stub_exchange):
+    """A short covered on an unpriced opening leg gets realized_pnl recomputed (it
+    read as 0 before because the opening price was never recorded)."""
+    from app import reconcile
+    from app.models import StrategyPosition
+    f = tmp_path / "s.yaml"
+    f.write_text("strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    router = StrategyRouter(f)
+    with session_scope() as db:
+        a1 = Alert(idempotency_key="r1", strategy_id="S1", action="sell", raw_payload="{}")
+        db.add(a1); db.flush()
+        db.add(Order(alert_id=a1.id, exchange="bybit", symbol="BTCUSDT", side="sell",
+                     qty_base=1.0, qty_usd=0.0, status="success", fill_price=None))  # short @ recon
+        a2 = Alert(idempotency_key="r2", strategy_id="S1", action="buy", raw_payload="{}")
+        db.add(a2); db.flush()
+        db.add(Order(alert_id=a2.id, exchange="bybit", symbol="BTCUSDT", side="buy",
+                     qty_base=1.0, qty_usd=0.0, status="success", fill_price=90.0))   # cover @ 90
+        db.add(StrategyPosition(strategy_id="S1", exchange="bybit", symbol="BTCUSDT",
+                                net_qty_base=0.0, net_qty_usd=0.0, last_price=90.0,
+                                avg_entry_price=0.0, realized_pnl=0.0,
+                                updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
+    stub_exchange.klines["BTCUSDT"] = 100.0    # the unpriced short filled at 100
+    reconcile.backfill_pnl_from_klines(router)
+    with session_scope() as db:
+        sp = db.query(StrategyPosition).filter_by(strategy_id="S1").one()
+        assert sp.realized_pnl == pytest.approx(10.0)    # short @100 covered @90 -> +10
 
 
 def test_equity_curve_starts_from_zero_and_accumulates(client):
@@ -250,19 +278,19 @@ def test_equity_curve_starts_from_zero_and_accumulates(client):
     assert svg is not None and svg["polyline"]
 
 
-def test_equity_curve_marks_to_market_at_tip(client):
-    """Live unrealized is folded into a final point so the curve ends at the real
-    current total PnL (realized history + unrealized)."""
+def test_equity_curve_anchors_tip_to_total(client):
+    """A final point is anchored to the true current total PnL, so the curve ends at
+    the real number even when historical realized can't be replayed."""
     _seed_round_trip()
     with session_scope() as db:
         base = _equity_curve(db)
-        marked = _equity_curve(db, unrealized=50.0)
-    assert len(marked) == len(base) + 1                  # one mark-to-market tip
-    assert marked[-1][1] == pytest.approx(19.73 + 50.0)
+        anchored = _equity_curve(db, end_total=69.73)
+    assert len(anchored) == len(base) + 1                  # one anchor tip
+    assert anchored[-1][1] == pytest.approx(69.73)
 
 
-def test_equity_curve_no_tip_when_flat(client):
-    """No open positions (unrealized=0) -> no synthetic tip appended."""
+def test_equity_curve_no_tip_when_none(client):
+    """end_total=None -> no synthetic tip appended (raw replay only)."""
     _seed_round_trip()
     with session_scope() as db:
-        assert len(_equity_curve(db, unrealized=0.0)) == len(_equity_curve(db))
+        assert len(_equity_curve(db, end_total=None)) == len(_equity_curve(db))

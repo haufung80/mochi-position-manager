@@ -177,16 +177,23 @@ def set_position_size(sid: str, request: Request, secret: str = Form(...),
 
 @router.post("/strategies/backfill-entries", response_class=HTMLResponse)
 def backfill_entries(request: Request, secret: str = Form(...)):
-    """Reconstruct avg_entry_price from historical klines for positions whose
-    fills weren't recorded with a price, so per-strategy unrealized PnL is real.
-    Only rewrites positions whose recorded fills fully explain the stored net."""
+    """Recompute realized_pnl + avg_entry_price from historical klines for positions
+    whose fills weren't recorded with a price, so per-strategy PnL is real. Realized
+    is always rewritten (a historical fact); entry only when the fills explain the net."""
     _require_secret(secret)
     from .. import reconcile
-    result = reconcile.backfill_entries_from_klines(request.app.state.strategy_router)
-    upd = "".join(
-        f"<li><b>{u['strategy_id']}</b> — {u['exchange']}/{u['symbol']}: "
-        f"{(u['old'] or 0):.2f} → {u['new']:.2f}</li>" for u in result["updated"]
-    ) or "<li>(none)</li>"
+    result = reconcile.backfill_pnl_from_klines(request.app.state.strategy_router)
+
+    def _fmt(u: dict) -> str:
+        parts = []
+        if "realized" in u:
+            parts.append(f"realized {u['realized']['old']:.2f} → {u['realized']['new']:.2f}")
+        if "entry" in u:
+            parts.append(f"entry {u['entry']['old']:.2f} → {u['entry']['new']:.2f}")
+        return (f"<li><b>{u['strategy_id']}</b> — {u['exchange']}/{u['symbol']}: "
+                f"{'; '.join(parts)}</li>")
+
+    upd = "".join(_fmt(u) for u in result["updated"]) or "<li>(none)</li>"
     skip = "".join(
         f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: {s['reason']}</li>"
         for s in result["skipped"]
