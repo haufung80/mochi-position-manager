@@ -3,10 +3,12 @@
 <head>
   <meta charset="utf-8">
   <title>Strategies — Mochi Position Manager</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <style>
+    * { box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px; }
+           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px;
+           -webkit-text-size-adjust: 100%; }
     h1 { margin: 0 0 6px 0; font-size: 22px; }
     h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em;
          color: #888; margin: 28px 0 10px 0; }
@@ -71,6 +73,18 @@
                   font-size: 11px; font-weight: 600; margin-right: 4px;
                   background: #2a2e38; color: #666; border: none; cursor: pointer; }
     .venue-pill.on { background: #14532d; color: #4ade80; }
+    /* Wide tables scroll inside their card instead of breaking the phone layout. */
+    .card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 640px) {
+      body { padding: 12px;
+             padding-left: max(12px, env(safe-area-inset-left));
+             padding-right: max(12px, env(safe-area-inset-right));
+             padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+      h1 { font-size: 19px; }
+      .grid { grid-template-columns: 1fr; }   /* form fields stack on phones */
+      table { font-size: 12px; }
+      th, td { padding: 6px 8px; white-space: nowrap; }
+    }
   </style>
 </head>
 <body>

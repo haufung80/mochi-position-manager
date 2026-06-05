@@ -38,6 +38,7 @@ def client(strategies_file):
 def test_page_renders_dropdown_with_supported_assets(client):
     r = client.get("/admin/strategies")
     assert r.status_code == 200
+    assert "viewport-fit=cover" in r.text          # mobile/Safari responsive
     # base_asset is a dropdown, populated from SUPPORTED_BASE_ASSETS
     for asset in ("BTC", "ETH", "SOL", "BNB"):
         assert f">{asset}</option>" in r.text

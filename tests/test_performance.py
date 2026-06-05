@@ -54,6 +54,7 @@ def test_performance_empty_state_renders(client):
     assert "no-store" in r.headers.get("cache-control", "")
     assert "Live Performance" in r.text
     assert "No PnL history yet" in r.text
+    assert "viewport-fit=cover" in r.text          # mobile/Safari responsive
 
 
 def test_performance_renders_with_data(client):

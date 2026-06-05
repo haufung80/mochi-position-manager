@@ -281,6 +281,7 @@ def test_dashboard_renders_with_strategies(strategies_yaml, stub_exchange,
     c = _client(strategies_yaml)
     r = c.get("/")
     assert r.status_code == 200
+    assert "viewport-fit=cover" in r.text          # mobile/Safari responsive
     assert "TEST_BTC" in r.text
     assert "TEST_MULTI" in r.text
     assert "1.2.3.4" in r.text
