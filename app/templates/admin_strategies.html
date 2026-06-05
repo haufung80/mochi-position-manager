@@ -297,6 +297,35 @@
     </form>
   </div>
 
+  <h2>Reconcile PnL</h2>
+  <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
+    <strong>Audit</strong> replays each strategy's fills (kline-reconstructed for any
+    unpriced legs) and flags where realized PnL / net drift from the ledger or the live
+    exchange — read-only, changes nothing. <strong>Backfill</strong> then writes the
+    recomputed realized PnL + entry price into the ledger (only where the fills explain
+    the net). Run Audit first; Backfill if it flags realized drift.
+    <div style="margin-top: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+      <form method="POST" action="/admin/strategies/audit" style="display:inline-flex; gap:8px;">
+        <input type="password" name="secret" placeholder="webhook secret" required
+               style="background:#1a1d24; border:1px solid #6cf; color:#e6e6e6; padding:8px; border-radius:4px;">
+        <button type="submit"
+                style="background:#2563eb; color:#fff; border:none; padding:8px 14px; border-radius:4px; font-weight:bold; cursor:pointer;">
+          Audit (read-only)
+        </button>
+      </form>
+      <form method="POST" action="/admin/strategies/backfill-entries"
+            onsubmit="return confirm('Recompute realized PnL + entry from klines and write to the ledger? (no orders placed)');"
+            style="display:inline-flex; gap:8px;">
+        <input type="password" name="secret" placeholder="webhook secret" required
+               style="background:#1a1d24; border:1px solid #ffd54a; color:#e6e6e6; padding:8px; border-radius:4px;">
+        <button type="submit"
+                style="background:#b45309; color:#fff; border:none; padding:8px 14px; border-radius:4px; font-weight:bold; cursor:pointer;">
+          Backfill PnL
+        </button>
+      </form>
+    </div>
+  </div>
+
   <h2 class="muted">TradingView alert template</h2>
   <div class="card" style="font-size: 13px; color: #aaa; line-height: 1.6;">
     Paste this into the alert's <em>Message</em> field, replacing the secret:

@@ -115,6 +115,79 @@ def backfill_pnl_from_klines(router) -> dict:
     return {"updated": updated, "skipped": skipped}
 
 
+def audit_pnl(router) -> dict:
+    """Read-only reconciliation — catches PnL/position drift without changing anything.
+
+    Two independent checks:
+    1. Per strategy: replay its own fills (kline-reconstructed for unpriced ones) and
+       compare the result to the stored ledger. Flags realized PnL that the ledger
+       didn't compute (the unpriced-round-trip bug) and a net that the fills can't
+       reproduce (manual / drifted).
+    2. Per (exchange, symbol): compare the netted ledger to the LIVE exchange position.
+       Flags manual trades or unrecorded fills.
+
+    Returns {"strategy_issues", "exchange_drift", "clean"}; run it from the admin UI
+    (or a monitor) so this whole class of bug surfaces the moment it happens instead
+    of waiting to be eyeballed."""
+    oracle = get_registry().get("bybit")
+    registry = get_registry()
+    strat_issues: list[dict] = []
+    by_symbol: dict[tuple[str, str], float] = {}
+    with session_scope() as db:
+        for sp in db.query(StrategyPosition).all():
+            by_symbol[(sp.exchange, sp.symbol)] = (
+                by_symbol.get((sp.exchange, sp.symbol), 0.0) + sp.net_qty_base)
+            tag = {"strategy_id": sp.strategy_id, "exchange": sp.exchange, "symbol": sp.symbol}
+            osym = _oracle_symbol(sp.exchange, sp.symbol)
+            fills = (db.query(Order).join(Alert, Order.alert_id == Alert.id)
+                       .filter(Alert.strategy_id == sp.strategy_id,
+                               Order.exchange == sp.exchange, Order.symbol == sp.symbol,
+                               Order.status == "success")
+                       .order_by(Order.created_at).all())
+            if not fills:
+                continue
+            net = avg = realized = 0.0
+            ok = True
+            for o in fills:
+                px = o.fill_price if (o.fill_price and o.fill_price > 0) else oracle.get_kline_close(
+                    osym, int(o.created_at.replace(tzinfo=timezone.utc).timestamp() * 1000))
+                if not px or not o.qty_base:
+                    ok = False
+                    break
+                signed = o.qty_base * (1.0 if o.side == "buy" else -1.0)
+                net, avg, rd = _fill_math(net, avg, signed, o.qty_base, px)
+                realized += rd
+            if not ok:
+                strat_issues.append({**tag, "issue": "a fill has no usable price"})
+                continue
+            r_drift = realized - (sp.realized_pnl or 0.0)
+            n_drift = net - sp.net_qty_base
+            if abs(r_drift) > 0.5 or abs(n_drift) > 1e-4:
+                strat_issues.append({
+                    **tag,
+                    "ledger_realized": round(sp.realized_pnl or 0.0, 4), "replay_realized": round(realized, 4),
+                    "ledger_net": round(sp.net_qty_base, 6), "replay_net": round(net, 6),
+                    "realized_drift": round(r_drift, 4), "net_drift": round(n_drift, 6)})
+
+    exchange_drift: list[dict] = []
+    for (ex, sym), lnet in sorted(by_symbol.items()):
+        if abs(lnet) < 1e-9:
+            continue
+        try:
+            eqty, _ = registry.get(ex).get_position(sym)
+        except Exception as e:                       # noqa: BLE001 — report, don't raise
+            exchange_drift.append({"exchange": ex, "symbol": sym, "issue": f"read failed: {type(e).__name__}"})
+            continue
+        if abs(eqty - lnet) > 1e-4:
+            exchange_drift.append({"exchange": ex, "symbol": sym, "ledger_net": round(lnet, 6),
+                                   "exchange_net": round(eqty, 6), "drift": round(eqty - lnet, 6)})
+
+    clean = not strat_issues and not exchange_drift
+    log.info("audit_pnl: %d strategy issue(s), %d exchange drift(s) — %s",
+             len(strat_issues), len(exchange_drift), "clean" if clean else "ATTENTION")
+    return {"strategy_issues": strat_issues, "exchange_drift": exchange_drift, "clean": clean}
+
+
 def sync_strategy_positions(router) -> dict:
     """Set each configured strategy's ledger to its live exchange position.
     Returns {"synced": [...], "skipped": [...]} for display."""

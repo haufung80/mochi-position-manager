@@ -213,6 +213,46 @@ def backfill_entries(request: Request, secret: str = Form(...)):
     )
 
 
+@router.post("/strategies/audit", response_class=HTMLResponse)
+def audit_pnl(request: Request, secret: str = Form(...)):
+    """Read-only reconciliation report: per-strategy ledger vs fill-replay, and
+    per-symbol ledger vs the live exchange. Surfaces PnL/position drift on demand."""
+    _require_secret(secret)
+    from .. import reconcile
+    result = reconcile.audit_pnl(request.app.state.strategy_router)
+
+    def _si(s: dict) -> str:
+        if "issue" in s:
+            return f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: {s['issue']}</li>"
+        return (f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: "
+                f"realized ledger {s['ledger_realized']:.2f} vs replay {s['replay_realized']:.2f} "
+                f"(Δ{s['realized_drift']:+.2f}); net ledger {s['ledger_net']:g} vs replay "
+                f"{s['replay_net']:g} (Δ{s['net_drift']:+g})</li>")
+
+    def _xd(x: dict) -> str:
+        if "issue" in x:
+            return f"<li><b>{x['exchange']}/{x['symbol']}</b>: {x['issue']}</li>"
+        return (f"<li><b>{x['exchange']}/{x['symbol']}</b>: ledger {x['ledger_net']:g} vs exchange "
+                f"{x['exchange_net']:g} (Δ{x['drift']:+g})</li>")
+
+    si = "".join(_si(s) for s in result["strategy_issues"]) or "<li>(none)</li>"
+    xd = "".join(_xd(x) for x in result["exchange_drift"]) or "<li>(none)</li>"
+    banner = ('<h2 style="color:#4ade80">✓ Clean — ledger reconciles</h2>' if result["clean"]
+              else '<h2 style="color:#f87171">⚠ Drift detected</h2>')
+    log.info("admin: audit-pnl -> %d strategy, %d exchange issues",
+             len(result["strategy_issues"]), len(result["exchange_drift"]))
+    return HTMLResponse(
+        '<!doctype html><html><head><meta charset="utf-8"><title>PnL audit</title></head>'
+        '<body style="font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;'
+        'padding:28px;max-width:820px;margin:auto">'
+        f'{banner}'
+        f'<h3>Strategy ledger vs fill-replay ({len(result["strategy_issues"])})</h3><ul>{si}</ul>'
+        f'<h3>Per-symbol ledger vs exchange ({len(result["exchange_drift"])})</h3><ul>{xd}</ul>'
+        '<p style="margin-top:20px"><a href="/performance" style="color:#6cf">performance →</a></p>'
+        '</body></html>'
+    )
+
+
 @router.post("/reload-strategies")
 def reload_strategies(request: Request, secret: str = Form(...)):
     _require_secret(secret)
