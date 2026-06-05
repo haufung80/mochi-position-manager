@@ -89,6 +89,7 @@ def stub_exchange(monkeypatch):
             self.prices = {}        # symbol -> latest price (default 50000.0)
             self.step_sizes = {}    # symbol -> step size (default 0.001)
             self.funding = {}       # symbol -> list[{"time_ms", "amount"}]
+            self.min_notionals = {} # symbol -> min order value (default 0.0 = none)
 
         def market_order(self, symbol, side, quantity, leverage=1.0):
             self.calls.append(("market", symbol, side, quantity, leverage))
@@ -113,6 +114,10 @@ def stub_exchange(monkeypatch):
         def get_funding(self, symbol, start_ms, end_ms):
             self.calls.append(("get_funding", symbol, start_ms, end_ms))
             return list(self.funding.get(symbol, []))
+
+        def get_min_notional(self, symbol):
+            self.calls.append(("get_min_notional", symbol))
+            return self.min_notionals.get(symbol, 0.0)
 
     fake = FakeExchange()
 

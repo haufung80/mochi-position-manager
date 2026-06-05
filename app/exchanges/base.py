@@ -44,3 +44,8 @@ class Exchange(Protocol):
         {"time_ms": int, "amount": float} (amount signed: + received, - paid).
         Best-effort: returns [] on failure."""
         ...
+
+    def get_min_notional(self, symbol: str) -> float:
+        """Minimum order value (quote currency, e.g. USDT) the exchange accepts,
+        so managed/paper orders aren't placed below it and rejected."""
+        ...

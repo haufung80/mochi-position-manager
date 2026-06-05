@@ -10,7 +10,7 @@ from app import portfolio
 from app.portfolio import Decision, compute_managed_qty
 from app.db import session_scope
 from app.executor import _apply_fill_to_position
-from app.routing import StrategyRouter
+from app.routing import StrategyRoute, StrategyRouter, VenueRoute
 
 
 # ---------- compute_managed_qty ----------
@@ -145,3 +145,42 @@ def test_decide_close_does_not_need_price(strategies_yaml, stub_exchange):
         s = portfolio.decide(db, route, v, "sell", alert_quantity=None)
     assert s.decision is Decision.CLOSE
     assert s.qty == pytest.approx(7.0)
+
+
+# ---------- exchange minimum order value ----------
+
+def test_min_qty_rounds_up_to_meet_notional():
+    from app.portfolio import _min_qty
+    assert _min_qty(10, 100000, 0.00001) == pytest.approx(0.0001)   # $10 / 100k -> 0.0001 BTC
+    assert _min_qty(0, 100000, 0.001) == 0.0
+
+
+def test_decide_paper_meets_min_notional(strategies_yaml, stub_exchange):
+    """Paper bumps the one-step order up to the exchange min notional (a lone HL
+    BTC step is ~$1, below the $10 minimum)."""
+    route = _route(strategies_yaml, "TEST_BTC")        # managed, no position_size -> paper
+    v = _venue(route)
+    stub_exchange.prices[v.symbol] = 100000.0
+    stub_exchange.step_sizes[v.symbol] = 0.00001
+    stub_exchange.min_notionals[v.symbol] = 10.0
+    with session_scope() as db:
+        s = portfolio.decide(db, route, v, "buy", alert_quantity=None)
+    assert s.decision is Decision.OPEN and s.paper
+    assert s.qty == pytest.approx(0.0001)              # 10 / 100000, rounded up to step
+    assert s.qty * 100000 >= 10.0
+
+
+def test_decide_managed_below_min_notional_rejected(stub_exchange):
+    """position_size below the exchange minimum order value -> reject (don't place
+    an order the exchange will bounce)."""
+    route = StrategyRoute(strategy_id="SMALL", base_asset="BTC",
+                          venues=(VenueRoute("bybit", "BTCUSDT", True),),
+                          position_size=8.0)
+    v = route.venues[0]
+    stub_exchange.prices["BTCUSDT"] = 100000.0
+    stub_exchange.step_sizes["BTCUSDT"] = 0.00001
+    stub_exchange.min_notionals["BTCUSDT"] = 10.0
+    with session_scope() as db:
+        s = portfolio.decide(db, route, v, "buy", alert_quantity=None)
+    assert s.decision is Decision.REJECT
+    assert "minimum" in s.reason

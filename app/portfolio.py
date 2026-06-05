@@ -20,7 +20,7 @@ sar=true strategies bypass all of this: ALERT_DRIVEN with the alert's quantity.
 from __future__ import annotations
 import logging
 from dataclasses import dataclass
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from enum import Enum
 from typing import Literal
 
@@ -67,6 +67,17 @@ def compute_managed_qty(usdt: float, price: float, step: float) -> float:
     return float(units * step_d)
 
 
+def _min_qty(min_notional: float, price: float, step: float) -> float:
+    """Smallest multiple of `step` whose notional (qty * price) >= `min_notional`
+    (rounds UP). 0.0 if inputs are non-positive."""
+    if min_notional <= 0 or price <= 0 or step <= 0:
+        return 0.0
+    need = Decimal(str(min_notional)) / Decimal(str(price))
+    step_d = Decimal(str(step))
+    units = (need / step_d).to_integral_value(rounding=ROUND_UP)
+    return float(units * step_d)
+
+
 def _net_qty(db: Session, strategy_id: str, exchange: str, symbol: str) -> float:
     row = (db.query(StrategyPosition)
              .filter_by(strategy_id=strategy_id, exchange=exchange, symbol=symbol)
@@ -97,10 +108,17 @@ def decide(db: Session, route: StrategyRoute, venue: VenueRoute,
     step = ex.get_step_size(venue.symbol)
     if step <= 0:
         return Sizing(Decision.REJECT, reason="step size unavailable")
+    min_notional = ex.get_min_notional(venue.symbol)
 
     if route.position_size is None:
-        # paper mode: one minimum unit, with a warning
-        return Sizing(Decision.OPEN, side=action, qty=step, paper=True,
+        # paper mode: the SMALLEST VALID order — one step, but bumped up to the
+        # exchange's minimum notional (a lone step can be below it, e.g. HL's $10).
+        qty = step
+        if min_notional > 0:
+            price = ex.get_price(venue.symbol)
+            if price > 0:
+                qty = max(step, _min_qty(min_notional, price, step))
+        return Sizing(Decision.OPEN, side=action, qty=qty, paper=True,
                       reason="no position_size configured (paper mode)")
 
     price = ex.get_price(venue.symbol)
@@ -112,5 +130,11 @@ def decide(db: Session, route: StrategyRoute, venue: VenueRoute,
             Decision.REJECT,
             reason=f"position_size {route.position_size:g} below one step "
                    f"({step:g}) at price {price:g}",
+        )
+    if min_notional > 0 and qty * price < min_notional:
+        return Sizing(
+            Decision.REJECT,
+            reason=f"position_size {route.position_size:g} below exchange minimum "
+                   f"${min_notional:g} (qty {qty:g} @ {price:g})",
         )
     return Sizing(Decision.OPEN, side=action, qty=qty)

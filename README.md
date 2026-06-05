@@ -229,8 +229,9 @@ Hyperliquid). The `sar` flag selects the **execution mode**:
   from `position_size` (USDT notional): when flat it opens `floor(position_size / price / step)` units
   (rounded down to the lot step); the opposite signal closes to flat; a same-direction signal is
   rejected (no pyramiding) and Telegram-alerted. The alert's `quantity` is optional and ignored.
-  If `position_size` is **omitted**, the strategy runs in **paper mode** — orders use one minimum unit
-  and a Telegram warning fires, so you can roll out sizing from the admin UI before committing capital.
+  If `position_size` is **omitted**, the strategy runs in **paper mode** — orders use the smallest valid
+  size (the exchange's minimum order value) + a Telegram warning, so you can roll out sizing from the
+  admin UI before committing capital. (A `position_size` below the exchange minimum is rejected, not shrunk.)
 
 ```yaml
 strategies:

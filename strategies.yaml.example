@@ -28,8 +28,9 @@
 #
 # `position_size` (optional, USDT notional, MANAGED strategies only): the max
 # position to open per venue. If omitted, the strategy runs in PAPER mode —
-# orders use one minimum unit and a Telegram warning fires, so you can roll out
-# sizing from the /admin UI without risking full size.
+# orders use the smallest VALID size (the exchange's minimum order value) and a
+# Telegram warning fires, so you can roll out sizing from /admin safely.
+# A position_size BELOW the exchange minimum is rejected (not silently shrunk).
 
 strategies:
   # Managed: open up to $1000 notional per venue, close on the opposite signal.

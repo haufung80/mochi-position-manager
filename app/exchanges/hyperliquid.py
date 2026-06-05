@@ -243,3 +243,7 @@ class HyperliquidExchange:
             if ts:
                 out.append({"time_ms": ts, "amount": amt})
         return out
+
+    def get_min_notional(self, symbol: str) -> float:
+        """Hyperliquid enforces a global $10 minimum order value."""
+        return 10.0

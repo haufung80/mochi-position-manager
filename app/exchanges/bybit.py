@@ -262,3 +262,13 @@ class BybitExchange:
             if ts and amt:
                 out.append({"time_ms": ts, "amount": amt})
         return out
+
+    def get_min_notional(self, symbol: str) -> float:
+        """Bybit minimum order value (USDT), from lotSizeFilter. Falls back to $5."""
+        try:
+            v = self._instrument(symbol).get("lotSizeFilter", {}).get("minNotionalValue")
+            if v:
+                return float(v)
+        except Exception as e:
+            log.warning("Bybit get_min_notional failed for %s: %s", symbol, e)
+        return 5.0
