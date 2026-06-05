@@ -51,22 +51,23 @@ def single_owner_map(router) -> dict[tuple[str, str], str]:
 
 
 def backfill_pnl_from_klines(router) -> dict:
-    """Recompute `realized_pnl` and `avg_entry_price` for positions built from fills
-    that weren't recorded with a price (`fill_price` 0/None — pre-execution-quality
-    history), by replaying each strategy's own success fills through the shared fill
-    math and pricing any unpriced fill with the market close at that fill's minute
-    (a market order fills ~there).
+    """Reconstruct `avg_entry_price` for OPEN positions built from fills that weren't
+    recorded with a price (`fill_price` 0/None — pre-execution-quality history), by
+    replaying each strategy's own success fills and pricing any unpriced fill with the
+    market close at that fill's minute (a market order fills ~there).
 
-    Two different guards, because the two figures mean different things:
-    - `realized_pnl` is a HISTORICAL fact — the cumulative PnL booked on closes. It's
-      valid whenever the fills are priced, regardless of the current net, so we always
-      rewrite it. (This is what made round-trips on unpriced legs read as $0 — e.g. a
-      short covered for a profit showing realized 0.)
-    - `avg_entry_price` describes the CURRENT open position, so we only rewrite it when
-      the replayed net matches the stored net (the fills fully explain it); a manually
-      set / drifted net keeps its entry.
+    Realized PnL is deliberately NOT reconstructed. Replaying realized requires the
+    COMPLETE closed history from a known-flat start, which pre-tracking data doesn't
+    give us: a strategy whose first recorded fill is a *close* of a position opened
+    before the database existed would have that close misread as opening the opposite
+    side, fabricating profit (this happened to BTC_HLD: a long opened pre-DB, the
+    recorded sell read as a short open → a bogus +$64). So realized only ever comes
+    from the live executor (real fills, going forward); here we just CLEAR any realized
+    that an unpriced history left behind, and let `audit_pnl` show a caveated estimate.
 
-    Going forward fills are priced, so the live ledger stays correct without this.
+    `avg_entry_price` is safe to rebuild because it describes the CURRENT open position
+    (priced by its own fills); we only rewrite it when the replayed net matches the
+    stored net (the fills fully explain it), so a manual/drifted net keeps its entry.
     """
     oracle = get_registry().get("bybit")
     updated: list[dict] = []
@@ -83,7 +84,8 @@ def backfill_pnl_from_klines(router) -> dict:
                        .order_by(Order.created_at).all())
             if not fills:
                 continue
-            net = avg = realized = 0.0
+            has_unpriced = any(not (o.fill_price and o.fill_price > 0) for o in fills)
+            net = avg = 0.0
             ok = True
             for o in fills:
                 px = o.fill_price if (o.fill_price and o.fill_price > 0) else oracle.get_kline_close(
@@ -92,15 +94,17 @@ def backfill_pnl_from_klines(router) -> dict:
                     ok = False
                     break
                 signed = o.qty_base * (1.0 if o.side == "buy" else -1.0)
-                net, avg, rd = _fill_math(net, avg, signed, o.qty_base, px)
-                realized += rd
+                net, avg, _ = _fill_math(net, avg, signed, o.qty_base, px)
             if not ok:
                 skipped.append({**tag, "reason": "price lookup failed for a fill"})
                 continue
             changes: dict = {}
-            if abs(realized - (sp.realized_pnl or 0.0)) > 0.01:
-                changes["realized"] = {"old": round(sp.realized_pnl or 0.0, 4), "new": round(realized, 4)}
-                sp.realized_pnl = realized
+            # Clear realized that an unpriced (possibly truncated) history left behind —
+            # it can't be trusted and must never be reconstructed. Priced-only histories
+            # keep their live-booked realized untouched.
+            if has_unpriced and abs(sp.realized_pnl or 0.0) > 0.01:
+                changes["realized_cleared"] = {"old": round(sp.realized_pnl or 0.0, 4), "new": 0.0}
+                sp.realized_pnl = 0.0
             net_matches = abs(net - sp.net_qty_base) <= max(1e-6, abs(sp.net_qty_base) * 0.01)
             if net_matches and avg > 0 and abs(avg - (sp.avg_entry_price or 0.0)) > 0.01:
                 changes["entry"] = {"old": round(sp.avg_entry_price or 0.0, 4), "new": round(avg, 4)}
@@ -162,12 +166,18 @@ def audit_pnl(router) -> dict:
                 continue
             r_drift = realized - (sp.realized_pnl or 0.0)
             n_drift = net - sp.net_qty_base
+            # The realized REPLAY assumes the strategy was flat before its first recorded
+            # fill. If that first fill is a sell, it might instead be closing a position
+            # opened before the database existed → the replay (and its realized) is then
+            # unreliable. Flag it so the estimate isn't taken as truth.
+            suspect = fills[0].side == "sell"
             if abs(r_drift) > 0.5 or abs(n_drift) > 1e-4:
                 strat_issues.append({
                     **tag,
                     "ledger_realized": round(sp.realized_pnl or 0.0, 4), "replay_realized": round(realized, 4),
                     "ledger_net": round(sp.net_qty_base, 6), "replay_net": round(net, 6),
-                    "realized_drift": round(r_drift, 4), "net_drift": round(n_drift, 6)})
+                    "realized_drift": round(r_drift, 4), "net_drift": round(n_drift, 6),
+                    "replay_suspect_truncated": suspect})
 
     exchange_drift: list[dict] = []
     for (ex, sym), lnet in sorted(by_symbol.items()):

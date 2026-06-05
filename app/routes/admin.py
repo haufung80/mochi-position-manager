@@ -186,8 +186,8 @@ def backfill_entries(request: Request, secret: str = Form(...)):
 
     def _fmt(u: dict) -> str:
         parts = []
-        if "realized" in u:
-            parts.append(f"realized {u['realized']['old']:.2f} → {u['realized']['new']:.2f}")
+        if "realized_cleared" in u:
+            parts.append(f"cleared stale realized {u['realized_cleared']['old']:.2f} → 0.00")
         if "entry" in u:
             parts.append(f"entry {u['entry']['old']:.2f} → {u['entry']['new']:.2f}")
         return (f"<li><b>{u['strategy_id']}</b> — {u['exchange']}/{u['symbol']}: "
@@ -224,10 +224,12 @@ def audit_pnl(request: Request, secret: str = Form(...)):
     def _si(s: dict) -> str:
         if "issue" in s:
             return f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: {s['issue']}</li>"
+        caveat = (' <span style="color:#facc15">⚠ replay may be truncated (first fill is a sell) — '
+                  'realized estimate unreliable</span>' if s.get("replay_suspect_truncated") else "")
         return (f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: "
-                f"realized ledger {s['ledger_realized']:.2f} vs replay {s['replay_realized']:.2f} "
+                f"realized ledger {s['ledger_realized']:.2f} vs replay-estimate {s['replay_realized']:.2f} "
                 f"(Δ{s['realized_drift']:+.2f}); net ledger {s['ledger_net']:g} vs replay "
-                f"{s['replay_net']:g} (Δ{s['net_drift']:+g})</li>")
+                f"{s['replay_net']:g} (Δ{s['net_drift']:+g}){caveat}</li>")
 
     def _xd(x: dict) -> str:
         if "issue" in x:

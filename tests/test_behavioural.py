@@ -44,22 +44,24 @@ def _unpriced_short_then_cover(sid: str, cover_price: float):
                                 updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
 
 
-def test_unpriced_reversal_realized_is_zero_then_recovered(tmp_path, stub_exchange):
-    """Given a short opened on an unpriced fill and covered lower, the page first reads
-    realized $0 (the bug), and the kline reconciliation recovers the real profit."""
+def test_unpriced_reversal_realized_not_fabricated_audit_flags_estimate(tmp_path, stub_exchange):
+    """Given a short opened on an unpriced fill and covered lower: realized stays $0 on
+    the page (a truncated history can't be trusted — never fabricate it), and the audit
+    surfaces the +$10 replay ESTIMATE, flagged as possibly-truncated (sell-first)."""
     from app import reconcile
     router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
     _unpriced_short_then_cover("S1", cover_price=90.0)
     stub_exchange.klines["BTCUSDT"] = 100.0          # the unpriced short really filled @ 100
 
+    reconcile.backfill_pnl_from_klines(router)        # must NOT invent realized
     with session_scope() as db:
-        before = _performance(db, router)
-    assert next(r for r in before["per_strategy"] if r["strategy_id"] == "S1")["realized"] == pytest.approx(0.0)
+        perf = _performance(db, router)
+    assert next(r for r in perf["per_strategy"] if r["strategy_id"] == "S1")["realized"] == pytest.approx(0.0)
 
-    reconcile.backfill_pnl_from_klines(router)
-    with session_scope() as db:
-        after = _performance(db, router)
-    assert next(r for r in after["per_strategy"] if r["strategy_id"] == "S1")["realized"] == pytest.approx(10.0)
+    audit = reconcile.audit_pnl(router)               # estimate is surfaced, flagged suspect
+    issue = next(s for s in audit["strategy_issues"] if s["strategy_id"] == "S1")
+    assert issue["replay_realized"] == pytest.approx(10.0)
+    assert issue["replay_suspect_truncated"] is True
 
 
 def test_shared_symbol_nets_on_exchange_and_flags_attribution(tmp_path, stub_exchange):
