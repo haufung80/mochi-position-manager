@@ -85,6 +85,8 @@ def stub_exchange(monkeypatch):
                                            filled_qty_base=0.001, avg_price=50000.0)
             # symbol -> (signed_qty, mark_price), returned by get_position()
             self.positions = {}
+            self.entries = {}       # symbol -> exchange avg entry (get_position_detail)
+            self.klines = {}        # symbol -> historical close (get_kline_close)
             # managed-sizing inputs (configurable per symbol)
             self.prices = {}        # symbol -> latest price (default 50000.0)
             self.step_sizes = {}    # symbol -> step size (default 0.001)
@@ -102,6 +104,17 @@ def stub_exchange(monkeypatch):
         def get_position(self, symbol):
             self.calls.append(("get_position", symbol))
             return self.positions.get(symbol, (0.0, 0.0))
+
+        def get_position_detail(self, symbol):
+            self.calls.append(("get_position_detail", symbol))
+            qty, mark = self.positions.get(symbol, (0.0, 0.0))
+            entry = self.entries.get(symbol, 0.0)
+            return {"qty": qty, "mark": mark, "entry": entry,
+                    "unrealized": qty * (mark - entry) if entry else 0.0}
+
+        def get_kline_close(self, symbol, ts_ms):
+            self.calls.append(("get_kline_close", symbol, ts_ms))
+            return self.klines.get(symbol, 0.0)
 
         def get_price(self, symbol):
             self.calls.append(("get_price", symbol))

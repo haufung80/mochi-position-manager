@@ -225,6 +225,37 @@ class BybitExchange:
             return signed, mark
         return 0.0, 0.0
 
+    def get_position_detail(self, symbol: str) -> dict:
+        """Live position incl. the exchange's own entry + unrealized PnL:
+        {qty, mark, entry, unrealized}. All 0.0 if flat. Lets the dashboard show
+        the venue's own unrealized rather than reconstructing it from a (possibly
+        blended/attributed) ledger entry."""
+        resp = self._client.get_positions(category=CATEGORY, symbol=symbol)
+        for p in (resp.get("result") or {}).get("list") or []:
+            size = float(p.get("size", 0) or 0)
+            if size == 0:
+                continue
+            signed = size if p.get("side") == "Buy" else -size
+            return {"qty": signed,
+                    "mark": float(p.get("markPrice") or p.get("avgPrice") or 0.0),
+                    "entry": float(p.get("avgPrice") or 0.0),
+                    "unrealized": float(p.get("unrealisedPnl") or 0.0)}
+        return {"qty": 0.0, "mark": 0.0, "entry": 0.0, "unrealized": 0.0}
+
+    def get_kline_close(self, symbol: str, ts_ms: int) -> float:
+        """1-minute close at/around `ts_ms` — used to reconstruct an entry price
+        for a fill that wasn't recorded with one (a market order fills ~here).
+        0.0 on failure."""
+        try:
+            resp = self._client.get_kline(category=CATEGORY, symbol=symbol,
+                                          interval="1", start=ts_ms,
+                                          end=ts_ms + 60_000, limit=1)
+            rows = (resp.get("result") or {}).get("list") or []
+            return float(rows[0][4]) if rows else 0.0
+        except Exception as e:
+            log.warning("Bybit get_kline_close failed for %s @ %s: %s", symbol, ts_ms, e)
+            return 0.0
+
     def get_price(self, symbol: str) -> float:
         try:
             return self._mark_price(symbol)

@@ -88,6 +88,7 @@ def test_open_position_unrealized_uses_live_mark(client, stub_exchange):
     with session_scope() as db:
         _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 2.0, 100.0)
     stub_exchange.positions["BTCUSDT"] = (2.0, 110.0)     # exchange truth: +2 @ mark 110
+    stub_exchange.entries["BTCUSDT"] = 100.0              # exchange's own avg entry
     with session_scope() as db:
         perf = _performance(db, client.app.state.strategy_router)
     s1 = next(r for r in perf["per_strategy"] if r["strategy_id"] == "S1")
@@ -112,6 +113,7 @@ def test_actual_position_reads_exchange_not_ledger(tmp_path, stub_exchange):
         _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 1.0, 100.0)
     # Ledger intent says 1 BTC, but the exchange actually holds 3 BTC @ 110.
     stub_exchange.positions["BTCUSDT"] = (3.0, 110.0)
+    stub_exchange.entries["BTCUSDT"] = 100.0
     with session_scope() as db:
         perf = _performance(db, router)
     ap = perf["exchange_positions"][0]
@@ -134,6 +136,7 @@ def test_open_positions_net_into_actual_exchange_positions(tmp_path, stub_exchan
         _apply_fill_to_position(db, "LONG", "bybit", "BTCUSDT", "buy", 3.0, 100.0)
         _apply_fill_to_position(db, "SHORT", "bybit", "BTCUSDT", "sell", 1.0, 100.0)
     stub_exchange.positions["BTCUSDT"] = (2.0, 110.0)     # exchange net = +2 @ 110
+    stub_exchange.entries["BTCUSDT"] = 100.0
     with session_scope() as db:
         perf = _performance(db, router)
     # two per-strategy intent legs, both attributed (shared symbol)
@@ -180,6 +183,55 @@ def test_unrealized_guarded_when_avg_entry_zero(client, stub_exchange):
         perf = _performance(db, client.app.state.strategy_router)
     s1 = next(r for r in perf["per_strategy"] if r["strategy_id"] == "S1")
     assert s1["unrealized"] == pytest.approx(0.0)         # NOT 1 * 50000
+
+
+def _seed_unpriced_position(sid, net, ledger_net, attributed_entry):
+    """A success fill with NO fill_price + a ledger row with a wrong entry."""
+    from app.models import StrategyPosition
+    with session_scope() as db:
+        a = Alert(idempotency_key=f"u-{sid}", strategy_id=sid, action="buy", raw_payload="{}")
+        db.add(a); db.flush()
+        db.add(Order(alert_id=a.id, exchange="bybit", symbol="BTCUSDT", side="buy",
+                     qty_base=net, qty_usd=0.0, status="success", fill_price=None))
+        db.add(StrategyPosition(strategy_id=sid, exchange="bybit", symbol="BTCUSDT",
+                                net_qty_base=ledger_net, net_qty_usd=ledger_net * 70000,
+                                last_price=70000.0, avg_entry_price=attributed_entry,
+                                realized_pnl=0.0,
+                                updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
+
+
+def test_backfill_entry_from_kline(tmp_path, stub_exchange):
+    """An unpriced fill's entry is rebuilt from the market close at its fill time,
+    replacing the bogus attributed entry."""
+    from app import reconcile
+    from app.models import StrategyPosition
+    f = tmp_path / "s.yaml"
+    f.write_text("strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    router = StrategyRouter(f)
+    _seed_unpriced_position("S1", 0.002, 0.002, attributed_entry=62590.0)
+    stub_exchange.klines["BTCUSDT"] = 71486.0             # real price at fill time
+    result = reconcile.backfill_entries_from_klines(router)
+    assert any(u["strategy_id"] == "S1" for u in result["updated"])
+    with session_scope() as db:
+        sp = db.query(StrategyPosition).filter_by(strategy_id="S1").one()
+        assert sp.avg_entry_price == pytest.approx(71486.0)   # was 62590 (attributed)
+
+
+def test_backfill_skips_when_fills_dont_explain_net(tmp_path, stub_exchange):
+    """A ledger net the recorded fills can't reproduce (manual/drifted) is left
+    untouched, not silently rewritten."""
+    from app import reconcile
+    from app.models import StrategyPosition
+    f = tmp_path / "s.yaml"
+    f.write_text("strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    router = StrategyRouter(f)
+    _seed_unpriced_position("S1", 0.002, ledger_net=0.004, attributed_entry=62590.0)
+    stub_exchange.klines["BTCUSDT"] = 71486.0
+    result = reconcile.backfill_entries_from_klines(router)
+    assert any(s["strategy_id"] == "S1" for s in result["skipped"])
+    with session_scope() as db:
+        sp = db.query(StrategyPosition).filter_by(strategy_id="S1").one()
+        assert sp.avg_entry_price == pytest.approx(62590.0)   # unchanged
 
 
 def test_equity_curve_starts_from_zero_and_accumulates(client):

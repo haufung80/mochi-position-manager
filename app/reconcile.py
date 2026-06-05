@@ -16,9 +16,15 @@ from datetime import datetime, timezone
 
 from .db import session_scope
 from .exchanges.registry import get_registry
-from .models import StrategyPosition
+from .executor import _fill_math
+from .models import Alert, Order, StrategyPosition
 
 log = logging.getLogger(__name__)
+
+# Bybit is the price oracle for kline backfill; map each canonical symbol to its
+# USDT-perp ticker (Hyperliquid coins use the same spot price).
+_ORACLE_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
+                  "BNB": "BNBUSDT", "XRP": "XRPUSDT"}
 
 
 def venue_claims(router) -> dict[tuple[str, str], list[str]]:
@@ -35,6 +41,60 @@ def single_owner_map(router) -> dict[tuple[str, str], str]:
     more than one strategy are omitted — an aggregate can't be attributed to one
     strategy. Used for position sync and per-strategy funding attribution."""
     return {k: ids[0] for k, ids in venue_claims(router).items() if len(ids) == 1}
+
+
+def backfill_entries_from_klines(router) -> dict:
+    """Reconstruct `avg_entry_price` for positions built from fills that weren't
+    recorded with a price (`fill_price` 0/None — pre-execution-quality history).
+
+    Replays each strategy's own success fills through the shared fill math, pricing
+    any unpriced fill with the market close at that fill's minute (a market order
+    fills ~there). We only rewrite a position when the replayed net MATCHES the
+    stored net — i.e. the recorded fills fully explain it — so manually-set or
+    drifted rows (e.g. a target that wasn't reached) are left untouched and flagged.
+
+    This fixes the per-strategy unrealized that the blended/attributed entry made
+    wrong (e.g. a long opened at $71k showing a gain because its entry was set to a
+    netted blend). Going forward fills are priced, so the live ledger stays correct.
+    """
+    oracle = get_registry().get("bybit")
+    updated: list[dict] = []
+    skipped: list[dict] = []
+    with session_scope() as db:
+        for sp in db.query(StrategyPosition).all():
+            if abs(sp.net_qty_base) < 1e-9:
+                continue
+            tag = {"strategy_id": sp.strategy_id, "exchange": sp.exchange, "symbol": sp.symbol}
+            osym = _ORACLE_SYMBOL.get(sp.symbol, sp.symbol)
+            fills = (db.query(Order).join(Alert, Order.alert_id == Alert.id)
+                       .filter(Alert.strategy_id == sp.strategy_id,
+                               Order.exchange == sp.exchange, Order.symbol == sp.symbol,
+                               Order.status == "success")
+                       .order_by(Order.created_at).all())
+            net = avg = 0.0
+            ok = True
+            for o in fills:
+                px = o.fill_price if (o.fill_price and o.fill_price > 0) else oracle.get_kline_close(
+                    osym, int(o.created_at.replace(tzinfo=timezone.utc).timestamp() * 1000))
+                if not px or not o.qty_base:
+                    ok = False
+                    break
+                signed = o.qty_base * (1.0 if o.side == "buy" else -1.0)
+                net, avg, _ = _fill_math(net, avg, signed, o.qty_base, px)
+            if not ok:
+                skipped.append({**tag, "reason": "no fills / price lookup failed"})
+                continue
+            if abs(net - sp.net_qty_base) > max(1e-6, abs(sp.net_qty_base) * 0.01):
+                skipped.append({**tag, "reason":
+                                f"replay net {net:.6f} != ledger {sp.net_qty_base:.6f}"})
+                continue
+            if avg > 0 and abs(avg - (sp.avg_entry_price or 0.0)) > 0.01:
+                updated.append({**tag, "old": sp.avg_entry_price, "new": round(avg, 4)})
+                sp.avg_entry_price = avg
+                sp.updated_at = datetime.now(timezone.utc)
+    log.info("backfill_entries_from_klines: %d updated, %d skipped",
+             len(updated), len(skipped))
+    return {"updated": updated, "skipped": skipped}
 
 
 def sync_strategy_positions(router) -> dict:

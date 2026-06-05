@@ -175,6 +175,37 @@ def set_position_size(sid: str, request: Request, secret: str = Form(...),
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 
+@router.post("/strategies/backfill-entries", response_class=HTMLResponse)
+def backfill_entries(request: Request, secret: str = Form(...)):
+    """Reconstruct avg_entry_price from historical klines for positions whose
+    fills weren't recorded with a price, so per-strategy unrealized PnL is real.
+    Only rewrites positions whose recorded fills fully explain the stored net."""
+    _require_secret(secret)
+    from .. import reconcile
+    result = reconcile.backfill_entries_from_klines(request.app.state.strategy_router)
+    upd = "".join(
+        f"<li><b>{u['strategy_id']}</b> — {u['exchange']}/{u['symbol']}: "
+        f"{(u['old'] or 0):.2f} → {u['new']:.2f}</li>" for u in result["updated"]
+    ) or "<li>(none)</li>"
+    skip = "".join(
+        f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: {s['reason']}</li>"
+        for s in result["skipped"]
+    )
+    skip_block = (f'<h3 style="color:#e0a030">Left untouched {len(result["skipped"])}</h3>'
+                  f'<ul>{skip}</ul>' if skip else "")
+    log.info("admin: backfill-entries -> %d updated, %d skipped",
+             len(result["updated"]), len(result["skipped"]))
+    return HTMLResponse(
+        '<!doctype html><html><head><meta charset="utf-8"><title>Backfill result</title></head>'
+        '<body style="font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;'
+        'padding:28px;max-width:760px;margin:auto">'
+        f'<h2>Rebuilt entry price for {len(result["updated"])} position(s)</h2><ul>{upd}</ul>'
+        f'{skip_block}'
+        '<p style="margin-top:20px"><a href="/performance" style="color:#6cf">'
+        'performance →</a></p></body></html>'
+    )
+
+
 @router.post("/reload-strategies")
 def reload_strategies(request: Request, secret: str = Form(...)):
     _require_secret(secret)

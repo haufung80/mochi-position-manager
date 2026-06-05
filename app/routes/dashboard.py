@@ -262,21 +262,34 @@ def _actual_positions(db) -> list[dict]:
     out: list[dict] = []
     for ex, sym in probe:
         k = (ex, sym)
-        qty, mark, source = net.get(k, 0.0), last.get(k, 0.0), "ledger"
-        try:                                   # live exchange net is the truth
-            eqty, emark = reg.get(ex).get_position(sym)
-            qty = eqty
-            if emark and emark > 0:
-                mark = emark
+        qty, mark = net.get(k, 0.0), last.get(k, 0.0)
+        entry = (cost[k] / qsum[k]) if qsum.get(k) else 0.0   # ledger blend (fallback)
+        unreal, source = None, "ledger"
+        try:                                   # live exchange state is the truth
+            adapter = reg.get(ex)
+            if hasattr(adapter, "get_position_detail"):
+                d = adapter.get_position_detail(sym)
+                qty = d["qty"]
+                if d.get("mark"):
+                    mark = d["mark"]
+                if d.get("entry"):
+                    entry = d["entry"]          # exchange's own avg entry (correct net entry)
+                unreal = d.get("unrealized")    # exchange's own unrealized PnL
+            else:
+                eqty, emark = adapter.get_position(sym)
+                qty = eqty
+                if emark and emark > 0:
+                    mark = emark
             source = "exchange"
         except Exception:                      # noqa: BLE001 — display path, never raise
             pass
         if _venue_flat(qty, qty * mark):
             continue
-        entry = (cost[k] / qsum[k]) if qsum.get(k) else 0.0
+        # Fall back to entry-based unrealized only when the venue didn't report one.
+        if unreal is None:
+            unreal = qty * (mark - entry) if entry > 0 else 0.0
         out.append({"exchange": ex, "symbol": sym, "net_qty_base": qty, "mark": mark,
-                    "entry": entry, "source": source,
-                    "unrealized": qty * (mark - entry) if entry > 0 else 0.0})
+                    "entry": entry, "source": source, "unrealized": unreal})
     return sorted(out, key=lambda a: (a["exchange"], a["symbol"]))
 
 

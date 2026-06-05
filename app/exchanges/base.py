@@ -29,6 +29,12 @@ class Exchange(Protocol):
         reconcile the internal ledger to real exchange state."""
         ...
 
+    def get_position_detail(self, symbol: str) -> dict:
+        """Live position incl. the exchange's own entry + unrealized PnL:
+        {qty, mark, entry, unrealized}. All 0.0 if flat. Lets callers use the
+        venue's own unrealized instead of reconstructing it from a ledger entry."""
+        ...
+
     def get_price(self, symbol: str) -> float:
         """Latest price for `symbol` (mark on Bybit, mid on Hyperliquid). Used to
         size managed orders from a USDT budget. Best-effort: 0.0 on failure."""
