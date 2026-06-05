@@ -137,8 +137,8 @@
     </table>
     <div class="muted">*Slippage = execution shortfall vs signal price (diagnostic; not in Total).
       Funding is per-strategy only when one strategy owns the symbol.
-      <b>≈</b> = unrealized on a symbol shared by several strategies is an attribution, not exact
-      (see open positions below).</div>
+      <b>≈</b> = unrealized on a shared symbol is an attribution (not exact); the headline Total
+      uses the exchange's actual unrealized, so per-strategy rows need not sum to it.</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 
@@ -159,8 +159,9 @@
         {% endfor %}
       </tbody>
     </table>
-    <div class="muted">What the exchange actually holds — the per-strategy legs below net into
-      these under one-way mode. This row reconciles to your exchange account.</div>
+    <div class="muted">Read <b>live from the exchange</b> (source of truth). The per-strategy
+      legs below are intent that <i>should</i> net to these — a difference means the account was
+      traded manually or a fill wasn't recorded.</div>
     {% else %}<p class="muted">Flat — no open positions.</p>{% endif %}
   </div>
 
@@ -184,9 +185,10 @@
         {% endfor %}
       </tbody>
     </table>
-    <div class="muted">Per-strategy <i>intent</i> — these net into the exchange positions above.
-      <b>≈</b> = symbol shared by several strategies, so the entry/unrealized is an attribution
-      (a netted exchange position can't be split per strategy); only the per-symbol total is exact.</div>
+    <div class="muted">Per-strategy <i>intent</i> = each strategy's own signal history (sum of its
+      fills). On a symbol shared by several strategies the exchange can't verify the split, so the
+      net qty here may differ from the actual position above, and the entry/unrealized (<b>≈</b>) is
+      an attribution. The headline &amp; per-exchange unrealized use the exchange, not these legs.</div>
     {% else %}<p class="muted">Flat — no open positions.</p>{% endif %}
   </div>
 

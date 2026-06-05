@@ -83,21 +83,43 @@ def test_performance_numbers(client):
 
 
 def test_open_position_unrealized_uses_live_mark(client, stub_exchange):
-    """Open position: unrealized marks to the live price (stub), not the stale fill.
-    S1 solely owns BTCUSDT here, so its unrealized is 'real' (not attributed)."""
+    """Open position: unrealized marks to the live exchange position, not the stale
+    fill. S1 solely owns BTCUSDT here, so its unrealized is 'real' (not attributed)."""
     with session_scope() as db:
         _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 2.0, 100.0)
-    stub_exchange.prices["BTCUSDT"] = 110.0
+    stub_exchange.positions["BTCUSDT"] = (2.0, 110.0)     # exchange truth: +2 @ mark 110
     with session_scope() as db:
         perf = _performance(db, client.app.state.strategy_router)
     s1 = next(r for r in perf["per_strategy"] if r["strategy_id"] == "S1")
-    assert s1["unrealized"] == pytest.approx(20.0)        # 2 * (110 - 100)
+    assert s1["unrealized"] == pytest.approx(20.0)        # 2 * (110 - 100), attribution
     assert s1["unrealized_attributed"] is False           # sole owner -> exact
     assert perf["open_positions"][0]["mark"] == pytest.approx(110.0)
     assert perf["open_positions"][0]["basis"] == "real"
-    # The netted 'actual' position mirrors the single leg here.
+    # Headline + actual table come from the exchange read.
+    assert perf["totals"]["unrealized"] == pytest.approx(20.0)
     assert perf["exchange_positions"][0]["net_qty_base"] == pytest.approx(2.0)
+    assert perf["exchange_positions"][0]["source"] == "exchange"
     assert perf["exchange_positions"][0]["unrealized"] == pytest.approx(20.0)
+
+
+def test_actual_position_reads_exchange_not_ledger(tmp_path, stub_exchange):
+    """The 'actual' table + headline unrealized come from the exchange, even when the
+    per-strategy ledger drifts (e.g. a manual top-up that wasn't recorded as a fill)."""
+    f = tmp_path / "strategies.yaml"
+    f.write_text("strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    router = StrategyRouter(f)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 1.0, 100.0)
+    # Ledger intent says 1 BTC, but the exchange actually holds 3 BTC @ 110.
+    stub_exchange.positions["BTCUSDT"] = (3.0, 110.0)
+    with session_scope() as db:
+        perf = _performance(db, router)
+    ap = perf["exchange_positions"][0]
+    assert ap["net_qty_base"] == pytest.approx(3.0)       # exchange wins over ledger's 1.0
+    assert ap["unrealized"] == pytest.approx(3 * (110 - 100))
+    assert perf["totals"]["unrealized"] == pytest.approx(30.0)
+    # the intent leg still shows the ledger's (drifted) 1.0
+    assert perf["open_positions"][0]["net_qty_base"] == pytest.approx(1.0)
 
 
 def test_open_positions_net_into_actual_exchange_positions(tmp_path, stub_exchange):
@@ -111,22 +133,23 @@ def test_open_positions_net_into_actual_exchange_positions(tmp_path, stub_exchan
     with session_scope() as db:
         _apply_fill_to_position(db, "LONG", "bybit", "BTCUSDT", "buy", 3.0, 100.0)
         _apply_fill_to_position(db, "SHORT", "bybit", "BTCUSDT", "sell", 1.0, 100.0)
-    stub_exchange.prices["BTCUSDT"] = 110.0
+    stub_exchange.positions["BTCUSDT"] = (2.0, 110.0)     # exchange net = +2 @ 110
     with session_scope() as db:
         perf = _performance(db, router)
     # two per-strategy intent legs, both attributed (shared symbol)
     assert len(perf["open_positions"]) == 2
     assert all(p["basis"] == "attributed" for p in perf["open_positions"])
-    # ONE real exchange position = net +2 BTC @ mark 110, unrealized +20
+    # ONE real exchange position = net +2 BTC @ mark 110, blended entry 100 -> +20
     assert len(perf["exchange_positions"]) == 1
     ap = perf["exchange_positions"][0]
-    assert ap["net_qty_base"] == pytest.approx(2.0)       # 3 long - 1 short
-    assert ap["unrealized"] == pytest.approx(3 * 10 - 1 * 10)  # +30 long, -10 short
+    assert ap["net_qty_base"] == pytest.approx(2.0)
+    assert ap["unrealized"] == pytest.approx(2 * (110 - 100))
+    assert perf["totals"]["unrealized"] == pytest.approx(20.0)
     assert perf["totals"]["unrealized_attributed"] is True
 
 
 def test_offsetting_legs_show_no_exchange_position(tmp_path, stub_exchange):
-    """Per-strategy legs that net to flat are NOT a real exchange position."""
+    """Exchange flat (legs offset) -> no actual position, even with ledger rows."""
     f = tmp_path / "strategies.yaml"
     f.write_text("strategies:\n"
                  "  LONG:\n    base_asset: BTC\n    venues:\n      bybit: true\n"
@@ -135,10 +158,11 @@ def test_offsetting_legs_show_no_exchange_position(tmp_path, stub_exchange):
     with session_scope() as db:
         _apply_fill_to_position(db, "LONG", "bybit", "BTCUSDT", "buy", 2.0, 100.0)
         _apply_fill_to_position(db, "SHORT", "bybit", "BTCUSDT", "sell", 2.0, 100.0)
-    stub_exchange.prices["BTCUSDT"] = 110.0
+    # exchange holds nothing (default (0.0, 0.0))
     with session_scope() as db:
         perf = _performance(db, router)
-    assert perf["exchange_positions"] == []              # +2 and -2 net to flat
+    assert perf["exchange_positions"] == []
+    assert perf["totals"]["unrealized"] == pytest.approx(0.0)
 
 
 def test_unrealized_guarded_when_avg_entry_zero(client, stub_exchange):
