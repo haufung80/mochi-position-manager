@@ -85,6 +85,9 @@
     </svg>
     <div class="muted">{{ equity.start_label }} → {{ equity.end_label }} ·
       last {{ money(equity.last) }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }}</div>
+    <div class="muted">Realized + funding − commission over time; the final point marks open
+      positions to market (current total PnL). Fills before price capture can't be replayed, so
+      early realized PnL reads flat.</div>
     {% else %}
     <p class="muted">No PnL history yet — the curve starts at 0 once orders fill.</p>
     {% endif %}
@@ -123,7 +126,8 @@
         {% for r in perf.per_strategy %}
         <tr>
           <td class="l mono">{{ r.strategy_id }}</td>
-          <td>{{ money(r.realized) }}</td><td>{{ money(r.unrealized) }}</td>
+          <td>{{ money(r.realized) }}</td>
+          <td>{{ money(r.unrealized) }}{% if r.unrealized_attributed %}<span class="muted" title="includes shared-symbol attribution">≈</span>{% endif %}</td>
           <td>{{ money(r.funding) }}</td><td class="muted">${{ r.commission|usd }}</td>
           <td class="muted">${{ r.slippage|usd }}</td>
           <td><strong>{{ money(r.total) }}</strong></td>
@@ -132,12 +136,36 @@
       </tbody>
     </table>
     <div class="muted">*Slippage = execution shortfall vs signal price (diagnostic; not in Total).
-      Funding is per-strategy only when one strategy owns the symbol.</div>
+      Funding is per-strategy only when one strategy owns the symbol.
+      <b>≈</b> = unrealized on a symbol shared by several strategies is an attribution, not exact
+      (see open positions below).</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 
-  <!-- ===== open positions ===== -->
-  <h2>Open positions</h2>
+  <!-- ===== actual exchange positions ===== -->
+  <h2>Exchange positions (actual, per symbol)</h2>
+  <div class="card">
+    {% if perf.exchange_positions %}
+    <table>
+      <thead><tr><th class="l">Venue</th><th>Net qty</th><th>Mark</th><th>Unrealized</th></tr></thead>
+      <tbody>
+        {% for p in perf.exchange_positions %}
+        <tr>
+          <td class="l mono">{{ p.exchange }}/{{ p.symbol }}</td>
+          <td>{{ p.net_qty_base|qty }}</td>
+          <td>${{ p.mark|usd }}</td>
+          <td>{{ money(p.unrealized) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="muted">What the exchange actually holds — the per-strategy legs below net into
+      these under one-way mode. This row reconciles to your exchange account.</div>
+    {% else %}<p class="muted">Flat — no open positions.</p>{% endif %}
+  </div>
+
+  <!-- ===== open positions by strategy (intent) ===== -->
+  <h2>Open positions by strategy (intent)</h2>
   <div class="card">
     {% if perf.open_positions %}
     <table>
@@ -149,13 +177,16 @@
           <td class="l mono">{{ p.strategy_id }}</td>
           <td class="l mono">{{ p.exchange }}/{{ p.symbol }}</td>
           <td>{{ p.net_qty_base|qty }}</td>
-          <td>${{ p.avg_entry_price|usd }}</td>
+          <td>${{ p.avg_entry_price|usd }}{% if p.basis == 'attributed' %} <span class="muted" title="shared symbol: entry attributed, not exact">≈</span>{% endif %}</td>
           <td>${{ p.mark|usd }}</td>
-          <td>{{ money(p.unrealized) }}</td>
+          <td>{{ money(p.unrealized) }}{% if p.basis == 'attributed' %}<span class="muted">≈</span>{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+    <div class="muted">Per-strategy <i>intent</i> — these net into the exchange positions above.
+      <b>≈</b> = symbol shared by several strategies, so the entry/unrealized is an attribution
+      (a netted exchange position can't be split per strategy); only the per-symbol total is exact.</div>
     {% else %}<p class="muted">Flat — no open positions.</p>{% endif %}
   </div>
 

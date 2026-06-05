@@ -83,7 +83,8 @@ def test_performance_numbers(client):
 
 
 def test_open_position_unrealized_uses_live_mark(client, stub_exchange):
-    """Open position: unrealized marks to the live price (stub), not the stale fill."""
+    """Open position: unrealized marks to the live price (stub), not the stale fill.
+    S1 solely owns BTCUSDT here, so its unrealized is 'real' (not attributed)."""
     with session_scope() as db:
         _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 2.0, 100.0)
     stub_exchange.prices["BTCUSDT"] = 110.0
@@ -91,7 +92,53 @@ def test_open_position_unrealized_uses_live_mark(client, stub_exchange):
         perf = _performance(db, client.app.state.strategy_router)
     s1 = next(r for r in perf["per_strategy"] if r["strategy_id"] == "S1")
     assert s1["unrealized"] == pytest.approx(20.0)        # 2 * (110 - 100)
+    assert s1["unrealized_attributed"] is False           # sole owner -> exact
     assert perf["open_positions"][0]["mark"] == pytest.approx(110.0)
+    assert perf["open_positions"][0]["basis"] == "real"
+    # The netted 'actual' position mirrors the single leg here.
+    assert perf["exchange_positions"][0]["net_qty_base"] == pytest.approx(2.0)
+    assert perf["exchange_positions"][0]["unrealized"] == pytest.approx(20.0)
+
+
+def test_open_positions_net_into_actual_exchange_positions(tmp_path, stub_exchange):
+    """Two strategies on the SAME symbol show as two intent legs but ONE netted
+    exchange position; the shared-symbol legs are flagged 'attributed'."""
+    f = tmp_path / "strategies.yaml"
+    f.write_text("strategies:\n"
+                 "  LONG:\n    base_asset: BTC\n    venues:\n      bybit: true\n"
+                 "  SHORT:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    router = StrategyRouter(f)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "LONG", "bybit", "BTCUSDT", "buy", 3.0, 100.0)
+        _apply_fill_to_position(db, "SHORT", "bybit", "BTCUSDT", "sell", 1.0, 100.0)
+    stub_exchange.prices["BTCUSDT"] = 110.0
+    with session_scope() as db:
+        perf = _performance(db, router)
+    # two per-strategy intent legs, both attributed (shared symbol)
+    assert len(perf["open_positions"]) == 2
+    assert all(p["basis"] == "attributed" for p in perf["open_positions"])
+    # ONE real exchange position = net +2 BTC @ mark 110, unrealized +20
+    assert len(perf["exchange_positions"]) == 1
+    ap = perf["exchange_positions"][0]
+    assert ap["net_qty_base"] == pytest.approx(2.0)       # 3 long - 1 short
+    assert ap["unrealized"] == pytest.approx(3 * 10 - 1 * 10)  # +30 long, -10 short
+    assert perf["totals"]["unrealized_attributed"] is True
+
+
+def test_offsetting_legs_show_no_exchange_position(tmp_path, stub_exchange):
+    """Per-strategy legs that net to flat are NOT a real exchange position."""
+    f = tmp_path / "strategies.yaml"
+    f.write_text("strategies:\n"
+                 "  LONG:\n    base_asset: BTC\n    venues:\n      bybit: true\n"
+                 "  SHORT:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    router = StrategyRouter(f)
+    with session_scope() as db:
+        _apply_fill_to_position(db, "LONG", "bybit", "BTCUSDT", "buy", 2.0, 100.0)
+        _apply_fill_to_position(db, "SHORT", "bybit", "BTCUSDT", "sell", 2.0, 100.0)
+    stub_exchange.prices["BTCUSDT"] = 110.0
+    with session_scope() as db:
+        perf = _performance(db, router)
+    assert perf["exchange_positions"] == []              # +2 and -2 net to flat
 
 
 def test_unrealized_guarded_when_avg_entry_zero(client, stub_exchange):
@@ -119,3 +166,21 @@ def test_equity_curve_starts_from_zero_and_accumulates(client):
     # buy(-0.10 comm), sell(+20 realized -0.12 comm), funding(-0.05) -> 19.73
     assert points[-1][1] == pytest.approx(19.73)
     assert svg is not None and svg["polyline"]
+
+
+def test_equity_curve_marks_to_market_at_tip(client):
+    """Live unrealized is folded into a final point so the curve ends at the real
+    current total PnL (realized history + unrealized)."""
+    _seed_round_trip()
+    with session_scope() as db:
+        base = _equity_curve(db)
+        marked = _equity_curve(db, unrealized=50.0)
+    assert len(marked) == len(base) + 1                  # one mark-to-market tip
+    assert marked[-1][1] == pytest.approx(19.73 + 50.0)
+
+
+def test_equity_curve_no_tip_when_flat(client):
+    """No open positions (unrealized=0) -> no synthetic tip appended."""
+    _seed_round_trip()
+    with session_scope() as db:
+        assert len(_equity_curve(db, unrealized=0.0)) == len(_equity_curve(db))

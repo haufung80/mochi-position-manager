@@ -241,10 +241,12 @@ def _performance(db, router) -> dict:
     def row(store: dict, key: str, label_key: str) -> dict:
         if key not in store:
             store[key] = {label_key: key, "realized": 0.0, "unrealized": 0.0,
-                          "commission": 0.0, "slippage": 0.0, "funding": 0.0}
+                          "commission": 0.0, "slippage": 0.0, "funding": 0.0,
+                          "unrealized_attributed": False}
         return store[key]
 
     open_positions: list[dict] = []
+    actual: dict[tuple, dict] = {}     # (exchange, symbol) -> real netted position
     for sp in db.query(StrategyPosition).all():
         s = row(strat, sp.strategy_id, "strategy_id")
         e = row(exch, sp.exchange, "exchange")
@@ -262,12 +264,31 @@ def _performance(db, router) -> dict:
             # Guard: a position migrated/synced in without a known entry has avg=0;
             # net*(mark-0) would report the whole notional as bogus unrealized PnL.
             unreal = sp.net_qty_base * (mark - avg) if avg > 0 else 0.0
+            # Per-strategy entry is only "real" when ONE strategy owns the symbol.
+            # On a shared symbol the exchange nets every leg into one position, so we
+            # re-baselined each to the SAME blended entry — the per-strategy split is
+            # then an attribution, not a true entry. Flagged with ≈ in the UI.
+            if avg <= 0:
+                basis = "none"
+            elif owners.get((sp.exchange, sp.symbol)) == sp.strategy_id:
+                basis = "real"
+            else:
+                basis = "attributed"
+                s["unrealized_attributed"] = True
             s["unrealized"] += unreal
             e["unrealized"] += unreal
             open_positions.append({
                 "strategy_id": sp.strategy_id, "exchange": sp.exchange,
                 "symbol": sp.symbol, "net_qty_base": sp.net_qty_base,
-                "avg_entry_price": avg, "mark": mark, "unrealized": unreal})
+                "avg_entry_price": avg, "mark": mark, "unrealized": unreal,
+                "basis": basis})
+            # Net the per-strategy legs into the real position the exchange holds.
+            ap = actual.setdefault((sp.exchange, sp.symbol),
+                                   {"exchange": sp.exchange, "symbol": sp.symbol,
+                                    "net_qty_base": 0.0, "mark": mark, "unrealized": 0.0})
+            ap["net_qty_base"] += sp.net_qty_base
+            ap["unrealized"] += unreal
+            ap["mark"] = mark
 
     for o, sid in (db.query(Order, Alert.strategy_id)
                      .join(Alert, Order.alert_id == Alert.id)
@@ -307,13 +328,29 @@ def _performance(db, router) -> dict:
     totals["funding"] = funding_total   # exchange-level total (incl. unattributed)
     totals["total"] = (totals["realized"] + totals["unrealized"]
                        + totals["funding"] - totals["commission"])
+    totals["unrealized_attributed"] = any(r["unrealized_attributed"] for r in per_strategy)
+
+    # The real positions the exchange holds — per-strategy legs netted per symbol.
+    # Drop any that net back to flat (offsetting legs aren't an exchange position).
+    exchange_positions = sorted(
+        (a for a in actual.values()
+         if not _venue_flat(a["net_qty_base"], a["net_qty_base"] * a["mark"])),
+        key=lambda a: (a["exchange"], a["symbol"]))
     return {"per_strategy": per_strategy, "per_exchange": per_exchange,
-            "totals": totals, "open_positions": open_positions}
+            "totals": totals, "open_positions": open_positions,
+            "exchange_positions": exchange_positions}
 
 
-def _equity_curve(db) -> list[tuple]:
+def _equity_curve(db, unrealized: float = 0.0) -> list[tuple]:
     """Cumulative PnL (USDT) from 0 in time order: per-fill realized deltas
-    (replayed via the shared fill math) minus commissions, plus funding events."""
+    (replayed via the shared fill math) minus commissions, plus funding events.
+
+    A final mark-to-market point at 'now' folds in live `unrealized`, so the curve
+    ends at the real current total PnL (realized + funding − commission + unrealized)
+    instead of sitting near 0. This matters because most historical fills predate
+    fill-price capture (fill_price=0) — their realized PnL can't be replayed, so the
+    realized-only line is a flat noise band and the open position's mark-to-market is
+    where the real PnL currently lives."""
     events: list[tuple] = []
     state: dict[tuple, tuple] = {}    # (sid, exchange, symbol) -> (net, avg)
     for o, sid in (db.query(Order, Alert.strategy_id)
@@ -338,6 +375,8 @@ def _equity_curve(db) -> list[tuple]:
     for ts, d in events:
         cum += d
         points.append((ts, cum))
+    if unrealized and points:
+        points.append((datetime.now(timezone.utc), cum + unrealized))
     return points
 
 
@@ -351,7 +390,23 @@ def _equity_svg(points, width: int = 920, height: int = 200, pad: int = 10):
     span = (hi - lo) or 1.0
     n = len(points)
 
+    # Position points by real elapsed time so dense clusters (hourly funding) don't
+    # crowd out sparse order events; fall back to even spacing if times are missing
+    # or all identical.
+    def _epoch(dt):
+        if dt is None:
+            return None
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    ts = [_epoch(p[0]) for p in points]
+    valid = [t for t in ts if t is not None]
+    t0 = min(valid) if valid else 0.0
+    tspan = (max(valid) - t0) if valid else 0.0
+
     def fx(i: int) -> float:
+        if tspan and ts[i] is not None:
+            return pad + (width - 2 * pad) * ((ts[i] - t0) / tspan)
         return pad + (width - 2 * pad) * (i / (n - 1) if n > 1 else 0.0)
 
     def fy(v: float) -> float:
@@ -384,7 +439,7 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
 def performance(request: Request):
     with session_scope() as db:
         perf = _performance(db, request.app.state.strategy_router)
-        equity = _equity_svg(_equity_curve(db))
+        equity = _equity_svg(_equity_curve(db, perf["totals"]["unrealized"]))
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "orders": orders,
