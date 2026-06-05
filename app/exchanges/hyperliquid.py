@@ -191,20 +191,8 @@ class HyperliquidExchange:
     def get_position(self, symbol: str) -> tuple[float, float]:
         """(signed_base_qty, mark_price) for the symbol; (0.0, 0.0) if flat.
         `szi` is already signed (negative = short)."""
-        if not self._account_address:
-            return 0.0, 0.0
-        state = self._info.user_state(self._account_address)
-        for ap in state.get("assetPositions", []):
-            pos = ap.get("position", {})
-            if pos.get("coin") != symbol:
-                continue
-            szi = float(pos.get("szi", 0) or 0)
-            if szi == 0:
-                continue
-            value = abs(float(pos.get("positionValue", 0) or 0))
-            mark = value / abs(szi) if szi else 0.0
-            return szi, mark
-        return 0.0, 0.0
+        d = self.get_position_detail(symbol)
+        return d["qty"], d["mark"]
 
     def get_position_detail(self, symbol: str) -> dict:
         """Live position incl. the exchange's own entry + unrealized PnL:

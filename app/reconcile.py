@@ -16,15 +16,22 @@ from datetime import datetime, timezone
 
 from .db import session_scope
 from .exchanges.registry import get_registry
+from .exchanges.symbols import base_asset_of, symbol_for
 from .executor import _fill_math
 from .models import Alert, Order, StrategyPosition
 
 log = logging.getLogger(__name__)
 
-# Bybit is the price oracle for kline backfill; map each canonical symbol to its
-# USDT-perp ticker (Hyperliquid coins use the same spot price).
-_ORACLE_SYMBOL = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-                  "BNB": "BNBUSDT", "XRP": "XRPUSDT"}
+# Bybit is the price oracle for kline backfill (Hyperliquid coins share the price).
+_ORACLE_EXCHANGE = "bybit"
+
+
+def _oracle_symbol(exchange: str, symbol: str) -> str:
+    """Map any venue's symbol to the Bybit USDT-perp ticker used for kline lookup."""
+    try:
+        return symbol_for(_ORACLE_EXCHANGE, base_asset_of(exchange, symbol))
+    except Exception:
+        return symbol if symbol.endswith("USDT") else f"{symbol}USDT"
 
 
 def venue_claims(router) -> dict[tuple[str, str], list[str]]:
@@ -65,7 +72,7 @@ def backfill_entries_from_klines(router) -> dict:
             if abs(sp.net_qty_base) < 1e-9:
                 continue
             tag = {"strategy_id": sp.strategy_id, "exchange": sp.exchange, "symbol": sp.symbol}
-            osym = _ORACLE_SYMBOL.get(sp.symbol, sp.symbol)
+            osym = _oracle_symbol(sp.exchange, sp.symbol)
             fills = (db.query(Order).join(Alert, Order.alert_id == Alert.id)
                        .filter(Alert.strategy_id == sp.strategy_id,
                                Order.exchange == sp.exchange, Order.symbol == sp.symbol,

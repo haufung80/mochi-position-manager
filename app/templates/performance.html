@@ -159,9 +159,11 @@
         {% endfor %}
       </tbody>
     </table>
-    <div class="muted">Read <b>live from the exchange</b> (source of truth). The per-strategy
-      legs below are intent that <i>should</i> net to these — a difference means the account was
-      traded manually or a fill wasn't recorded.</div>
+    <div class="muted">Read <b>live from the exchange</b> — the realizable netted position.
+      Realizable unrealized = <b>{{ money(perf.totals.unrealized_realizable) }}</b>.
+      The headline/per-strategy unrealized ({{ money(perf.totals.unrealized) }}) is the sum of each
+      strategy vs its own entry; it differs here when long/short strategies on a symbol offset and
+      cancel on a one-way account — that gap is notional, not money you can realize.</div>
     {% else %}<p class="muted">Flat — no open positions.</p>{% endif %}
   </div>
 

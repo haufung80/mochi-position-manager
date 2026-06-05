@@ -119,7 +119,9 @@ def test_actual_position_reads_exchange_not_ledger(tmp_path, stub_exchange):
     ap = perf["exchange_positions"][0]
     assert ap["net_qty_base"] == pytest.approx(3.0)       # exchange wins over ledger's 1.0
     assert ap["unrealized"] == pytest.approx(3 * (110 - 100))
-    assert perf["totals"]["unrealized"] == pytest.approx(30.0)
+    # realizable (exchange) vs per-strategy headline (ledger net 1.0) diverge on drift
+    assert perf["totals"]["unrealized_realizable"] == pytest.approx(30.0)
+    assert perf["totals"]["unrealized"] == pytest.approx(10.0)   # 1.0 * (110 - 100)
     # the intent leg still shows the ledger's (drifted) 1.0
     assert perf["open_positions"][0]["net_qty_base"] == pytest.approx(1.0)
 

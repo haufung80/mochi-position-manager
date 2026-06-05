@@ -262,24 +262,16 @@ def _actual_positions(db) -> list[dict]:
     out: list[dict] = []
     for ex, sym in probe:
         k = (ex, sym)
+        # Defaults are the netted ledger (used only if the live read fails).
         qty, mark = net.get(k, 0.0), last.get(k, 0.0)
-        entry = (cost[k] / qsum[k]) if qsum.get(k) else 0.0   # ledger blend (fallback)
+        entry = (cost[k] / qsum[k]) if qsum.get(k) else 0.0   # ledger blend
         unreal, source = None, "ledger"
         try:                                   # live exchange state is the truth
-            adapter = reg.get(ex)
-            if hasattr(adapter, "get_position_detail"):
-                d = adapter.get_position_detail(sym)
-                qty = d["qty"]
-                if d.get("mark"):
-                    mark = d["mark"]
-                if d.get("entry"):
-                    entry = d["entry"]          # exchange's own avg entry (correct net entry)
-                unreal = d.get("unrealized")    # exchange's own unrealized PnL
-            else:
-                eqty, emark = adapter.get_position(sym)
-                qty = eqty
-                if emark and emark > 0:
-                    mark = emark
+            d = reg.get(ex).get_position_detail(sym)
+            qty = d["qty"]
+            mark = d["mark"] or mark
+            entry = d["entry"] or entry        # exchange's own avg entry (correct net entry)
+            unreal = d.get("unrealized")       # exchange's own unrealized PnL
             source = "exchange"
         except Exception:                      # noqa: BLE001 — display path, never raise
             pass
@@ -302,11 +294,13 @@ def _performance(db, router) -> dict:
     Funding is attributed to a strategy only when it solely owns the symbol;
     otherwise it counts at the exchange/portfolio level only.
 
-    Unrealized (headline + per-exchange) and the "Exchange positions" table come
-    from the LIVE exchange (`_actual_positions`) — the source of truth. Per-strategy
-    unrealized is a best-effort attribution (the venue nets every strategy on a
-    symbol into one position and can't split it): it's flagged ≈ in the UI and is
-    NOT folded into the headline total.
+    The headline and per-exchange rows are the SUM of the per-strategy figures, so
+    the breakdown always adds up to the total. Per-strategy unrealized marks each
+    leg against its own (kline-reconstructed) entry; on a symbol shared by several
+    strategies the split is signal-derived intent, flagged ≈. Because offsetting
+    legs cancel on a one-way-netting account, this per-strategy sum is NOTIONAL and
+    can differ from what's realizable — the "Exchange positions" table shows the
+    realizable netted truth straight from the venue for reconciliation.
     """
     owners = single_owner_map(router)
     strat: dict[str, dict] = {}
@@ -319,13 +313,11 @@ def _performance(db, router) -> dict:
                           "unrealized_attributed": False}
         return store[key]
 
-    # Source of truth: what the exchange actually holds, marked to the live price.
+    # Netted positions the exchange actually holds (realizable-reconciliation table)
+    # + a live mark per symbol to value the per-strategy legs against.
     actual = _actual_positions(db)
     marks = {(a["exchange"], a["symbol"]): a["mark"] for a in actual}
     actual_unrealized = sum(a["unrealized"] for a in actual)
-    unreal_by_ex: dict[str, float] = {}
-    for a in actual:
-        unreal_by_ex[a["exchange"]] = unreal_by_ex.get(a["exchange"], 0.0) + a["unrealized"]
 
     open_positions: list[dict] = []
     for sp in db.query(StrategyPosition).all():
@@ -351,16 +343,12 @@ def _performance(db, router) -> dict:
                 basis = "attributed"
                 s["unrealized_attributed"] = True
             s["unrealized"] += unreal
+            e["unrealized"] += unreal
             open_positions.append({
                 "strategy_id": sp.strategy_id, "exchange": sp.exchange,
                 "symbol": sp.symbol, "net_qty_base": sp.net_qty_base,
                 "avg_entry_price": avg, "mark": mark, "unrealized": unreal,
                 "basis": basis})
-
-    # Per-EXCHANGE unrealized comes from the live exchange (not the per-strategy
-    # attribution accumulated above), so it reconciles to the account.
-    for ex_name, u in unreal_by_ex.items():
-        row(exch, ex_name, "exchange")["unrealized"] = u
 
     for o, sid in (db.query(Order, Alert.strategy_id)
                      .join(Alert, Order.alert_id == Alert.id)
@@ -395,13 +383,16 @@ def _performance(db, router) -> dict:
 
     per_strategy = finalize(strat)
     per_exchange = finalize(exch)
+    # Headline = SUM of the per-strategy figures, so the breakdown always adds up.
     totals = {k: sum(r[k] for r in per_strategy)
-              for k in ("realized", "commission", "slippage")}
-    totals["unrealized"] = actual_unrealized   # exchange truth, not the per-strategy sum
+              for k in ("realized", "unrealized", "commission", "slippage")}
     totals["funding"] = funding_total          # exchange-level total (incl. unattributed)
     totals["total"] = (totals["realized"] + totals["unrealized"]
                        + totals["funding"] - totals["commission"])
     totals["unrealized_attributed"] = any(r["unrealized_attributed"] for r in per_strategy)
+    # Realizable unrealized straight from the venue (offsetting legs cancel here);
+    # differs from the per-strategy sum by the netting offset — shown for reconciliation.
+    totals["unrealized_realizable"] = actual_unrealized
     return {"per_strategy": per_strategy, "per_exchange": per_exchange,
             "totals": totals, "open_positions": open_positions,
             "exchange_positions": actual}
