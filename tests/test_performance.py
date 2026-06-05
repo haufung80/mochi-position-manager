@@ -240,33 +240,35 @@ def test_backfill_skips_when_fills_dont_explain_net(tmp_path, stub_exchange):
         assert sp.avg_entry_price == pytest.approx(62590.0)   # unchanged
 
 
-def test_backfill_clears_unreliable_realized_never_reconstructs(tmp_path, stub_exchange):
-    """Realized must NOT be reconstructed from an unpriced (possibly truncated) history
-    — the backfill CLEARS a stale realized to 0 rather than inventing one (the BTC_HLD
-    +$64-from-a-nonexistent-short bug)."""
+def test_backfill_never_touches_realized(tmp_path, stub_exchange):
+    """Realized is owned by the live executor: the backfill must neither RECONSTRUCT it
+    (fabrication — the BTC_HLD +$64 bug) NOR CLEAR it (would wipe legitimately-booked
+    realized that coexists with one old unpriced fill — code-review finding). It rebuilds
+    only the entry price."""
     from app import reconcile
     from app.models import StrategyPosition
     f = tmp_path / "s.yaml"
     f.write_text("strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
     router = StrategyRouter(f)
     with session_scope() as db:
-        a1 = Alert(idempotency_key="r1", strategy_id="S1", action="sell", raw_payload="{}")
+        a1 = Alert(idempotency_key="r1", strategy_id="S1", action="buy", raw_payload="{}")
         db.add(a1); db.flush()
-        db.add(Order(alert_id=a1.id, exchange="bybit", symbol="BTCUSDT", side="sell",
-                     qty_base=1.0, qty_usd=0.0, status="success", fill_price=None))  # unpriced leg
+        db.add(Order(alert_id=a1.id, exchange="bybit", symbol="BTCUSDT", side="buy",
+                     qty_base=1.0, qty_usd=0.0, status="success", fill_price=None))   # old unpriced fill
         a2 = Alert(idempotency_key="r2", strategy_id="S1", action="buy", raw_payload="{}")
         db.add(a2); db.flush()
         db.add(Order(alert_id=a2.id, exchange="bybit", symbol="BTCUSDT", side="buy",
-                     qty_base=1.0, qty_usd=0.0, status="success", fill_price=90.0))
+                     qty_base=1.0, qty_usd=0.0, status="success", fill_price=100.0))  # later priced fill
         db.add(StrategyPosition(strategy_id="S1", exchange="bybit", symbol="BTCUSDT",
-                                net_qty_base=0.0, net_qty_usd=0.0, last_price=90.0,
-                                avg_entry_price=0.0, realized_pnl=99.0,   # a fabricated/stale value
+                                net_qty_base=2.0, net_qty_usd=200.0, last_price=100.0,
+                                avg_entry_price=0.0, realized_pnl=100.0,   # legitimately booked
                                 updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc)))
     stub_exchange.klines["BTCUSDT"] = 100.0
     reconcile.backfill_pnl_from_klines(router)
     with session_scope() as db:
         sp = db.query(StrategyPosition).filter_by(strategy_id="S1").one()
-        assert sp.realized_pnl == pytest.approx(0.0)     # cleared, NOT recomputed to +10
+        assert sp.realized_pnl == pytest.approx(100.0)   # preserved, neither wiped nor reconstructed
+        assert sp.avg_entry_price == pytest.approx(100.0)  # entry IS rebuilt (net matches)
 
 
 def test_equity_curve_starts_from_zero_and_accumulates(client):

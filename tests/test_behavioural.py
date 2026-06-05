@@ -104,17 +104,20 @@ def test_audit_clean_when_ledger_reconciles(tmp_path, stub_exchange):
     assert result["clean"] is True
 
 
-def test_audit_flags_unpriced_realized_drift(tmp_path, stub_exchange):
-    """The unpriced-round-trip bug is caught automatically: the audit flags realized
-    drift between the ledger (0) and the fill replay (+10)."""
+def test_audit_reports_unpriced_realized_as_informational_not_drift(tmp_path, stub_exchange):
+    """An unpriced/truncated round-trip's realized replay (+10) is surfaced as an
+    INFORMATIONAL estimate, not actionable drift — so the audit stays clean (the
+    backfill can't 'fix' it; realized is executor-owned). Avoids a red-forever loop."""
     from app import reconcile
     router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
-    _unpriced_short_then_cover("S1", cover_price=90.0)
+    _unpriced_short_then_cover("S1", cover_price=90.0)    # sell-first, unpriced
     stub_exchange.klines["BTCUSDT"] = 100.0
     result = reconcile.audit_pnl(router)
-    assert result["clean"] is False
     issue = next(s for s in result["strategy_issues"] if s["strategy_id"] == "S1")
-    assert issue["realized_drift"] == pytest.approx(10.0)
+    assert issue["realized_drift"] == pytest.approx(10.0)  # estimate still surfaced
+    assert issue["actionable"] is False                    # but not actionable (truncated/unpriced)
+    assert issue["replay_suspect_truncated"] is True
+    assert result["clean"] is True                         # nothing the operator can act on
 
 
 def test_audit_flags_exchange_drift(tmp_path, stub_exchange):

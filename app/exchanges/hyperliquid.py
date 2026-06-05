@@ -209,10 +209,13 @@ class HyperliquidExchange:
             if szi == 0:
                 continue
             value = abs(float(pos.get("positionValue", 0) or 0))
+            # unrealizedPnl absent -> None so callers can fall back to an entry-based
+            # estimate; a genuine "0" parses to 0.0 and is trusted.
+            up = pos.get("unrealizedPnl")
             return {"qty": szi,
-                    "mark": value / abs(szi) if szi else 0.0,
+                    "mark": value / abs(szi),        # szi != 0 here (filtered above)
                     "entry": float(pos.get("entryPx") or 0.0),
-                    "unrealized": float(pos.get("unrealizedPnl") or 0.0)}
+                    "unrealized": float(up) if up not in (None, "") else None}
         return flat
 
     def get_price(self, symbol: str) -> float:

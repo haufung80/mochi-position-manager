@@ -278,8 +278,9 @@ def _actual_positions(db) -> list[dict]:
         if _venue_flat(qty, qty * mark):
             continue
         # Fall back to entry-based unrealized only when the venue didn't report one.
+        # Require a real mark too, else a missing/0 mark would fabricate qty*(0-entry).
         if unreal is None:
-            unreal = qty * (mark - entry) if entry > 0 else 0.0
+            unreal = qty * (mark - entry) if (entry > 0 and mark > 0) else 0.0
         out.append({"exchange": ex, "symbol": sym, "net_qty_base": qty, "mark": mark,
                     "entry": entry, "source": source, "unrealized": unreal})
     return sorted(out, key=lambda a: (a["exchange"], a["symbol"]))
@@ -328,14 +329,25 @@ def _performance(db, router) -> dict:
         e["realized"] += sp.realized_pnl or 0.0
         if not _venue_flat(sp.net_qty_base, sp.net_qty_usd):
             avg = sp.avg_entry_price or 0.0
-            mark = marks.get((sp.exchange, sp.symbol)) or sp.last_price or 0.0
+            # Prefer the live exchange mark (from _actual_positions). A leg that has
+            # drifted flat on the venue (manually closed) won't be in `marks`, so fetch
+            # the live market price directly rather than falling back to a stale fill.
+            mark = marks.get((sp.exchange, sp.symbol)) or 0.0
+            if not mark:
+                try:
+                    live = get_registry().get(sp.exchange).get_price(sp.symbol)
+                    mark = live if (live and live > 0) else (sp.last_price or 0.0)
+                except Exception:                  # noqa: BLE001 — display path, never raise
+                    mark = sp.last_price or 0.0
             # Guard: a position migrated/synced in without a known entry has avg=0;
             # net*(mark-0) would report the whole notional as bogus unrealized PnL.
             unreal = sp.net_qty_base * (mark - avg) if avg > 0 else 0.0
             # Per-strategy entry is only "real" when ONE strategy owns the symbol.
             # On a shared symbol the exchange nets every leg into one position, so the
-            # per-strategy split (qty AND entry) is intent/attribution, not verifiable.
-            # Flagged with ≈ in the UI and kept OUT of the headline unrealized.
+            # per-strategy split (qty AND entry) is intent/attribution, not verifiable;
+            # flagged with ≈ in the UI. This notional unreal IS summed into the headline
+            # (the chosen per-strategy-sum model); the realizable figure is tracked
+            # separately as totals["unrealized_realizable"] from the live exchange.
             if avg <= 0:
                 basis = "none"
             elif owners.get((sp.exchange, sp.symbol)) == sp.strategy_id:
@@ -432,7 +444,13 @@ def _equity_curve(db, end_total=None) -> list[tuple]:
         cum += d
         points.append((ts, cum))
     if end_total is not None and points:
-        points.append((datetime.now(timezone.utc), end_total))
+        # Anchor at 'now', but never before the last event (clock skew / a funding_time
+        # on the exchange clock could exceed local now), else the time-positioned SVG
+        # would draw a backward segment.
+        last = points[-1][0]
+        last = last.replace(tzinfo=timezone.utc) if (last and last.tzinfo is None) else last
+        anchor = max(datetime.now(timezone.utc), last) if last else datetime.now(timezone.utc)
+        points.append((anchor, end_total))
     return points
 
 

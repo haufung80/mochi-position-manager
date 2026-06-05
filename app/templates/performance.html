@@ -86,9 +86,9 @@
     </svg>
     <div class="muted">{{ equity.start_label }} → {{ equity.end_label }} ·
       last {{ money(equity.last) }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }}</div>
-    <div class="muted">Realized + funding − commission over time; the final point marks open
-      positions to market (current total PnL). Fills before price capture can't be replayed, so
-      early realized PnL reads flat.</div>
+    <div class="muted">Realized + funding − commission over time; the final point marks open positions
+      to market — the <i>notional</i> total PnL (per-strategy sum; realizable figure is in Exchange
+      positions). Fills before price capture can't be replayed, so early realized PnL reads flat.</div>
     {% else %}
     <p class="muted">No PnL history yet — the curve starts at 0 once orders fill.</p>
     {% endif %}
@@ -100,22 +100,27 @@
     {% if perf.per_exchange %}
     <table>
       <thead><tr><th class="l">Exchange</th><th>Realized</th><th>Unrealized</th>
-        <th>Funding</th><th>Commission</th><th>Slippage*</th><th>Total</th></tr></thead>
+        <th>Funding</th><th>Commission</th><th>Total</th></tr></thead>
       <tbody>
         {% for r in perf.per_exchange %}
         <tr>
           <td class="l mono">{{ r.exchange }}</td>
           <td>{{ money(r.realized) }}</td><td>{{ money(r.unrealized) }}</td>
           <td>{{ money(r.funding) }}</td><td class="muted">${{ r.commission|usd }}</td>
-          <td class="muted">${{ r.slippage|usd }}</td>
           <td><strong>{{ money(r.total) }}</strong></td>
         </tr>
         {% endfor %}
+        <tr style="border-top:2px solid #3a3f4b">
+          <td class="l"><b>Total</b></td>
+          <td>{{ money(perf.totals.realized) }}</td><td>{{ money(perf.totals.unrealized) }}</td>
+          <td>{{ money(perf.totals.funding) }}</td><td class="muted">${{ perf.totals.commission|usd }}</td>
+          <td><strong>{{ money(perf.totals.total) }}</strong></td>
+        </tr>
       </tbody>
     </table>
-    <div class="muted">Unrealized is the per-strategy sum (notional) — when long/short strategies
-      on a symbol offset, this exceeds what's realizable on the netted account. See the realizable
-      figure in <b>Exchange positions</b> below.</div>
+    <div class="muted">Total = realized + unrealized + funding − commission — this table reconciles to the
+      headline Total PnL. Unrealized is the per-strategy sum (notional): offsetting long/short legs on a
+      symbol exceed what's realizable on the netted account — see <b>Exchange positions</b> below.</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 
@@ -125,7 +130,7 @@
     {% if perf.per_strategy %}
     <table>
       <thead><tr><th class="l">Strategy</th><th>Realized</th><th>Unrealized</th>
-        <th>Commission</th><th>Slippage*</th><th>Total</th></tr></thead>
+        <th>Commission</th><th>Total</th></tr></thead>
       <tbody>
         {% for r in perf.per_strategy %}
         <tr>
@@ -133,16 +138,28 @@
           <td>{{ money(r.realized) }}</td>
           <td>{{ money(r.unrealized) }}{% if r.unrealized_attributed %}<span class="muted" title="shared-symbol notional">≈</span>{% endif %}</td>
           <td class="muted">${{ r.commission|usd }}</td>
-          <td class="muted">${{ r.slippage|usd }}</td>
           <td><strong>{{ money(r.total) }}</strong></td>
         </tr>
         {% endfor %}
+        {% set strat_total = perf.per_strategy|sum(attribute='total') %}
+        <tr style="border-top:2px solid #3a3f4b">
+          <td class="l"><b>Strategies subtotal</b></td>
+          <td>{{ money(perf.totals.realized) }}</td>
+          <td>{{ money(perf.totals.unrealized) }}</td>
+          <td class="muted">${{ perf.totals.commission|usd }}</td>
+          <td><strong>{{ money(strat_total) }}</strong></td>
+        </tr>
+        <tr><td class="l muted">+ funding (exchange-level)</td><td></td><td></td><td></td>
+          <td>{{ money(perf.totals.funding) }}</td></tr>
+        <tr><td class="l"><b>= Total PnL</b></td><td></td><td></td><td></td>
+          <td><strong>{{ money(perf.totals.total) }}</strong></td></tr>
       </tbody>
     </table>
-    <div class="muted">*Slippage = execution shortfall vs signal price (diagnostic; not in Total).
-      Funding is <b>exchange-level</b> (can't be split per strategy) — see <b>By exchange</b>.
-      <b>≈</b> = unrealized on a shared symbol is notional (offsetting legs net out on the venue),
-      so the per-strategy sum can exceed the realizable figure in Exchange positions.</div>
+    <div class="muted">Per-strategy Total = realized + unrealized − commission. Funding is exchange-level
+      (added once at the portfolio level, not per strategy), so the rows sum to the <i>Strategies
+      subtotal</i> and the headline adds funding on top. <b>≈</b> = unrealized on a shared symbol is
+      notional (offsetting legs net on the venue) and can exceed the realizable Exchange-positions figure.
+      Slippage is a diagnostic — see per-order values in <b>Recent orders</b>.</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 
@@ -155,7 +172,8 @@
       <tbody>
         {% for p in perf.exchange_positions %}
         <tr>
-          <td class="l mono">{{ p.exchange }}/{{ p.symbol }}</td>
+          <td class="l mono">{{ p.exchange }}/{{ p.symbol }}{% if p.source != 'exchange' %}
+            <span class="muted" title="live read failed — fell back to a stored ledger estimate">⚠ ledger</span>{% endif %}</td>
           <td>{{ p.net_qty_base|qty }}</td>
           <td>${{ p.mark|usd }}</td>
           <td>{{ money(p.unrealized) }}</td>
@@ -163,11 +181,12 @@
         {% endfor %}
       </tbody>
     </table>
-    <div class="muted">Read <b>live from the exchange</b> — the realizable netted position.
-      Realizable unrealized = <b>{{ money(perf.totals.unrealized_realizable) }}</b>.
-      The headline/per-strategy unrealized ({{ money(perf.totals.unrealized) }}) is the sum of each
-      strategy vs its own entry; it differs here when long/short strategies on a symbol offset and
-      cancel on a one-way account — that gap is notional, not money you can realize.</div>
+    <div class="muted"><b>Live from the exchange</b> where reachable — the realizable netted position
+      (rows marked <b>⚠ ledger</b> fell back to a stored estimate). Realizable unrealized =
+      <b>{{ money(perf.totals.unrealized_realizable) }}</b>. The headline/per-strategy unrealized
+      ({{ money(perf.totals.unrealized) }}) sums each strategy vs its own entry; it differs here when
+      strategies offset on a symbol <i>or</i> a strategy's stored entry drifts from the venue's — that
+      gap is notional, not money you can realize.</div>
     {% else %}<p class="muted">Flat — no open positions.</p>{% endif %}
   </div>
 

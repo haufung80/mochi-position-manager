@@ -229,20 +229,26 @@ class BybitExchange:
             if size == 0:
                 continue
             signed = size if p.get("side") == "Buy" else -size
+            # unrealisedPnl absent (None/"") -> None so callers can fall back to an
+            # entry-based estimate; a genuine "0" parses to 0.0 and is trusted as-is.
+            up = p.get("unrealisedPnl")
             return {"qty": signed,
                     "mark": float(p.get("markPrice") or p.get("avgPrice") or 0.0),
                     "entry": float(p.get("avgPrice") or 0.0),
-                    "unrealized": float(p.get("unrealisedPnl") or 0.0)}
+                    "unrealized": float(up) if up not in (None, "") else None}
         return {"qty": 0.0, "mark": 0.0, "entry": 0.0, "unrealized": 0.0}
 
     def get_kline_close(self, symbol: str, ts_ms: int) -> float:
-        """1-minute close at/around `ts_ms` — used to reconstruct an entry price
-        for a fill that wasn't recorded with one (a market order fills ~here).
-        0.0 on failure."""
+        """1-minute close of the candle CONTAINING `ts_ms` — reconstructs an entry
+        price for a fill recorded without one (a market order fills ~here). 0.0 on
+        failure. The window is floored to the minute: Bybit returns klines newest-
+        first, so an unaligned [ts, ts+60s] window would span two candles and
+        rows[0] would be the minute AFTER the fill."""
+        start = (ts_ms // 60_000) * 60_000          # floor to the minute boundary
         try:
             resp = self._client.get_kline(category=CATEGORY, symbol=symbol,
-                                          interval="1", start=ts_ms,
-                                          end=ts_ms + 60_000, limit=1)
+                                          interval="1", start=start,
+                                          end=start + 59_999, limit=1)
             rows = (resp.get("result") or {}).get("list") or []
             return float(rows[0][4]) if rows else 0.0
         except Exception as e:

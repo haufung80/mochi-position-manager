@@ -177,21 +177,20 @@ def set_position_size(sid: str, request: Request, secret: str = Form(...),
 
 @router.post("/strategies/backfill-entries", response_class=HTMLResponse)
 def backfill_entries(request: Request, secret: str = Form(...)):
-    """Recompute realized_pnl + avg_entry_price from historical klines for positions
-    whose fills weren't recorded with a price, so per-strategy PnL is real. Realized
-    is always rewritten (a historical fact); entry only when the fills explain the net."""
+    """Rebuild avg_entry_price from historical klines for open positions whose fills
+    weren't recorded with a price (only when the fills explain the stored net), so
+    per-strategy unrealized is real. Realized PnL is NOT touched here — it's owned by
+    the live executor (reconstructing it from a truncated history fabricates profit)."""
     _require_secret(secret)
     from .. import reconcile
     result = reconcile.backfill_pnl_from_klines(request.app.state.strategy_router)
 
     def _fmt(u: dict) -> str:
         parts = []
-        if "realized_cleared" in u:
-            parts.append(f"cleared stale realized {u['realized_cleared']['old']:.2f} → 0.00")
         if "entry" in u:
             parts.append(f"entry {u['entry']['old']:.2f} → {u['entry']['new']:.2f}")
         return (f"<li><b>{u['strategy_id']}</b> — {u['exchange']}/{u['symbol']}: "
-                f"{'; '.join(parts)}</li>")
+                f"{'; '.join(parts) or '(no change)'}</li>")
 
     upd = "".join(_fmt(u) for u in result["updated"]) or "<li>(none)</li>"
     skip = "".join(
@@ -224,12 +223,16 @@ def audit_pnl(request: Request, secret: str = Form(...)):
     def _si(s: dict) -> str:
         if "issue" in s:
             return f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: {s['issue']}</li>"
-        caveat = (' <span style="color:#facc15">⚠ replay may be truncated (first fill is a sell) — '
-                  'realized estimate unreliable</span>' if s.get("replay_suspect_truncated") else "")
+        if s.get("actionable"):
+            tag = ' <span style="color:#f87171">✗ actionable</span>'
+        else:
+            why = "first fill is a sell" if s.get("replay_suspect_truncated") else "history has unpriced fills"
+            tag = (f' <span style="color:#9aa">ℹ estimate only ({why}) — replay can\'t be trusted, '
+                   'not actionable</span>')
         return (f"<li><b>{s['strategy_id']}</b> — {s['exchange']}/{s['symbol']}: "
                 f"realized ledger {s['ledger_realized']:.2f} vs replay-estimate {s['replay_realized']:.2f} "
                 f"(Δ{s['realized_drift']:+.2f}); net ledger {s['ledger_net']:g} vs replay "
-                f"{s['replay_net']:g} (Δ{s['net_drift']:+g}){caveat}</li>")
+                f"{s['replay_net']:g} (Δ{s['net_drift']:+g}){tag}</li>")
 
     def _xd(x: dict) -> str:
         if "issue" in x:
