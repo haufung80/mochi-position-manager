@@ -67,7 +67,8 @@
     <div class="card stat"><div class="label">Realized</div>
       <div class="big {{ 'pos' if perf.totals.realized >= 0 else 'neg' }}">${{ perf.totals.realized|usd }}</div></div>
     <div class="card stat"><div class="label">Unrealized</div>
-      <div class="big {{ 'pos' if perf.totals.unrealized >= 0 else 'neg' }}">${{ perf.totals.unrealized|usd }}</div></div>
+      <div class="big {{ 'pos' if perf.totals.unrealized >= 0 else 'neg' }}">${{ perf.totals.unrealized|usd }}</div>
+      <div class="muted" style="font-size:10px">notional (per-strategy sum) · realizable {{ money(perf.totals.unrealized_realizable) }}</div></div>
     <div class="card stat"><div class="label">Fees (comm − fund)</div>
       <div class="big">${{ (perf.totals.commission - perf.totals.funding)|usd }}</div></div>
   </div>
@@ -112,6 +113,9 @@
         {% endfor %}
       </tbody>
     </table>
+    <div class="muted">Unrealized is the per-strategy sum (notional) — when long/short strategies
+      on a symbol offset, this exceeds what's realizable on the netted account. See the realizable
+      figure in <b>Exchange positions</b> below.</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 
