@@ -123,3 +123,19 @@ def toggle_sar(path: Path, strategy_id: str) -> bool | None:
     strategies[strategy_id]["sar"] = new_val
     save(path, data)
     return new_val
+
+
+def set_position_size(path: Path, strategy_id: str, value: float | None) -> bool | None:
+    """Set (or clear, when value is None → paper mode) a strategy's position_size
+    IN PLACE — base_asset / venues / sar are untouched. Returns True on success,
+    or None if the strategy doesn't exist."""
+    data = load(path)
+    strategies = data.get("strategies", {})
+    if strategy_id not in strategies:
+        return None
+    if value is None:
+        strategies[strategy_id].pop("position_size", None)
+    else:
+        strategies[strategy_id]["position_size"] = float(value)
+    save(path, data)
+    return True

@@ -231,10 +231,21 @@
                      autocomplete="off">
             </form>
           </td>
-          <td class="mono">
+          <td>
             {% if r.sar %}<span class="muted">&mdash;</span>
-            {% elif r.position_size %}{{ "$%g"|format(r.position_size) }}
-            {% else %}<span style="color:#facc15;">paper</span>{% endif %}
+            {% else %}
+            <form method="POST" action="/admin/strategies/set-size/{{ r.strategy_id }}"
+                  class="toggle-form"
+                  onsubmit="return confirm('Set position size for {{ r.strategy_id }}? (blank = paper)');">
+              <input type="text" name="position_size" inputmode="decimal" style="width:64px;"
+                     value="{% if r.position_size %}{{ '%g'|format(r.position_size) }}{% endif %}"
+                     placeholder="paper" title="max position size (USDT); blank = paper mode"
+                     autocomplete="off">
+              <input type="password" name="secret" required placeholder="secret" autocomplete="off">
+              <button type="submit" class="venue-pill {{ 'on' if r.position_size else '' }}"
+                      title="save max position size (USDT)">$ set</button>
+            </form>
+            {% endif %}
           </td>
           <td>
             {% for v in r.venues %}

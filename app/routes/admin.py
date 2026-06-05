@@ -161,6 +161,20 @@ def toggle_sar(sid: str, request: Request, secret: str = Form(...)):
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 
+@router.post("/strategies/set-size/{sid}", response_class=HTMLResponse)
+def set_position_size(sid: str, request: Request, secret: str = Form(...),
+                      position_size: str = Form("")):
+    """Set/clear a managed strategy's position_size inline — leaves base_asset,
+    venues and SAR untouched. Blank clears it (paper mode)."""
+    _require_secret(secret)
+    size = _validate_position_size(position_size)
+    if strategy_store.set_position_size(_strategies_path(), sid, size) is None:
+        raise HTTPException(404, f"strategy_id not found: {sid}")
+    _reload_router(request)
+    log.info("admin: set position_size %s -> %s", sid, size)
+    return RedirectResponse(url="/admin/strategies", status_code=303)
+
+
 @router.post("/reload-strategies")
 def reload_strategies(request: Request, secret: str = Form(...)):
     _require_secret(secret)

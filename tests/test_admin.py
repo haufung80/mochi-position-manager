@@ -325,3 +325,63 @@ def test_invalid_position_size_rejected(client):
         "venue_bybit": "on", "position_size": "-5",
     })
     assert r.status_code == 400
+
+
+# ---------- inline set-size (per-row editor) ----------
+
+def test_set_size_inline_updates_only_size(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC", "venue_bybit": "on",
+    }, follow_redirects=False)
+    r = client.post("/admin/strategies/set-size/X",
+                    data={"secret": SECRET, "position_size": "1500"}, follow_redirects=False)
+    assert r.status_code == 303
+    entry = yaml.safe_load(strategies_file.read_text())["strategies"]["X"]
+    assert entry["position_size"] == 1500.0
+    assert entry["base_asset"] == "BTC"                       # untouched
+    assert entry["venues"] == {"hyperliquid": False, "bybit": True}
+    assert client.app.state.strategy_router.get("X").position_size == 1500.0
+
+
+def test_set_size_blank_clears_to_paper(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "1000",
+    }, follow_redirects=False)
+    client.post("/admin/strategies/set-size/X",
+                data={"secret": SECRET, "position_size": ""}, follow_redirects=False)
+    entry = yaml.safe_load(strategies_file.read_text())["strategies"]["X"]
+    assert "position_size" not in entry                        # cleared -> paper mode
+    assert client.app.state.strategy_router.get("X").position_size is None
+
+
+def test_set_size_unknown_strategy_404(client):
+    r = client.post("/admin/strategies/set-size/NOPE",
+                    data={"secret": SECRET, "position_size": "100"})
+    assert r.status_code == 404
+
+
+def test_set_size_wrong_secret_rejected(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC", "venue_bybit": "on",
+    }, follow_redirects=False)
+    r = client.post("/admin/strategies/set-size/X",
+                    data={"secret": "wrong", "position_size": "100"})
+    assert r.status_code == 401
+
+
+def test_set_size_invalid_rejected(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "X", "base_asset": "BTC", "venue_bybit": "on",
+    }, follow_redirects=False)
+    r = client.post("/admin/strategies/set-size/X",
+                    data={"secret": SECRET, "position_size": "-5"})
+    assert r.status_code == 400
+
+
+def test_set_size_form_renders_for_managed(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "MGD", "base_asset": "BTC", "venue_bybit": "on",
+    }, follow_redirects=False)
+    r = client.get("/admin/strategies")
+    assert "/admin/strategies/set-size/MGD" in r.text          # inline editor present

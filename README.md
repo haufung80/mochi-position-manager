@@ -286,7 +286,7 @@ unknown strategy IDs (likely misconfigured TV alert), and successful fills.
 | GET  | `/orders?status=retrying` | JSON: orders, filterable |
 | GET  | `/network/egress-ip` | JSON: the app's outbound IP (for exchange API allowlists) |
 | GET  | `/admin/strategies` | HTML UI to create / update / delete / toggle strategies |
-| POST | `/admin/strategies`, `/admin/strategies/delete/{sid}`, `/admin/strategies/toggle/{sid}/{exchange}` | Strategy mutations (require `secret` form field) |
+| POST | `/admin/strategies` (+ `/delete/{sid}`, `/toggle/{sid}/{exchange}`, `/toggle-sar/{sid}`, `/set-size/{sid}`) | Strategy mutations: upsert, delete, toggle venue/SAR, set position size (require `secret` form field) |
 | POST | `/admin/strategies/sync-positions` | Re-baseline per-strategy ledger to live exchange state |
 | POST | `/admin/reload-strategies` | Re-read `strategies.yaml` without restart (requires `secret`) |
 
