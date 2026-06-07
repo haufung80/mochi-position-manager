@@ -87,11 +87,25 @@ class HyperliquidExchange:
             self._exchange = None
             self._account_address = account_address
 
+    @staticmethod
+    def _is_spot_symbol(symbol: str) -> bool:
+        """A spot symbol is the readable Unit pair form 'UBTC/USDC' (it carries the
+        '/' quote separator). Perp symbols are bare tickers ('BTC') — never spot."""
+        return "/" in symbol
+
     def _mid_price(self, symbol: str) -> float:
+        """Mid price from `all_mids()`. PERP symbols ('BTC') key directly; SPOT
+        symbols ('UBTC/USDC') are keyed by their canonical pair name ('@142'),
+        which `all_mids()` returns — so resolve the spot pair first, then look it
+        up under that name. (Verified live: all_mids()['@142'] is the UBTC spot
+        mid; 'UBTC'/'UBTC/USDC' are NOT keys.)"""
+        key = symbol
+        if self._is_spot_symbol(symbol):
+            key, _ = self._resolve_spot(symbol)   # 'UBTC/USDC' -> '@142'
         all_mids = self._info.all_mids()
-        if symbol not in all_mids:
+        if key not in all_mids:
             raise RuntimeError(f"Hyperliquid: symbol not found: {symbol}")
-        return float(all_mids[symbol])
+        return float(all_mids[key])
 
     def _fill_fee(self, oid: str) -> tuple[float, str]:
         """Sum the fees for fills belonging to `oid` from user_fills.

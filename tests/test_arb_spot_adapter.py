@@ -192,7 +192,9 @@ _SPOT_META = {
 
 class _StubHLInfo:
     def __init__(self):
-        self.mids = {"@142": "50000.0"}
+        # PERP 'BTC' keys directly; SPOT 'UBTC/USDC' is keyed by its canonical
+        # pair name '@142' (verified live — all_mids has '@142', not 'UBTC').
+        self.mids = {"@142": "50000.0", "BTC": "50010.0"}
         self.fills = []
 
     def spot_meta(self):
@@ -248,6 +250,38 @@ def test_hl_spot_resolves_from_canonical_base():
     ex = _hl_real()
     r = ex.spot_market_order("BTC", "buy", 0.01)   # 'BTC' -> 'UBTC' -> '@142'
     assert r.success and ex._exchange.calls[0]["name"] == "@142"
+
+
+def test_hl_get_price_spot_pair_returns_spot_mid_no_warning(caplog):
+    """A spot pair ('UBTC/USDC') resolves to its canonical '@142' and reads THAT
+    key's mid from all_mids — with NO warning logged (the noisy 'symbol not
+    found' that arb sizing used to emit per leg)."""
+    ex = _hl_real()
+    with caplog.at_level("WARNING", logger="app.exchanges.hyperliquid"):
+        px = ex.get_price("UBTC/USDC")
+    assert px == 50000.0                       # all_mids['@142'], the spot mid
+    assert "@142" not in caplog.text           # never logged as a failure
+    assert not any(r.levelno >= 30 for r in caplog.records)   # no WARNING+
+
+
+def test_hl_get_price_perp_unchanged(caplog):
+    """A perp symbol ('BTC') still keys all_mids directly — no spot resolution,
+    no warning."""
+    ex = _hl_real()
+    with caplog.at_level("WARNING", logger="app.exchanges.hyperliquid"):
+        px = ex.get_price("BTC")
+    assert px == 50010.0                       # all_mids['BTC']
+    assert not any(r.levelno >= 30 for r in caplog.records)
+
+
+def test_hl_get_price_unknown_perp_still_warns_and_zeros(caplog):
+    """Genuine miss (perp not in all_mids) keeps the existing 0.0 + warning
+    contract — the spot-awareness change must not swallow real failures."""
+    ex = _hl_real()
+    with caplog.at_level("WARNING", logger="app.exchanges.hyperliquid"):
+        px = ex.get_price("DOGE")
+    assert px == 0.0
+    assert "get_price failed" in caplog.text
 
 
 def test_hl_spot_step_size_from_szdecimals():
