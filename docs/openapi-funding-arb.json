@@ -93,6 +93,13 @@
           },
           "status": {
             "description": "pending | success | retrying | dead | error",
+            "enum": [
+              "pending",
+              "success",
+              "retrying",
+              "dead",
+              "error"
+            ],
             "title": "Status",
             "type": "string"
           },

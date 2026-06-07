@@ -215,7 +215,9 @@ class ArbLegView(BaseModel):
         description="Funding harvested by this leg (spot legs contribute 0; "
         "None until first settlement).",
     )
-    status: str = Field(..., description="pending | success | retrying | dead | error")
+    status: Literal["pending", "success", "retrying", "dead", "error"] = Field(
+        ..., description="pending | success | retrying | dead | error"
+    )
 
 
 class ArbPnL(BaseModel):
