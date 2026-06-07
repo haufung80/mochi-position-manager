@@ -7,41 +7,70 @@ log = logging.getLogger(__name__)
 
 
 class ExchangeRegistry:
-    """Lazy-loaded singleton-per-exchange wrapper. Adapters are constructed on
-    first request so the app can boot even when one exchange's credentials are
-    missing (useful for partial setups and tests)."""
+    """Lazy-loaded singleton-per-``(exchange, account)`` wrapper. Adapters are
+    constructed on first request so the app can boot even when one exchange's
+    credentials are missing (useful for partial setups and tests).
+
+    ``account="default"`` is the directional book — every existing call site uses
+    the one-arg ``get(name)`` form, which keeps targeting ``default`` byte-for-byte.
+    ``account="arb"`` resolves the dedicated, separately-credentialed funding-arb
+    sub-account so arb fills never net against the directional positions.
+    """
 
     def __init__(self):
-        self._cache: dict[str, Exchange] = {}
+        # Keyed by (name, account) so BTCUSDT on the arb book never aliases the
+        # directional adapter (different keys, different margin).
+        self._cache: dict[tuple[str, str], Exchange] = {}
 
-    def get(self, name: str) -> Exchange:
+    def get(self, name: str, account: str = "default") -> Exchange:
         name = name.lower()
-        if name in self._cache:
-            return self._cache[name]
+        account = (account or "default").lower()
+        key = (name, account)
+        if key in self._cache:
+            return self._cache[key]
 
         settings = get_settings()
+        # Raises clearly for an unknown exchange, an unknown account label, or a
+        # known non-default account whose creds are empty.
+        creds = settings.account_credentials(name, account)
+
         if name == "bybit":
             from .bybit import BybitExchange
-            ex = BybitExchange(
-                api_key=settings.bybit_api_key,
-                api_secret=settings.bybit_api_secret,
-                testnet=settings.bybit_testnet,
-                dry_run=settings.dry_run,
-            )
+            ex = BybitExchange(**creds)
         elif name == "hyperliquid":
             from .hyperliquid import HyperliquidExchange
-            ex = HyperliquidExchange(
-                private_key=settings.hyperliquid_private_key,
-                account_address=settings.hyperliquid_account_address,
-                vault_address=settings.hyperliquid_vault_address,
-                testnet=settings.hyperliquid_testnet,
-                dry_run=settings.dry_run,
-            )
+            ex = HyperliquidExchange(**creds)
+            self._guard_hyperliquid_account(account, ex, settings)
         else:
+            # Unreachable: account_credentials already rejected unknown exchanges.
             raise ValueError(f"Unknown exchange: {name}")
 
-        self._cache[name] = ex
+        self._cache[key] = ex
         return ex
+
+    @staticmethod
+    def _guard_hyperliquid_account(account: str, ex, settings) -> None:
+        """Construction-time isolation guard for the HL arb book.
+
+        HL ``close_position`` closes the WHOLE coin on the account and
+        ``get_funding`` is account-wide, so a non-default HL account that resolves
+        to the SAME address as the directional account would nuke / double-count
+        the directional HL book. Catch it here — at the only place that matters,
+        before any order is ever sent — which protects both the executor and the
+        funding poller with one check.
+        """
+        if account == "default":
+            return
+        directional = (settings.hyperliquid_account_address or "").lower()
+        resolved = (getattr(ex, "_account_address", "") or "").lower()
+        if directional and resolved and resolved == directional:
+            raise ValueError(
+                f"Hyperliquid arb account address ({resolved}) is the SAME as the "
+                "directional HYPERLIQUID_ACCOUNT_ADDRESS. The arb book MUST be a "
+                "separate account (own key + address, own margin) — sharing it "
+                "would let an arb close/funding-poll hit the directional position. "
+                "Set HYPERLIQUID_ARB_ACCOUNT_ADDRESS to a distinct account."
+            )
 
 
 _registry: ExchangeRegistry | None = None
