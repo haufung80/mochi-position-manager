@@ -72,3 +72,46 @@ def base_asset_of(exchange: str, symbol: str) -> str:
     if suffix and symbol.upper().endswith(suffix):
         return symbol[: -len(suffix)].upper()
     return symbol.upper()
+
+
+# --- Spot symbols (funding-arb cash-and-carry spot leg) ---------------------
+#
+# The arb spot leg trades a DIFFERENT instrument from the perp:
+#   - Bybit:        the USDT spot pair shares the perp's name (BTCUSDT), but a
+#                   distinct `category="spot"` instrument (different filters).
+#   - Hyperliquid:  Unit spot. The tradable base token is 'U'+base (UBTC / UETH /
+#                   USOL) quoted in USDC; the SDK resolves the readable
+#                   'UBTC/USDC' pair name to its canonical id (e.g. '@142') via
+#                   `name_to_coin`. We store the readable form on the leg; the
+#                   adapter resolves the canonical pair from `spotMeta` at order
+#                   time (robust to id churn).
+HYPERLIQUID_SPOT_BASE_PREFIX = "U"   # Unit-wrapped spot tokens: UBTC, UETH, USOL
+HYPERLIQUID_SPOT_QUOTE = "USDC"
+
+
+def hyperliquid_spot_token(base_asset: str) -> str:
+    """The HL Unit spot BASE token name for a canonical base asset (BTC -> UBTC)."""
+    return f"{HYPERLIQUID_SPOT_BASE_PREFIX}{base_asset.upper()}"
+
+
+def spot_symbol_for(exchange: str, base_asset: str) -> str:
+    """Exchange-native SPOT symbol for a canonical base asset.
+
+        spot_symbol_for("bybit", "BTC")       -> "BTCUSDT"
+        spot_symbol_for("hyperliquid", "BTC") -> "UBTC/USDC"
+
+    Raises ValueError on an unknown exchange or unsupported base asset, so
+    misconfigurations surface loudly rather than at order time.
+    """
+    ex = exchange.lower()
+    base = base_asset.upper()
+    if base not in SUPPORTED_BASE_ASSETS:
+        raise ValueError(
+            f"unsupported base_asset: {base_asset} "
+            f"(must be one of {', '.join(SUPPORTED_BASE_ASSETS)})"
+        )
+    if ex == "bybit":
+        return f"{base}USDT"
+    if ex == "hyperliquid":
+        return f"{hyperliquid_spot_token(base)}/{HYPERLIQUID_SPOT_QUOTE}"
+    raise ValueError(f"unsupported exchange: {exchange}")

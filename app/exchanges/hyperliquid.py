@@ -9,13 +9,49 @@ from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
 from ..schemas import OrderResult
-from .symbols import base_asset_of, canonical_step_size
+from .symbols import (
+    HYPERLIQUID_SPOT_QUOTE,
+    base_asset_of,
+    canonical_step_size,
+    hyperliquid_spot_token,
+)
 
 log = logging.getLogger(__name__)
 Side = Literal["buy", "sell"]
 
+# Unit-spot base-token szDecimals as listed on HL (UBTC/UETH/USOL). Used ONLY as
+# an offline/DRY_RUN fallback when `spotMeta` can't be fetched; production reads
+# the live value from `spotMeta`.
+_HL_SPOT_SZ_DECIMALS: dict[str, int] = {"BTC": 5, "ETH": 4, "SOL": 3}
+
+
+def _canonical_spot_decimals(symbol: str) -> int:
+    """Offline-safe spot szDecimals for a spot symbol ('UBTC/USDC' | 'UBTC' |
+    'BTC'). Falls back to 4 for unknown assets."""
+    token = symbol.split("/")[0].upper()
+    base = token[1:] if token.startswith("U") and len(token) > 1 else token
+    return _HL_SPOT_SZ_DECIMALS.get(base, 4)
+
 
 class HyperliquidExchange:
+    """Hyperliquid adapter — perp + REAL Unit spot.
+
+    SEPARATE-ACCOUNT NOTE (funding-arb): ``close_position`` closes the WHOLE coin
+    on the account and ``get_funding`` is account-wide, so the funding-arb book
+    MUST be a distinct HL account (own key + address + margin). The registry
+    enforces this at construction (it refuses an ``arb`` adapter whose address
+    equals the directional one), so by the time an order is placed the arb book
+    can never touch the directional position.
+
+    SPOT (first-class): ``spot_market_order``/``get_spot_balance``/
+    ``get_spot_step_size``/``get_spot_min_notional`` trade HL Unit spot. The base
+    token is ``'U'+base`` (UBTC/UETH/USOL) quoted in USDC; the order coin is the
+    pair's canonical name (e.g. ``'@142'``), resolved from ``spotMeta``. The SDK's
+    ``market_open`` routes spot vs perp automatically (spot asset ids start at
+    10000) and is itself an aggressive IOC limit at the slippage-adjusted mid —
+    HL has no separate "market" primitive, which is why spot uses the same call.
+    """
+
     name = "hyperliquid"
 
     # The order response carries the fill price (avgPx) but not the fee — that
@@ -258,4 +294,146 @@ class HyperliquidExchange:
 
     def get_min_notional(self, symbol: str) -> float:
         """Hyperliquid enforces a global $10 minimum order value."""
+        return 10.0
+
+    # ---------- spot (REAL, first-class — Unit spot) ----------
+
+    def _spot_base_token(self, symbol: str) -> str:
+        """The HL Unit spot BASE token name for whatever spot symbol form is
+        passed: a canonical base ('BTC'), the Unit token ('UBTC'), or the
+        readable pair ('UBTC/USDC'). The canonical '@NNN' id is resolved
+        separately from `spotMeta`."""
+        token = symbol.split("/")[0].upper()      # 'UBTC/USDC' -> 'UBTC'
+        if token.startswith("U") and len(token) > 1:
+            return token                          # already a Unit token name
+        return hyperliquid_spot_token(token)      # 'BTC' -> 'UBTC'
+
+    def _resolve_spot(self, symbol: str) -> tuple[str, int]:
+        """Resolve a spot symbol to (canonical_pair_name, base_szDecimals).
+
+        Looks up `spotMeta`: find the base token named 'U'+base and the USDC quote
+        token, then the universe pair holding exactly those two tokens. The pair's
+        `name` (e.g. '@142') is the order coin; sz decimals come from the base
+        token. Raises if the Unit pair isn't listed."""
+        base_name = self._spot_base_token(symbol)
+        sm = self._info.spot_meta()
+        tokens = {t["index"]: t for t in sm.get("tokens", [])}
+        name_to_index = {t["name"].upper(): t["index"] for t in sm.get("tokens", [])}
+        if base_name.upper() not in name_to_index:
+            raise RuntimeError(f"Hyperliquid spot: token not found: {base_name}")
+        base_idx = name_to_index[base_name.upper()]
+        quote_idx = name_to_index.get(HYPERLIQUID_SPOT_QUOTE.upper())
+        for pair in sm.get("universe", []):
+            pt = pair.get("tokens", [])
+            if len(pt) == 2 and pt[0] == base_idx and (quote_idx is None or pt[1] == quote_idx):
+                sz = int(tokens.get(base_idx, {}).get("szDecimals", 4))
+                return pair["name"], sz
+        raise RuntimeError(f"Hyperliquid spot: no {base_name}/{HYPERLIQUID_SPOT_QUOTE} pair listed")
+
+    def spot_market_order(self, symbol: str, side: Side, qty: float) -> OrderResult:
+        """Place an immediate-fill HL Unit spot order.
+
+        HL has no dedicated "market" endpoint: the SDK's ``market_open`` is an
+        aggressive **IOC limit** at the slippage-adjusted mid, which routes to the
+        spot asset automatically (spot ids >= 10000). We reuse it for spot.
+
+        HL spot fees are quote-denominated (USDC), so `filled_qty_base` is the
+        gross filled base; the true `commission_asset` is still surfaced. DRY_RUN
+        (or no key) short-circuits to a simulated net-base result with NO network,
+        mirroring the perp path."""
+        try:
+            pair_name, sz_decimals = (
+                self._resolve_spot(symbol) if not (self.dry_run or self._exchange is None)
+                # In DRY_RUN we still resolve sz decimals offline-safe via canonical map.
+                else (symbol, None)
+            )
+            qty_base = (round(qty, sz_decimals) if sz_decimals is not None
+                        else round(qty, _canonical_spot_decimals(symbol)))
+            if qty_base <= 0:
+                return OrderResult(
+                    success=False,
+                    error_message=f"spot quantity rounded to 0 (requested={qty}, symbol={symbol})",
+                )
+
+            if self.dry_run or self._exchange is None:
+                log.info("[DRY_RUN] hyperliquid spot %s %s qty=%s", side, symbol, qty_base)
+                return OrderResult(success=True, exchange_order_id="DRY_RUN",
+                                   filled_qty_base=qty_base, avg_price=0.0)
+
+            try:
+                price = self._mid_price(pair_name)
+            except Exception as e:
+                log.warning("HL spot mid lookup failed (continuing): %s", e)
+                price = 0.0
+
+            resp = self._exchange.market_open(
+                name=pair_name,
+                is_buy=(side == "buy"),
+                sz=qty_base,
+                px=None,
+                slippage=0.01,
+            )
+            if resp.get("status") != "ok":
+                return OrderResult(success=False, error_message=str(resp), raw=resp)
+
+            statuses = (resp.get("response") or {}).get("data", {}).get("statuses") or []
+            oid, filled, avg_px = "", 0.0, price
+            for st in statuses:
+                if "filled" in st:
+                    f = st["filled"]
+                    oid = str(f.get("oid", ""))
+                    filled += float(f.get("totalSz", 0))
+                    avg_px = float(f.get("avgPx", price))
+                elif "error" in st:
+                    return OrderResult(success=False, error_message=str(st["error"]), raw=resp)
+
+            commission, commission_asset = 0.0, ""
+            try:
+                commission, commission_asset = self._fill_fee(oid)
+            except Exception as e:
+                log.warning("HL spot fee enrichment failed (continuing): %s", e)
+
+            return OrderResult(
+                success=True,
+                exchange_order_id=oid,
+                filled_qty_base=filled or qty_base,   # quote-denom fee: base is gross
+                avg_price=avg_px,
+                commission=commission,
+                commission_asset=commission_asset,
+                raw=resp,
+            )
+        except Exception as e:
+            log.exception("Hyperliquid spot_market_order failed")
+            return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    def get_spot_balance(self, base_asset: str) -> float:
+        """FREE Unit-spot balance of `base_asset` (UBTC/UETH/USOL), in base units:
+        `total - hold` from `spotClearinghouseState`. 0.0 if flat/unknown."""
+        if not self._account_address:
+            return 0.0
+        token = self._spot_base_token(base_asset)
+        try:
+            state = self._info.spot_user_state(self._account_address)
+        except Exception as e:
+            log.warning("HL get_spot_balance failed for %s: %s", base_asset, e)
+            return 0.0
+        for bal in state.get("balances", []):
+            if str(bal.get("coin", "")).upper() == token.upper():
+                total = float(bal.get("total", 0) or 0)
+                hold = float(bal.get("hold", 0) or 0)
+                return max(0.0, total - hold)
+        return 0.0
+
+    def get_spot_step_size(self, symbol: str) -> float:
+        """HL Unit-spot grid (10**-szDecimals of the base token). Falls back to a
+        canonical map when meta is unavailable (DRY_RUN/tests)."""
+        try:
+            _, sz = self._resolve_spot(symbol)
+            return 10 ** -sz
+        except Exception as e:
+            log.warning("HL get_spot_step_size failed for %s (canonical): %s", symbol, e)
+        return 10 ** -_canonical_spot_decimals(symbol)
+
+    def get_spot_min_notional(self, symbol: str) -> float:
+        """Hyperliquid enforces a global $10 minimum order value (spot too)."""
         return 10.0

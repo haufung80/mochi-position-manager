@@ -12,7 +12,8 @@ from .symbols import base_asset_of, canonical_step_size
 log = logging.getLogger(__name__)
 
 Side = Literal["buy", "sell"]
-CATEGORY = "linear"  # USDT perpetuals
+CATEGORY = "linear"       # USDT perpetuals
+SPOT_CATEGORY = "spot"    # USDT spot (the cash-and-carry spot leg)
 
 
 class BybitExchange:
@@ -32,18 +33,21 @@ class BybitExchange:
             api_key=api_key or None,
             api_secret=api_secret or None,
         )
-        self._instrument_cache: dict[str, dict] = {}
+        # Keyed by (category, symbol): BTCUSDT exists in BOTH spot and linear with
+        # DIFFERENT filters, so a symbol-only cache would return the wrong grid.
+        self._instrument_cache: dict[tuple[str, str], dict] = {}
 
     # ---------- helpers ----------
 
-    def _instrument(self, symbol: str) -> dict:
-        if symbol not in self._instrument_cache:
-            resp = self._client.get_instruments_info(category=CATEGORY, symbol=symbol)
+    def _instrument(self, symbol: str, category: str = CATEGORY) -> dict:
+        key = (category, symbol)
+        if key not in self._instrument_cache:
+            resp = self._client.get_instruments_info(category=category, symbol=symbol)
             items = (resp.get("result") or {}).get("list") or []
             if not items:
-                raise RuntimeError(f"Bybit: instrument not found: {symbol}")
-            self._instrument_cache[symbol] = items[0]
-        return self._instrument_cache[symbol]
+                raise RuntimeError(f"Bybit: instrument not found: {category}:{symbol}")
+            self._instrument_cache[key] = items[0]
+        return self._instrument_cache[key]
 
     def _mark_price(self, symbol: str) -> float:
         """Best-effort mark price for OrderResult metadata. Not in the critical
@@ -67,7 +71,8 @@ class BybitExchange:
             raise RuntimeError(f"Bybit: quantity {q} below minOrderQty {min_qty} for {symbol}")
         return format(q.normalize(), "f")
 
-    def _fill_details(self, symbol: str, order_id: str, want_qty: float):
+    def _fill_details(self, symbol: str, order_id: str, want_qty: float,
+                      category: str = CATEGORY):
         """Poll execution records for `order_id` and aggregate the REAL fill:
         (vwap_price, total_fee, fee_currency, filled_qty). Returns None if no
         execution surfaced within the poll window — caller keeps the mark-price
@@ -76,7 +81,7 @@ class BybitExchange:
         for _ in range(self.FILL_POLL_ATTEMPTS):
             try:
                 resp = self._client.get_executions(
-                    category=CATEGORY, symbol=symbol, orderId=order_id, limit=50,
+                    category=category, symbol=symbol, orderId=order_id, limit=50,
                 )
                 rows = (resp.get("result") or {}).get("list") or []
             except Exception as e:
@@ -301,4 +306,132 @@ class BybitExchange:
                 return float(v)
         except Exception as e:
             log.warning("Bybit get_min_notional failed for %s: %s", symbol, e)
+        return 5.0
+
+    # ---------- spot (funding-arb cash-and-carry spot leg) ----------
+    #
+    # Bybit spot is a DISTINCT category from the hard-coded `linear` perp methods
+    # above. It has its own instrument filters (basePrecision / minOrderQty /
+    # minOrderAmt), uses base balances rather than positions, and charges the BUY
+    # fee in the BASE coin. None of the linear methods are overloaded.
+
+    def _spot_mark_price(self, symbol: str) -> float:
+        resp = self._client.get_tickers(category=SPOT_CATEGORY, symbol=symbol)
+        items = (resp.get("result") or {}).get("list") or []
+        if not items:
+            raise RuntimeError(f"Bybit: spot ticker not found: {symbol}")
+        return float(items[0]["lastPrice"])
+
+    def _spot_round_qty(self, symbol: str, qty: float) -> str:
+        """Snap a base-asset quantity DOWN to the spot grid (basePrecision /
+        minOrderQty). Distinct from the linear `_round_qty` (qtyStep)."""
+        lot = self._instrument(symbol, SPOT_CATEGORY).get("lotSizeFilter", {})
+        step = Decimal(str(lot.get("basePrecision", "0.000001")))
+        min_qty = Decimal(str(lot.get("minOrderQty", "0")))
+        q = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        if q < min_qty:
+            raise RuntimeError(
+                f"Bybit spot: quantity {q} below minOrderQty {min_qty} for {symbol}")
+        return format(q.normalize(), "f")
+
+    def spot_market_order(self, symbol: str, side: Side, qty: float) -> OrderResult:
+        """Spot market order, base-denominated (`marketUnit=baseCoin`).
+
+        For a BUY the fee is charged in the BASE coin, so the NET received base is
+        `executed - base_fee` — that (hedgeable) quantity is returned as
+        `filled_qty_base`, with `commission_asset` = the base coin. The caller
+        records the net so neutrality is measured against what is actually held.
+        """
+        try:
+            qty_str = self._spot_round_qty(symbol, qty)
+
+            try:
+                price = self._spot_mark_price(symbol)
+            except Exception as e:
+                log.warning("Bybit spot price lookup failed (continuing): %s", e)
+                price = 0.0
+
+            if self.dry_run:
+                log.info("[DRY_RUN] bybit spot %s %s qty=%s", side, symbol, qty_str)
+                return OrderResult(success=True, exchange_order_id="DRY_RUN",
+                                   filled_qty_base=float(qty_str), avg_price=price)
+
+            resp = self._client.place_order(
+                category=SPOT_CATEGORY,
+                symbol=symbol,
+                side="Buy" if side == "buy" else "Sell",
+                orderType="Market",
+                qty=qty_str,
+                marketUnit="baseCoin",   # qty is in base units (not quote)
+            )
+            if resp.get("retCode") != 0:
+                return OrderResult(
+                    success=False,
+                    error_message=f"retCode={resp.get('retCode')} {resp.get('retMsg')}",
+                    raw=resp,
+                )
+            order_id = (resp.get("result") or {}).get("orderId", "")
+
+            fill_price, commission, commission_asset = price, 0.0, ""
+            filled_qty = float(qty_str)
+            try:
+                det = self._fill_details(symbol, order_id, float(qty_str),
+                                         category=SPOT_CATEGORY)
+                if det:
+                    fill_price, commission, commission_asset, filled_qty = det
+            except Exception as e:
+                log.warning("Bybit spot fill enrichment failed (continuing): %s", e)
+
+            # Base-denominated BUY fee -> the actually-held base is net of it.
+            base_coin = base_asset_of(self.name, symbol)
+            if (side == "buy" and commission
+                    and commission_asset.upper() == base_coin.upper()):
+                filled_qty = max(0.0, filled_qty - commission)
+
+            return OrderResult(
+                success=True,
+                exchange_order_id=order_id,
+                filled_qty_base=filled_qty,
+                avg_price=fill_price,
+                commission=commission,
+                commission_asset=commission_asset,
+                raw=resp,
+            )
+        except Exception as e:
+            log.exception("Bybit spot_market_order failed")
+            return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    def get_spot_balance(self, base_asset: str) -> float:
+        """FREE (available) spot balance of `base_asset`, in base units.
+        Returns the transferable balance, not the total wallet balance."""
+        try:
+            resp = self._client.get_wallet_balance(accountType="UNIFIED", coin=base_asset)
+            for acct in (resp.get("result") or {}).get("list") or []:
+                for c in acct.get("coin") or []:
+                    if str(c.get("coin", "")).upper() == base_asset.upper():
+                        free = c.get("availableToWithdraw") or c.get("free") or c.get("walletBalance")
+                        return float(free or 0.0)
+        except Exception as e:
+            log.warning("Bybit get_spot_balance failed for %s: %s", base_asset, e)
+        return 0.0
+
+    def get_spot_step_size(self, symbol: str) -> float:
+        """Spot base-precision grid. Falls back to the canonical map."""
+        try:
+            bp = self._instrument(symbol, SPOT_CATEGORY).get("lotSizeFilter", {}).get("basePrecision")
+            if bp:
+                return float(bp)
+        except Exception as e:
+            log.warning("Bybit get_spot_step_size failed for %s (canonical): %s", symbol, e)
+        return canonical_step_size(base_asset_of(self.name, symbol))
+
+    def get_spot_min_notional(self, symbol: str) -> float:
+        """Spot minimum order VALUE (quote/USDT), from the spot filter's
+        `minOrderAmt`. Falls back to $5."""
+        try:
+            v = self._instrument(symbol, SPOT_CATEGORY).get("lotSizeFilter", {}).get("minOrderAmt")
+            if v:
+                return float(v)
+        except Exception as e:
+            log.warning("Bybit get_spot_min_notional failed for %s: %s", symbol, e)
         return 5.0
