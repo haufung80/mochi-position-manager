@@ -109,6 +109,58 @@ def _leg_ref_price(ex, leg: ArbLeg) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Position-level Telegram alerts (best-effort: NEVER raise into the executor's
+# session_scope — a flaky notifier must not roll back a recorded fill/close).
+# These wrap `app/notifier.py`'s helpers; the notifier already swallows network
+# failures, so we only guard against a missing/odd notifier object here.
+# ---------------------------------------------------------------------------
+
+def _neutrality_skew(legs: list[ArbLeg]) -> float | None:
+    """Signed base-qty imbalance of a 2-leg pair = |long filled| − |short filled|
+    (0.0 == delta-neutral). Returns None when it can't be computed (not a clean
+    2-leg pair), so the alert just omits the skew line rather than lying."""
+    if len(legs) != 2:
+        return None
+    signed = 0.0
+    for lg in legs:
+        signed += lg.filled_qty if lg.side == "buy" else -lg.filled_qty
+    return signed
+
+
+def _realized_net(legs: list[ArbLeg]) -> float | None:
+    """Readily-available realized net for a close alert = Σ leg funding − Σ leg
+    commissions (both already recorded on the legs). None when no leg carries
+    either figure (nothing meaningful to show -> 'just closed')."""
+    if not any((lg.funding or lg.commission) for lg in legs):
+        return None
+    funding = sum(lg.funding or 0.0 for lg in legs)
+    commission = sum(lg.commission or 0.0 for lg in legs)
+    return funding - commission
+
+
+def _arb_opened_alert(arb_id: int, asset: str, qty: float, legs: str) -> None:
+    try:
+        get_notifier().arb_opened(arb_id, asset, qty, legs)
+    except Exception as e:  # best-effort: never break the executor
+        log.warning("arb_executor: arb_opened alert failed: %s", e)
+
+
+def _arb_error_alert(arb_id: int, asset: str, reason: str,
+                     skew: float | None) -> None:
+    try:
+        get_notifier().arb_error(arb_id, asset, reason, skew)
+    except Exception as e:
+        log.warning("arb_executor: arb_error alert failed: %s", e)
+
+
+def _arb_closed_alert(arb_id: int, asset: str, net: float | None) -> None:
+    try:
+        get_notifier().arb_closed(arb_id, asset, net)
+    except Exception as e:
+        log.warning("arb_executor: arb_closed alert failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Pair sizing
 # ---------------------------------------------------------------------------
 
@@ -350,6 +402,14 @@ def _finalize_open_status(arb_id: int) -> None:
             arb.status = "open"
             arb.opened_at = arb.opened_at or _utcnow()
             arb.error_message = ""
+            # Snapshot for the alert while still inside the session.
+            asset = arb.asset
+            qty = max((lg.filled_qty for lg in legs), default=0.0)
+            legs_desc = ", ".join(
+                f"{lg.exchange}:{lg.product} {lg.side} {lg.filled_qty:g}"
+                for lg in legs
+            )
+            _arb_opened_alert(arb_id, asset, qty, legs_desc)
         else:
             arb.status = "error"
             bad = [lg for lg in legs if lg.status != "success"]
@@ -357,9 +417,15 @@ def _finalize_open_status(arb_id: int) -> None:
                 "one or more legs did not fill: "
                 + ", ".join(f"{lg.exchange}:{lg.product}:{lg.status}" for lg in bad)
             ) or "no legs"
+            asset = arb.asset
+            reason = arb.error_message
+            skew = _neutrality_skew(legs)
+            # Existing dead-letter alert stays (executor control flow unchanged);
+            # ADD the position-level not-neutral / leg-risk alert.
             get_notifier().order_dead(
-                f"arb:{arb_id}", arb.asset, "", "", 0.0, 0, arb.error_message,
+                f"arb:{arb_id}", asset, "", "", 0.0, 0, reason,
             )
+            _arb_error_alert(arb_id, asset, reason, skew)
         arb.updated_at = _utcnow()
 
 
@@ -457,13 +523,22 @@ def _run_close(arb_id: int) -> None:
         if errors:
             arb.status = "error"
             arb.error_message = "; ".join(errors)
+            asset = arb.asset
+            reason = arb.error_message
             get_notifier().order_dead(
-                f"arb:{arb_id}", arb.asset, "", "", 0.0, 0, arb.error_message,
+                f"arb:{arb_id}", asset, "", "", 0.0, 0, reason,
             )
+            _arb_error_alert(arb_id, asset, reason, None)
         else:
             arb.status = "closed"
             arb.closed_at = _utcnow()
             arb.error_message = ""
+            asset = arb.asset
+            # Readily-available realized net = Σ leg funding − Σ leg commissions
+            # (already recorded on the legs); None if no leg carries either.
+            legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
+            net = _realized_net(legs)
+            _arb_closed_alert(arb_id, asset, net)
         arb.updated_at = _utcnow()
 
 

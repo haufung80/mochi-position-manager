@@ -136,6 +136,45 @@ class TelegramNotifier:
             urgent=True,
         )
 
+    # ---- funding-arb position-level helpers ----
+
+    def arb_opened(self, arb_id: int, asset: str, qty: float,
+                   legs: str) -> None:
+        """Both legs filled and the pair is delta-neutral (`neutral=true`)."""
+        self.send(
+            "✅ *Arb opened* (neutral)\n"
+            f"• Asset: *{asset}*  ·  Arb: `#{arb_id}`\n"
+            f"• Qty: {qty:g} {asset} per leg\n"
+            f"• Legs: {legs}",
+        )
+
+    def arb_error(self, arb_id: int, asset: str, reason: str,
+                  skew: float | None = None) -> None:
+        """A naked-or-skewed leg / finalize-error — leg risk, so URGENT."""
+        skew_line = (
+            f"\n• Neutrality skew: {skew:g} {asset}" if skew is not None else ""
+        )
+        self.send(
+            "🚨 *Arb NOT NEUTRAL — manual intervention required*\n"
+            f"• Asset: *{asset}*  ·  Arb: `#{arb_id}`\n"
+            f"• Reason: `{reason[:300]}`"
+            f"{skew_line}",
+            urgent=True,
+        )
+
+    def arb_closed(self, arb_id: int, asset: str,
+                   net: float | None = None) -> None:
+        """The pair finished closing. `net` (funding − fees) is shown when it is
+        readily available, otherwise just the closed notice."""
+        net_line = (
+            f"\n• Realized (funding − fees): ${net:,.2f}" if net is not None else ""
+        )
+        self.send(
+            "🅾️ *Arb closed*\n"
+            f"• Asset: *{asset}*  ·  Arb: `#{arb_id}`"
+            f"{net_line}",
+        )
+
 
 _notifier: TelegramNotifier | None = None
 

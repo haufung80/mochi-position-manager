@@ -470,3 +470,203 @@ def test_shared_writer_replays_both_order_and_arb_order(arb_registry, silent_not
         assert db.query(StrategyPosition).count() == 1
         # ...and the arb leg recorded its fill.
         assert db.get(ArbLeg, leg_id).status == "success"
+
+
+# --- position-level Telegram alerts (A.x) -----------------------------------
+
+class _RecNotifier:
+    """A recording notifier: real arb_* method signatures so a wrong call is
+    caught, per-INSTANCE `calls` so nothing leaks across tests. Mirrors how
+    `silent_notifier` installs itself onto `notifier._notifier`."""
+    enabled = True
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def arb_opened(self, arb_id, asset, qty, legs):
+        self.calls.append(("arb_opened", arb_id, asset, qty, legs))
+
+    def arb_error(self, arb_id, asset, reason, skew=None):
+        self.calls.append(("arb_error", arb_id, asset, reason, skew))
+
+    def arb_closed(self, arb_id, asset, net=None):
+        self.calls.append(("arb_closed", arb_id, asset, net))
+
+    # the existing per-leg failure alerts the executor still fires — accept &
+    # record them so this notifier is a drop-in for the whole arb flow.
+    def order_failed(self, *a, **kw):
+        self.calls.append(("order_failed", a, kw))
+
+    def order_dead(self, *a, **kw):
+        self.calls.append(("order_dead", a, kw))
+
+    def _names(self):
+        return [c[0] for c in self.calls]
+
+
+@pytest.fixture
+def rec_notifier(monkeypatch):
+    from app import notifier as notif_mod
+    rec = _RecNotifier()
+    monkeypatch.setattr(notif_mod, "_notifier", rec)
+    return rec
+
+
+def test_open_neutral_fires_arb_opened_alert(arb_registry, rec_notifier):
+    """Both legs fill + pair is neutral -> informational `arb_opened` (NOT urgent,
+    NOT order_dead)."""
+    arb_registry.state.next_result = OrderResult(
+        success=True, exchange_order_id="P1", filled_qty_base=0.02, avg_price=50000.0)
+    arb_registry.state.spot_result = OrderResult(
+        success=True, exchange_order_id="S1", filled_qty_base=0.02, avg_price=50000.0)
+    arb_id = _mk_arb(asset="BTC")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.02)
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02)
+
+    arb_executor._run_open(arb_id)
+
+    assert "arb_opened" in rec_notifier._names()
+    assert "arb_error" not in rec_notifier._names()
+    assert "order_dead" not in rec_notifier._names()   # not an error finalize
+    opened = next(c for c in rec_notifier.calls if c[0] == "arb_opened")
+    assert opened[1] == arb_id and opened[2] == "BTC"
+    assert opened[3] == pytest.approx(0.02)            # qty per leg
+
+
+def test_finalize_error_fires_urgent_arb_error_alert(arb_registry, rec_notifier):
+    """Leg-1 fails -> hedge withheld -> finalize `error` (non-neutral): the URGENT
+    `arb_error` alert fires alongside the existing dead-letter, and no `arb_opened`."""
+    arb_registry.state.spot_result = OrderResult(success=False, error_message="boom")
+    arb_id = _mk_arb(asset="ETH")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UETH/USDC",
+             side="buy", target_qty=0.5)
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="ETH",
+             side="sell", target_qty=0.5)
+
+    arb_executor._run_open(arb_id)
+
+    names = rec_notifier._names()
+    assert "arb_error" in names
+    assert "arb_opened" not in names
+    err = next(c for c in rec_notifier.calls if c[0] == "arb_error")
+    assert err[1] == arb_id and err[2] == "ETH"
+    assert "did not fill" in err[3]                    # the leg-failure reason
+    # skew is the signed imbalance: spot didn't fill (0) vs perp not placed (0) -> 0.
+    assert err[4] == pytest.approx(0.0)
+    with session_scope() as db:
+        assert db.get(ArbPosition, arb_id).status == "error"
+
+
+def test_finalize_error_alert_is_urgent_on_real_notifier(arb_registry, monkeypatch):
+    """The arb_error path must reach `send(..., urgent=True)` on the real notifier
+    (it's the leg-risk alert) — assert the urgent flag at the send() boundary."""
+    from app.notifier import TelegramNotifier
+    sent: list[tuple] = []
+    notifier = TelegramNotifier(token="t", chat_id="c")
+    monkeypatch.setattr(notifier, "send",
+                        lambda text, **kw: sent.append((text, kw)))
+    from app import notifier as notif_mod
+    monkeypatch.setattr(notif_mod, "_notifier", notifier)
+
+    arb_registry.state.spot_result = OrderResult(success=False, error_message="boom")
+    arb_id = _mk_arb(asset="BTC")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.02)
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02)
+
+    arb_executor._run_open(arb_id)
+
+    arb_msgs = [s for s in sent if "Arb NOT NEUTRAL" in s[0]]
+    assert arb_msgs, "arb_error alert was not sent"
+    assert all(kw.get("urgent") is True for _, kw in arb_msgs)
+
+
+def test_close_completion_fires_arb_closed_alert(arb_registry, rec_notifier):
+    """A clean close -> `arb_closed` (NOT urgent, NOT order_dead/arb_error)."""
+    arb_registry.state.spot_balances["BTC"] = 0.02
+    arb_id = _mk_arb(asset="BTC", status="closing")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.02, filled_qty=0.02, status="success")
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02, filled_qty=0.02, status="success")
+
+    arb_executor._run_close(arb_id)
+
+    names = rec_notifier._names()
+    assert "arb_closed" in names
+    assert "arb_error" not in names and "order_dead" not in names
+    closed = next(c for c in rec_notifier.calls if c[0] == "arb_closed")
+    assert closed[1] == arb_id and closed[2] == "BTC"
+
+
+def test_close_alert_reports_realized_net_when_available(arb_registry, rec_notifier):
+    """When legs carry funding/commission, the close alert surfaces the readily-
+    available net = Σ funding − Σ commission."""
+    arb_registry.state.spot_balances["BTC"] = 0.02
+    arb_id = _mk_arb(asset="BTC", status="closing")
+    with session_scope() as db:
+        # perp leg earned funding, both legs paid a commission.
+        db.add(ArbLeg(arb_id=arb_id, exchange="hyperliquid", account="arb",
+                      product="spot", symbol="UBTC/USDC", side="buy",
+                      target_qty=0.02, filled_qty=0.02, commission=1.0,
+                      status="success"))
+        db.add(ArbLeg(arb_id=arb_id, exchange="hyperliquid", account="arb",
+                      product="perp", symbol="BTC", side="sell",
+                      target_qty=0.02, filled_qty=0.02, funding=5.0,
+                      commission=1.0, status="success"))
+
+    arb_executor._run_close(arb_id)
+
+    closed = next(c for c in rec_notifier.calls if c[0] == "arb_closed")
+    assert closed[3] == pytest.approx(5.0 - 2.0)       # funding 5 − fees (1+1)
+
+
+def test_close_failure_fires_urgent_arb_error_not_closed(arb_registry, rec_notifier):
+    """A failed perp close -> arb `error` -> `arb_error` (urgent), never `arb_closed`."""
+    arb_id = _mk_arb(asset="BTC", status="closing")
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02, filled_qty=0.02, status="success")
+    perp_fake = arb_registry.get("hyperliquid", "arb")
+    perp_fake.close_position = lambda symbol: OrderResult(
+        success=False, error_message="exchange down")
+
+    arb_executor._run_close(arb_id)
+
+    names = rec_notifier._names()
+    assert "arb_error" in names
+    assert "arb_closed" not in names
+    err = next(c for c in rec_notifier.calls if c[0] == "arb_error")
+    assert err[1] == arb_id and "exchange down" in err[3]
+
+
+def test_arb_alert_failure_never_breaks_finalize(arb_registry, monkeypatch):
+    """A throwing notifier must NOT roll back the recorded open (best-effort)."""
+    from app import notifier as notif_mod
+
+    class _BoomNotifier:
+        enabled = True
+        def __getattr__(self, name):
+            def _boom(*a, **kw):
+                raise RuntimeError("telegram exploded")
+            return _boom
+
+    monkeypatch.setattr(notif_mod, "_notifier", _BoomNotifier())
+    arb_registry.state.next_result = OrderResult(
+        success=True, exchange_order_id="P1", filled_qty_base=0.02, avg_price=50000.0)
+    arb_registry.state.spot_result = OrderResult(
+        success=True, exchange_order_id="S1", filled_qty_base=0.02, avg_price=50000.0)
+    arb_id = _mk_arb(asset="BTC")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.02)
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02)
+
+    arb_executor._run_open(arb_id)   # must not raise
+
+    with session_scope() as db:
+        arb = db.get(ArbPosition, arb_id)
+        # the open was still committed despite the notifier exploding.
+        assert arb.status == "open" and arb.opened_at is not None
