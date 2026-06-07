@@ -130,3 +130,137 @@ class FundingEvent(Base):
     funding_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+# ===========================================================================
+# Funding-arbitrage execution (multi-leg). These four tables are created by
+# create_all and are STRUCTURALLY ISOLATED from the directional tables above:
+# no directional query (orders/_execution_quality, funding_events/_performance/
+# _equity_curve, reconcile) touches them, so arb rows can never bleed into the
+# directional dashboard. Nothing here edits Order/Alert/Position/
+# StrategyPosition/FundingEvent or app/db.py / _SQLITE_ADDITIVE_COLUMNS.
+# ===========================================================================
+
+
+class ArbPosition(Base):
+    """One delta-neutral funding-arb position (a pair of legs tracked as a unit).
+
+    `idempotency_key` is the dedup gate (mirrors Alert): a repeated open returns
+    'duplicate' instead of opening a second pair. `notional_target` is the
+    per-leg USD notional the signal app asked for; `realized_pnl` accrues on
+    close. `status`: opening | open | closing | closed | error."""
+    __tablename__ = "arb_positions"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_arb_positions_idemp"),
+        Index("ix_arb_positions_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    asset: Mapped[str] = mapped_column(String(16), nullable=False)
+    strategy_tag: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    notional_target: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # opening -> open | closing -> closed | error
+    status: Mapped[str] = mapped_column(String(16), default="opening", nullable=False)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class ArbLeg(Base):
+    """One self-describing leg of an arb pair: (exchange, account, product,
+    symbol, side, target_qty). Identity on the leg is what lets one schema
+    express every combo (single-venue HL/Bybit cash-and-carry, cross-exchange
+    perp-perp, spot + cross-perp) and any future N-leg arb.
+
+    `filled_qty` stores the NET-received base quantity — for a Bybit spot BUY
+    whose fee is base-denominated, `filled_qty = ordered_base - base_fee` (the
+    actually-held, hedgeable amount that neutrality + close are measured against).
+    UNIQUE(arb_id, exchange, product, symbol) is the leg-level idempotency guard
+    (a re-entered open task can't create a second leg set)."""
+    __tablename__ = "arb_legs"
+    __table_args__ = (
+        UniqueConstraint("arb_id", "exchange", "product", "symbol", name="uq_arb_legs_identity"),
+        Index("ix_arb_legs_arb_id", "arb_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arb_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    account: Mapped[str] = mapped_column(String(32), nullable=False, default="arb")
+    product: Mapped[str] = mapped_column(String(8), nullable=False)   # spot | perp
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)      # buy | sell
+    target_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    filled_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)  # NET base received
+    avg_fill: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # pending -> success | retrying | dead | error
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class ArbOrder(Base):
+    """One attempt to push an arb LEG to an exchange — mirrors Order's execution
+    fields but adds first-class `account` and `product` columns (so a retry
+    re-resolves the exact (exchange, account) adapter and BTCUSDT spot vs linear
+    never collide) and links to `arb_leg_id` (NOT NULL, indexed) instead of an
+    `alert_id`. Structurally invisible to every directional query (it is NOT the
+    `orders` table), so arb fills never inflate `_execution_quality` / `/orders`."""
+    __tablename__ = "arb_orders"
+    __table_args__ = (
+        Index("ix_arb_orders_status", "status"),
+        Index("ix_arb_orders_leg_id", "arb_leg_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arb_leg_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    account: Mapped[str] = mapped_column(String(32), nullable=False, default="arb")
+    product: Mapped[str] = mapped_column(String(8), nullable=False)   # spot | perp
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)      # buy | sell
+    qty_base: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    avg_fill: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+
+    # pending -> success | retrying | dead
+    status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    exchange_order_id: Mapped[str] = mapped_column(String(128), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class ArbFundingEvent(Base):
+    """One funding payment for an arb perp leg, keyed by (exchange, account,
+    symbol, funding_time). `arb_id` is nullable so a settlement can be recorded
+    even before it is attributed. Keeps the directional FundingEvent table pure —
+    arb funding can never reach the directional funding/equity queries. `amount`
+    is signed (+received, -paid)."""
+    __tablename__ = "arb_funding_events"
+    __table_args__ = (
+        UniqueConstraint("exchange", "account", "symbol", "funding_time",
+                         name="uq_arb_funding_event"),
+        Index("ix_arb_funding_arb_id", "arb_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    arb_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    account: Mapped[str] = mapped_column(String(32), nullable=False, default="arb")
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    funding_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
