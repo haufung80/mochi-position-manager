@@ -12,6 +12,7 @@ from .routing import StrategyRouter
 from .routes.webhook import router as webhook_router
 from .routes.dashboard import router as dashboard_router
 from .routes.admin import router as admin_router
+from .routes.funding_arb import router as funding_arb_router
 from .retry_worker import retry_loop
 from .funding_worker import funding_loop
 
@@ -74,3 +75,4 @@ app = FastAPI(
 app.include_router(webhook_router)
 app.include_router(dashboard_router)
 app.include_router(admin_router)
+app.include_router(funding_arb_router)

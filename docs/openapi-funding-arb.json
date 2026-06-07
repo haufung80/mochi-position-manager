@@ -1,0 +1,822 @@
+{
+  "components": {
+    "schemas": {
+      "ArbCloseRequest": {
+        "properties": {
+          "arb_id": {
+            "exclusiveMinimum": 0.0,
+            "title": "Arb Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "arb_id"
+        ],
+        "title": "ArbCloseRequest",
+        "type": "object"
+      },
+      "ArbCloseResponse": {
+        "properties": {
+          "arb_id": {
+            "title": "Arb Id",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "closing",
+              "already_closed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "arb_id"
+        ],
+        "title": "ArbCloseResponse",
+        "type": "object"
+      },
+      "ArbLegView": {
+        "description": "Per-leg status for the status endpoint.",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "avg_fill": {
+            "default": 0.0,
+            "title": "Avg Fill",
+            "type": "number"
+          },
+          "exchange": {
+            "enum": [
+              "bybit",
+              "hyperliquid"
+            ],
+            "title": "Exchange",
+            "type": "string"
+          },
+          "filled_qty": {
+            "default": 0.0,
+            "description": "NET base quantity received (spot buys are net of base-coin fees) \u2014 the actually-held, hedgeable quantity.",
+            "title": "Filled Qty",
+            "type": "number"
+          },
+          "funding": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Funding harvested by this leg (spot legs contribute 0; None until first settlement).",
+            "title": "Funding"
+          },
+          "product": {
+            "enum": [
+              "spot",
+              "perp"
+            ],
+            "title": "Product",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "status": {
+            "description": "pending | success | retrying | dead | error",
+            "title": "Status",
+            "type": "string"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "target_qty": {
+            "title": "Target Qty",
+            "type": "number"
+          }
+        },
+        "required": [
+          "exchange",
+          "account",
+          "product",
+          "symbol",
+          "side",
+          "target_qty",
+          "status"
+        ],
+        "title": "ArbLegView",
+        "type": "object"
+      },
+      "ArbOpenRequest": {
+        "description": "Open one delta-neutral funding-arb position.\n\n``legs`` omitted \u21d2 the **default single-venue Hyperliquid cash-and-carry**\ncombo (long HL spot + short HL perp, same dedicated HL ``arb`` account, perp\nat 1x). Provide ``legs[]`` to select another combo. ``idempotency_key`` is the\ndedup gate (a repeat returns ``status=\"duplicate\"``), mirroring the webhook\npath.",
+        "examples": [
+          {
+            "asset": "BTC",
+            "idempotency_key": "sig-2026-06-07T00:00:00Z-BTC",
+            "notional": 1000.0,
+            "size_mode": "notional",
+            "strategy_tag": "hl-cash-and-carry"
+          },
+          {
+            "asset": "ETH",
+            "idempotency_key": "sig-2026-06-07T00:00:00Z-ETH",
+            "legs": [
+              {
+                "account": "arb",
+                "exchange": "bybit",
+                "product": "spot",
+                "side": "buy"
+              },
+              {
+                "account": "arb",
+                "exchange": "bybit",
+                "product": "perp",
+                "side": "sell"
+              }
+            ],
+            "notional": 2500.0,
+            "size_mode": "notional",
+            "strategy_tag": "bybit-cash-and-carry"
+          }
+        ],
+        "properties": {
+          "asset": {
+            "enum": [
+              "BTC",
+              "ETH",
+              "SOL"
+            ],
+            "title": "Asset",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Caller-supplied dedup key; a repeat open returns 'duplicate'.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "legs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LegSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit legs. Omit for the default single-venue Hyperliquid cash-and-carry combo.",
+            "title": "Legs"
+          },
+          "notional": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "USD notional per leg. Required (> 0) when size_mode='notional'; ignored when size_mode='min'.",
+            "title": "Notional"
+          },
+          "size_mode": {
+            "default": "notional",
+            "description": "'notional' sizes each leg from `notional`; 'min' (paper mode) ignores `notional` and sizes each leg to the exchange minimum order size (real but tiny orders).",
+            "enum": [
+              "notional",
+              "min"
+            ],
+            "title": "Size Mode",
+            "type": "string"
+          },
+          "strategy_tag": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy Tag"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "asset"
+        ],
+        "title": "ArbOpenRequest",
+        "type": "object"
+      },
+      "ArbOpenResponse": {
+        "properties": {
+          "arb_id": {
+            "title": "Arb Id",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/SizedLeg"
+            },
+            "title": "Legs",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "accepted",
+              "duplicate"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "arb_id",
+          "idempotency_key",
+          "legs"
+        ],
+        "title": "ArbOpenResponse",
+        "type": "object"
+      },
+      "ArbPnL": {
+        "description": "PnL breakdown for one arb. Funding is the point; fees and basis net it.",
+        "properties": {
+          "commission_total": {
+            "title": "Commission Total",
+            "type": "number"
+          },
+          "directional_net": {
+            "description": "Spot + perp directional PnL; \u22480 is the neutrality health check.",
+            "title": "Directional Net",
+            "type": "number"
+          },
+          "funding_by_leg": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "Per-leg funding keyed by 'exchange:account:symbol'.",
+            "title": "Funding By Leg",
+            "type": "object"
+          },
+          "funding_total": {
+            "title": "Funding Total",
+            "type": "number"
+          },
+          "net": {
+            "description": "funding_total \u2212 commission_total (+ basis).",
+            "title": "Net",
+            "type": "number"
+          },
+          "perp_unrealized": {
+            "title": "Perp Unrealized",
+            "type": "number"
+          },
+          "spot_unrealized": {
+            "title": "Spot Unrealized",
+            "type": "number"
+          }
+        },
+        "required": [
+          "funding_total",
+          "commission_total",
+          "spot_unrealized",
+          "perp_unrealized",
+          "directional_net",
+          "net"
+        ],
+        "title": "ArbPnL",
+        "type": "object"
+      },
+      "ArbPositionView": {
+        "description": "Full status of one arb position (the status endpoint payload).",
+        "properties": {
+          "arb_id": {
+            "title": "Arb Id",
+            "type": "integer"
+          },
+          "asset": {
+            "enum": [
+              "BTC",
+              "ETH",
+              "SOL"
+            ],
+            "title": "Asset",
+            "type": "string"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/ArbLegView"
+            },
+            "title": "Legs",
+            "type": "array"
+          },
+          "neutral": {
+            "description": "True when both legs are filled and balanced.",
+            "title": "Neutral",
+            "type": "boolean"
+          },
+          "neutrality_skew": {
+            "description": "long_leg.filled \u2212 short_leg.filled (base, net of fees); 0 = balanced.",
+            "title": "Neutrality Skew",
+            "type": "number"
+          },
+          "opened_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opened At"
+          },
+          "pnl": {
+            "$ref": "#/components/schemas/ArbPnL"
+          },
+          "status": {
+            "enum": [
+              "opening",
+              "open",
+              "closing",
+              "closed",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arb_id",
+          "asset",
+          "status",
+          "neutral",
+          "neutrality_skew",
+          "legs",
+          "pnl"
+        ],
+        "title": "ArbPositionView",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LegSpec": {
+        "description": "One leg of an arbitrage pair, fully self-describing.\n\nIdentity lives on the leg \u2014 ``(exchange, account, product, side)`` \u2014 which is\nwhat lets a single schema express every combo (single-venue HL/Bybit\ncash-and-carry, cross-exchange perp-perp, spot + cross-perp) and any future\nN-leg arb. ``(exchange=hyperliquid, product=spot)`` is VALID.",
+        "examples": [
+          {
+            "account": "arb",
+            "exchange": "hyperliquid",
+            "product": "spot",
+            "side": "buy"
+          },
+          {
+            "account": "arb",
+            "exchange": "hyperliquid",
+            "product": "perp",
+            "side": "sell"
+          }
+        ],
+        "properties": {
+          "account": {
+            "default": "arb",
+            "description": "Credential bucket / sub-account label. Defaults to the dedicated 'arb' account so arb fills never net against the directional book.",
+            "title": "Account",
+            "type": "string"
+          },
+          "exchange": {
+            "enum": [
+              "bybit",
+              "hyperliquid"
+            ],
+            "title": "Exchange",
+            "type": "string"
+          },
+          "product": {
+            "enum": [
+              "spot",
+              "perp"
+            ],
+            "title": "Product",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "target_qty": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Target base-asset quantity for this leg. Optional: when omitted the leg is sized at open time from `notional`/`size_mode`. When provided on both legs they must be equal (delta-neutral).",
+            "title": "Target Qty"
+          }
+        },
+        "required": [
+          "exchange",
+          "product",
+          "side"
+        ],
+        "title": "LegSpec",
+        "type": "object"
+      },
+      "SizedLeg": {
+        "description": "A leg after the open endpoint resolved the combo and sized it.",
+        "properties": {
+          "account": {
+            "default": "arb",
+            "title": "Account",
+            "type": "string"
+          },
+          "exchange": {
+            "enum": [
+              "bybit",
+              "hyperliquid"
+            ],
+            "title": "Exchange",
+            "type": "string"
+          },
+          "product": {
+            "enum": [
+              "spot",
+              "perp"
+            ],
+            "title": "Product",
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "buy",
+              "sell"
+            ],
+            "title": "Side",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "Exchange-native symbol (e.g. BTC, BTCUSDT).",
+            "title": "Symbol",
+            "type": "string"
+          },
+          "target_qty": {
+            "description": "Resolved base-asset quantity for the leg.",
+            "title": "Target Qty",
+            "type": "number"
+          }
+        },
+        "required": [
+          "exchange",
+          "product",
+          "symbol",
+          "side",
+          "target_qty"
+        ],
+        "title": "SizedLeg",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "ArbSecret": {
+        "in": "header",
+        "name": "X-Arb-Secret",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "Auto-generated by scripts/dump_openapi.py \u2014 DO NOT EDIT BY HAND. Contract-grade OpenAPI for the /funding-arb API (paths + schemas + the ArbSecret security scheme). This file IS drift-gated in CI: run `make openapi` and commit the result.",
+    "title": "mochi-position-manager \u2014 Funding-Arb API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/funding-arb": {
+      "get": {
+        "description": "STUB (Phase 0): placeholder reporting page. The real dark-theme report\nlands with the executor/funding phases.",
+        "operationId": "arb_report_page_funding_arb_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "ArbSecret": []
+          }
+        ],
+        "summary": "Funding-arb reporting page (HTML)",
+        "tags": [
+          "funding-arb"
+        ]
+      }
+    },
+    "/funding-arb/close": {
+      "post": {
+        "description": "STUB (Phase 0): returns ``closing`` for any positive id. The real handler\nwill 404 unknown ids and 409 already-closed arbs (documented in `responses`).",
+        "operationId": "close_arb_funding_arb_close_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArbCloseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArbCloseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or incorrect X-Arb-Secret."
+          },
+          "404": {
+            "description": "No arb with that id."
+          },
+          "409": {
+            "description": "Arb already closed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset)."
+          }
+        },
+        "security": [
+          {
+            "ArbSecret": []
+          }
+        ],
+        "summary": "Close an open funding-arb position",
+        "tags": [
+          "funding-arb"
+        ]
+      }
+    },
+    "/funding-arb/open": {
+      "post": {
+        "description": "STUB (Phase 0): validates the request + auth, returns schema-valid canned\ndata. No legs are placed and nothing is persisted.",
+        "operationId": "open_arb_funding_arb_open_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArbOpenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArbOpenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or incorrect X-Arb-Secret."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset)."
+          }
+        },
+        "security": [
+          {
+            "ArbSecret": []
+          }
+        ],
+        "summary": "Open a delta-neutral funding-arb position",
+        "tags": [
+          "funding-arb"
+        ]
+      }
+    },
+    "/funding-arb/positions": {
+      "get": {
+        "description": "STUB (Phase 0): returns an empty list (no DB yet).",
+        "operationId": "list_positions_funding_arb_positions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ArbPositionView"
+                  },
+                  "title": "Response List Positions Funding Arb Positions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or incorrect X-Arb-Secret."
+          },
+          "503": {
+            "description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset)."
+          }
+        },
+        "security": [
+          {
+            "ArbSecret": []
+          }
+        ],
+        "summary": "List funding-arb positions",
+        "tags": [
+          "funding-arb"
+        ]
+      }
+    },
+    "/funding-arb/positions/{arb_id}": {
+      "get": {
+        "description": "STUB (Phase 0): returns a canned open position so the schema is exercised.",
+        "operationId": "get_position_funding_arb_positions__arb_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "arb_id",
+            "required": true,
+            "schema": {
+              "title": "Arb Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArbPositionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing or incorrect X-Arb-Secret."
+          },
+          "404": {
+            "description": "No arb with that id."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset)."
+          }
+        },
+        "security": [
+          {
+            "ArbSecret": []
+          }
+        ],
+        "summary": "Get one funding-arb position",
+        "tags": [
+          "funding-arb"
+        ]
+      }
+    }
+  }
+}

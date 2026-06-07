@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     hyperliquid_vault_address: str = ""   # if set, orders trade on behalf of this vault
     hyperliquid_testnet: bool = False
 
+    # --- Funding-arbitrage execution (dedicated, separately-credentialed books) ---
+    # Optional so directional-only deploys still boot; when unset the /funding-arb
+    # router answers 503. The arb book on each venue is a DISTINCT account (own
+    # keys), so arb fills never net against the directional positions.
+    funding_arb_secret: str = ""   # X-Arb-Secret API-key header; "" => arb API 503s
+    bybit_arb_api_key: str = ""
+    bybit_arb_api_secret: str = ""
+    hyperliquid_arb_private_key: str = ""
+    hyperliquid_arb_account_address: str = ""
+
     retry_max_attempts: int = 4
     retry_base_delay_sec: int = 2
     retry_max_delay_sec: int = 60
