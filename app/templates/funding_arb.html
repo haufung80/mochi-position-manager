@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Funding Arbitrage — Mochi Position Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <style>
+    /* Dark theme reused from performance.html (single source of look-and-feel). */
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px;
+           -webkit-text-size-adjust: 100%; }
+    h1 { margin: 0 0 6px 0; font-size: 22px; }
+    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;
+         color: #888; margin: 26px 0 10px 0; }
+    a.back { color: #60a5fa; text-decoration: none; font-size: 13px; }
+    .nav a { color: #60a5fa; text-decoration: none; }
+    .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
+    .card { background: #1a1d24; border: 1px solid #2a2e38; border-radius: 8px;
+            padding: 14px 16px; margin-bottom: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
+    .stat .label { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat .big { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid #2a2e38;
+             vertical-align: middle; font-variant-numeric: tabular-nums; }
+    th:first-child, td:first-child, th.l, td.l { text-align: left; }
+    th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
+    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+    .muted { color: #666; font-size: 12px; }
+    .pos { color: #4ade80; }
+    .neg { color: #f87171; }
+    .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px;
+            font-weight: 600; }
+    .s-open { background: #14532d; color: #4ade80; }
+    .s-opening, .s-closing { background: #0c2a3a; color: #60a5fa; }
+    .s-closed { background: #2a2e38; color: #9ca3af; }
+    .s-error { background: #4a1414; color: #f87171; }
+    .s-success { background: #14532d; color: #4ade80; }
+    .s-pending { background: #0c2a3a; color: #60a5fa; }
+    .s-retrying { background: #3a2a08; color: #facc15; }
+    .s-dead { background: #4a1414; color: #f87171; }
+    .leg-row td { border-bottom: 1px dashed #23262e; color: #cbd5e1; }
+    .leg-row td.l { padding-left: 22px; }
+    .arb-head td { border-top: 2px solid #3a3f4b; }
+    code { font-family: "SF Mono", Menlo, monospace; background: #0f1115; padding: 1px 5px; border-radius: 3px; }
+    .card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 640px) {
+      body { padding: 12px;
+             padding-left: max(12px, env(safe-area-inset-left));
+             padding-right: max(12px, env(safe-area-inset-right));
+             padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+      h1 { font-size: 19px; }
+      .cards { grid-template-columns: 1fr 1fr; }
+      table { font-size: 12px; }
+      th, td { padding: 6px 8px; white-space: nowrap; }
+    }
+  </style>
+</head>
+<body>
+  <div class="nav" style="font-size:13px;margin-bottom:6px;">
+    <a href="/">← dashboard</a> · <a href="/performance">live performance</a>
+  </div>
+  <h1>Funding Arbitrage</h1>
+  <div class="sub">
+    Delta-neutral cash-and-carry (long spot + short perp). Headline =
+    <b>funding harvested − fees</b>. Directional net (spot + perp) is a ≈0
+    neutrality health check — it is NOT a profit source. Arb funding/fills are a
+    separate book; they never touch the directional /performance numbers.
+  </div>
+
+  {% macro money(v) %}<span class="{{ 'pos' if (v or 0) >= 0 else 'neg' }}">${{ v|usd }}</span>{% endmacro %}
+
+  <!-- ===== headline ===== -->
+  <div class="cards">
+    <div class="card stat"><div class="label">Net (funding − fees)</div>
+      <div class="big {{ 'pos' if report.totals.net >= 0 else 'neg' }}">${{ report.totals.net|usd }}</div></div>
+    <div class="card stat"><div class="label">Funding harvested</div>
+      <div class="big {{ 'pos' if report.totals.funding >= 0 else 'neg' }}">${{ report.totals.funding|usd }}</div></div>
+    <div class="card stat"><div class="label">Commission</div>
+      <div class="big">${{ report.totals.commission|usd }}</div></div>
+    <div class="card stat"><div class="label">Arbs (open / total)</div>
+      <div class="big">{{ report.totals.open_count }} / {{ report.totals.total_count }}</div>
+      <div class="muted" style="font-size:10px">directional net {{ money(report.totals.directional_net) }} (≈0)</div></div>
+  </div>
+
+  <!-- ===== per-arb with nested legs ===== -->
+  <h2>Positions</h2>
+  <div class="card">
+    {% if report.arbs %}
+    <table>
+      <thead><tr>
+        <th class="l">Arb / Leg</th><th class="l">Status</th><th>Funding</th>
+        <th>Commission</th><th>Spot unreal.</th><th>Perp unreal.</th>
+        <th>Dir. net</th><th>Skew</th><th>Net</th>
+      </tr></thead>
+      <tbody>
+        {% for a in report.arbs %}
+        <tr class="arb-head">
+          <td class="l"><strong>#{{ a.arb_id }} {{ a.asset }}</strong>
+            {% if a.strategy_tag %}<span class="muted">· {{ a.strategy_tag }}</span>{% endif %}</td>
+          <td class="l"><span class="pill s-{{ a.status }}">{{ a.status }}</span>
+            {% if a.neutral %}<span class="muted" title="both legs filled + balanced">· neutral</span>
+            {% else %}<span class="neg" title="legs not balanced / not all filled">· skew</span>{% endif %}
+            {% if a.error_message %}<span class="muted" title="{{ a.error_message }}"> ⓘ</span>{% endif %}</td>
+          <td>{{ money(a.funding_total) }}</td>
+          <td class="muted">${{ a.commission_total|usd }}</td>
+          <td>{{ money(a.spot_unrealized) }}</td>
+          <td>{{ money(a.perp_unrealized) }}</td>
+          <td>{{ money(a.directional_net) }}</td>
+          <td class="muted">{{ a.neutrality_skew|qty }}</td>
+          <td><strong>{{ money(a.net) }}</strong></td>
+        </tr>
+        {% for lg in a.legs %}
+        <tr class="leg-row">
+          <td class="l mono">{{ lg.exchange }}:{{ lg.account }} {{ lg.product }} {{ lg.symbol }}
+            <span class="muted">{{ lg.side }} {{ lg.filled_qty|qty }}{% if lg.avg_fill %} @ ${{ lg.avg_fill|usd }}{% endif %}</span></td>
+          <td class="l"><span class="pill s-{{ lg.status }}">{{ lg.status }}</span></td>
+          <td>{% if lg.product == 'perp' %}{{ money(lg.funding) }}{% else %}<span class="muted">0</span>{% endif %}</td>
+          <td class="muted">{% if lg.commission %}{{ lg.commission|fee }}{% else %}—{% endif %}</td>
+          <td>{% if lg.product == 'spot' %}{{ money(lg.spot_unrealized) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>{% if lg.product == 'perp' %}{{ money(lg.perp_unrealized) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>{{ money(lg.directional_net) }}</td>
+          <td></td><td></td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+        <tr style="border-top:2px solid #3a3f4b">
+          <td class="l"><b>Total</b></td><td></td>
+          <td>{{ money(report.totals.funding) }}</td>
+          <td class="muted">${{ report.totals.commission|usd }}</td>
+          <td>{{ money(report.totals.spot_unrealized) }}</td>
+          <td>{{ money(report.totals.perp_unrealized) }}</td>
+          <td>{{ money(report.totals.directional_net) }}</td>
+          <td></td>
+          <td><strong>{{ money(report.totals.net) }}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="muted">Per arb: <b>Net = funding − commission</b> (+ basis). Funding accrues on the
+      PERP leg only (spot shows 0). Spot/perp unrealized are cost-basis marks; their sum
+      (<b>Dir. net</b>) should sit near 0 on a balanced pair — a large value flags broken
+      neutrality (also see <b>Skew</b> = long.filled − short.filled). This book is fully
+      isolated from the directional /performance page.</div>
+    {% else %}<p class="muted">No funding-arb positions yet.</p>{% endif %}
+  </div>
+</body>
+</html>

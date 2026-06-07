@@ -226,7 +226,10 @@ def test_secret_unset_returns_503_even_with_header(client_secret_unset):
                                   json={"idempotency_key": "k", "asset": "BTC", "notional": 100})
     assert r2.status_code == 503
     assert client_secret_unset.get("/funding-arb/positions").status_code == 503
-    assert client_secret_unset.get("/funding-arb").status_code == 503
+    # The HTML reporting page is gated like /performance (open, browser-nav can't
+    # send X-Arb-Secret), NOT behind require_arb_secret — so it renders even when
+    # the JSON API secret is unset. (A.6 deliberate auth decision.)
+    assert client_secret_unset.get("/funding-arb").status_code == 200
 
 
 def test_missing_or_bad_secret_returns_401(client_secret_set):

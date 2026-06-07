@@ -1,0 +1,390 @@
+"""A.6 — per-arb funding attribution + the reporting page.
+
+Covers:
+  * The pure ``compute_arb_pnl`` helper for the single-venue HL combo, a Bybit
+    combo, and a cross-exchange perp-perp combo (combo 2 sums BOTH perp legs).
+  * Route-level attribution (``_leg_funding`` / ``_position_view`` over real
+    ``ArbFundingEvent`` rows), incl. spot legs = 0 and the window bound.
+  * Two concurrent BTC arbs can't double-count one account-wide settlement
+    (the A.5 symbol-exclusivity is what makes the per-leg sum single-arb-exact).
+  * The dedicated arb funding poll (``poll_arb_once``) writes ``ArbFundingEvent``
+    only (never ``FundingEvent``) and is insert-or-ignore idempotent.
+  * ``GET /funding-arb`` renders 200 with ``Cache-Control: no-store`` + nav, and
+    is OPEN (browser-nav can't send ``X-Arb-Secret``) — unlike the JSON routes.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.arb_pnl import LegPnLInput, compute_arb_pnl, leg_key
+from app.config import get_settings
+from app.db import session_scope
+from app.funding_worker import poll_arb_once
+from app.main import app
+from app.models import ArbFundingEvent, ArbLeg, ArbPosition, FundingEvent
+from app.routes.funding_arb import _arb_performance, _leg_funding, _position_view
+
+H = {"X-Arb-Secret": "s3cret"}
+
+
+@pytest.fixture
+def client_set(monkeypatch):
+    monkeypatch.setenv("FUNDING_ARB_SECRET", "s3cret")
+    get_settings.cache_clear()
+    with TestClient(app) as c:
+        yield c
+    get_settings.cache_clear()
+
+
+# ===========================================================================
+# Pure helper: per-combo funding attribution (spot=0; combo 2 sums both perps)
+# ===========================================================================
+
+def test_pure_helper_single_venue_hl_combo():
+    """Combo 0: long HL spot + short HL perp. Funding accrues ONLY on the perp
+    leg; the spot leg contributes 0. net = funding − commission."""
+    legs = [
+        LegPnLInput(exchange="hyperliquid", account="arb", product="spot",
+                    symbol="UBTC/USDC", side="buy", filled=0.02, avg_fill=50000.0,
+                    mark=50000.0, funding=0.0, commission=0.01),
+        LegPnLInput(exchange="hyperliquid", account="arb", product="perp",
+                    symbol="BTC", side="sell", filled=0.02, avg_fill=50000.0,
+                    mark=50000.0, funding=1.50, commission=0.02),
+    ]
+    r = compute_arb_pnl(legs)
+    assert r.funding_total == pytest.approx(1.50)              # perp only
+    assert r.funding_by_leg[leg_key("hyperliquid", "arb", "UBTC/USDC")] == 0.0
+    assert r.funding_by_leg[leg_key("hyperliquid", "arb", "BTC")] == pytest.approx(1.50)
+    assert r.commission_total == pytest.approx(0.03)
+    assert r.net == pytest.approx(1.50 - 0.03)
+
+
+def test_pure_helper_bybit_combo_single_short_perp():
+    """Combo 1: Bybit spot buy + Bybit perp sell. Single short perp's funding."""
+    legs = [
+        LegPnLInput(exchange="bybit", account="arb", product="spot",
+                    symbol="ETHUSDT", side="buy", filled=1.0, avg_fill=2500.0,
+                    mark=2500.0, funding=0.0, commission=0.05),
+        LegPnLInput(exchange="bybit", account="arb", product="perp",
+                    symbol="ETHUSDT", side="sell", filled=1.0, avg_fill=2500.0,
+                    mark=2500.0, funding=0.80, commission=0.06),
+    ]
+    r = compute_arb_pnl(legs)
+    assert r.funding_total == pytest.approx(0.80)
+    assert r.net == pytest.approx(0.80 - 0.11)
+
+
+def test_pure_helper_cross_exchange_sums_both_perp_legs():
+    """Combo 2: cross-exchange perp-perp (long HL perp + short Bybit perp). BOTH
+    perp fundings net into the harvested carry: +received on one, −paid on the
+    other → funding_total is their SUM (here 1.2 + (−0.3) = 0.9)."""
+    legs = [
+        LegPnLInput(exchange="hyperliquid", account="arb", product="perp",
+                    symbol="BTC", side="buy", filled=0.02, avg_fill=50000.0,
+                    mark=50000.0, funding=-0.30, commission=0.02),
+        LegPnLInput(exchange="bybit", account="arb", product="perp",
+                    symbol="BTCUSDT", side="sell", filled=0.02, avg_fill=50000.0,
+                    mark=50000.0, funding=1.20, commission=0.03),
+    ]
+    r = compute_arb_pnl(legs)
+    assert r.funding_total == pytest.approx(0.90)              # 1.2 + (-0.3)
+    assert r.funding_by_leg[leg_key("hyperliquid", "arb", "BTC")] == pytest.approx(-0.30)
+    assert r.funding_by_leg[leg_key("bybit", "arb", "BTCUSDT")] == pytest.approx(1.20)
+    assert r.net == pytest.approx(0.90 - 0.05)
+
+
+def test_pure_helper_directional_net_neutral_on_balanced_pair():
+    """A long spot + short perp of equal qty move opposite, so directional_net
+    (spot+perp unrealized) is ≈0 even when the mark moves — the health check."""
+    legs = [
+        LegPnLInput(exchange="hyperliquid", account="arb", product="spot",
+                    symbol="UBTC/USDC", side="buy", filled=0.02, avg_fill=50000.0,
+                    mark=55000.0, funding=0.0, commission=0.0),
+        LegPnLInput(exchange="hyperliquid", account="arb", product="perp",
+                    symbol="BTC", side="sell", filled=0.02, avg_fill=50000.0,
+                    mark=55000.0, funding=0.0, commission=0.0),
+    ]
+    r = compute_arb_pnl(legs)
+    assert r.spot_unrealized == pytest.approx(0.02 * 5000)     # +100 (long gains)
+    assert r.perp_unrealized == pytest.approx(-0.02 * 5000)    # -100 (short loses)
+    assert r.directional_net == pytest.approx(0.0)
+
+
+def test_pure_helper_basis_term_folds_into_net():
+    legs = [LegPnLInput(exchange="bybit", account="arb", product="perp",
+                        symbol="BTCUSDT", side="sell", funding=1.0, commission=0.1)]
+    assert compute_arb_pnl(legs, basis=0.25).net == pytest.approx(1.0 - 0.1 + 0.25)
+
+
+# ===========================================================================
+# Route-level attribution over real ArbFundingEvent rows
+# ===========================================================================
+
+def _make_arb(asset, legs, *, status="open", opened_at=None, closed_at=None):
+    """Persist one ArbPosition + legs; return its id. legs = list of dicts."""
+    with session_scope() as db:
+        arb = ArbPosition(idempotency_key=f"k-{asset}-{datetime.now().timestamp()}",
+                          asset=asset, status=status,
+                          opened_at=opened_at, closed_at=closed_at)
+        db.add(arb)
+        db.flush()
+        for lg in legs:
+            db.add(ArbLeg(arb_id=arb.id, exchange=lg["exchange"],
+                          account=lg.get("account", "arb"), product=lg["product"],
+                          symbol=lg["symbol"], side=lg["side"],
+                          filled_qty=lg.get("filled", 0.0),
+                          avg_fill=lg.get("avg_fill", 0.0),
+                          commission=lg.get("commission", 0.0),
+                          status=lg.get("status", "success")))
+        return arb.id
+
+
+def _add_funding(exchange, account, symbol, when, amount):
+    with session_scope() as db:
+        db.add(ArbFundingEvent(exchange=exchange, account=account, symbol=symbol,
+                               funding_time=when, amount=amount))
+
+
+def test_leg_funding_sums_perp_window_spot_zero():
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    arb_id = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+         "side": "buy", "filled": 0.02},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+         "side": "sell", "filled": 0.02},
+    ], opened_at=t0)
+    # Two settlements inside the window for the perp leg's (ex, acct, symbol).
+    _add_funding("hyperliquid", "arb", "BTC", t0 + timedelta(hours=1), 0.5)
+    _add_funding("hyperliquid", "arb", "BTC", t0 + timedelta(hours=9), 0.3)
+    # A settlement BEFORE opened_at must NOT be counted.
+    _add_funding("hyperliquid", "arb", "BTC", t0 - timedelta(hours=1), 99.0)
+
+    with session_scope() as db:
+        arb = db.get(ArbPosition, arb_id)
+        legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
+        perp = next(lg for lg in legs if lg.product == "perp")
+        spot = next(lg for lg in legs if lg.product == "spot")
+        assert _leg_funding(db, arb, perp) == pytest.approx(0.8)   # 0.5+0.3, pre-window excluded
+        assert _leg_funding(db, arb, spot) == 0.0                  # spot always 0
+        view = _position_view(arb, legs, db)
+    assert view.pnl.funding_total == pytest.approx(0.8)
+    assert view.pnl.funding_by_leg["hyperliquid:arb:BTC"] == pytest.approx(0.8)
+    assert view.pnl.funding_by_leg["hyperliquid:arb:UBTC/USDC"] == 0.0
+
+
+def test_closed_arb_funding_bounded_by_closed_at():
+    """A closed arb only counts settlements up to closed_at — a later settlement
+    (e.g. attributed to a re-opened arb on the re-used symbol) is excluded."""
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    tc = t0 + timedelta(hours=8)
+    arb_id = _make_arb("ETH", [
+        {"exchange": "bybit", "product": "spot", "symbol": "ETHUSDT", "side": "buy"},
+        {"exchange": "bybit", "product": "perp", "symbol": "ETHUSDT", "side": "sell"},
+    ], status="closed", opened_at=t0, closed_at=tc)
+    _add_funding("bybit", "arb", "ETHUSDT", t0 + timedelta(hours=1), 0.4)   # in window
+    _add_funding("bybit", "arb", "ETHUSDT", tc + timedelta(hours=1), 5.0)   # after close
+    with session_scope() as db:
+        arb = db.get(ArbPosition, arb_id)
+        perp = next(lg for lg in db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
+                    if lg.product == "perp")
+        assert _leg_funding(db, arb, perp) == pytest.approx(0.4)
+
+
+def test_cross_exchange_route_sums_both_perp_legs():
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    arb_id = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "buy"},
+        {"exchange": "bybit", "product": "perp", "symbol": "BTCUSDT", "side": "sell"},
+    ], opened_at=t0)
+    _add_funding("hyperliquid", "arb", "BTC", t0 + timedelta(hours=1), -0.30)
+    _add_funding("bybit", "arb", "BTCUSDT", t0 + timedelta(hours=1), 1.20)
+    with session_scope() as db:
+        arb = db.get(ArbPosition, arb_id)
+        legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
+        view = _position_view(arb, legs, db)
+    assert view.pnl.funding_total == pytest.approx(0.90)
+
+
+# ===========================================================================
+# Two concurrent BTC arbs can't double-count one account-wide settlement
+# ===========================================================================
+
+def test_two_concurrent_btc_arbs_cannot_double_count(client_set, arb_registry):
+    """The A.5 symbol-exclusivity prevents two non-closed arbs from holding the
+    SAME (exchange, account, symbol). So one account-wide BTC settlement is
+    attributed to exactly one arb — never summed twice across two arbs."""
+    # Open arb #1 (default HL BTC combo).
+    r1 = client_set.post("/funding-arb/open", headers=H,
+                         json={"idempotency_key": "a1", "asset": "BTC", "notional": 1000})
+    assert r1.status_code == 200
+    arb1 = r1.json()["arb_id"]
+    # A SECOND BTC arb on the same HL legs is REFUSED (409) — it can't co-hold BTC.
+    r2 = client_set.post("/funding-arb/open", headers=H,
+                         json={"idempotency_key": "a2", "asset": "BTC", "notional": 1000})
+    assert r2.status_code == 409, r2.text
+
+    # Pin opened_at to a fixed PAST time so the settlement falls inside the
+    # window [opened_at, now] (the background open set opened_at≈now, which would
+    # put an opened+1h settlement in the future).
+    opened = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    with session_scope() as db:
+        db.get(ArbPosition, arb1).opened_at = opened
+    # One account-wide BTC perp settlement, inside the window.
+    _add_funding("hyperliquid", "arb", "BTC", opened + timedelta(hours=1), 2.0)
+
+    # It is counted by exactly ONE arb (the only one holding the BTC perp).
+    holders = []
+    with session_scope() as db:
+        for arb in db.query(ArbPosition).all():
+            legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb.id).all()
+            f = sum(_leg_funding(db, arb, lg) for lg in legs)
+            if abs(f) > 0:
+                holders.append((arb.id, f))
+    assert holders == [(arb1, pytest.approx(2.0))]   # one arb, counted once
+
+
+# ===========================================================================
+# The dedicated arb funding poll
+# ===========================================================================
+
+def test_poll_arb_once_writes_only_arb_table_idempotent(arb_registry):
+    """poll_arb_once fetches the perp legs' funding via get('hyperliquid','arb')
+    and writes ArbFundingEvent (insert-or-ignore), NEVER the directional
+    FundingEvent table."""
+    _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy"},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell"},
+    ], opened_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    # The HL arb fake returns these settlements for the perp symbol.
+    arb_registry.state.funding["BTC"] = [
+        {"time_ms": 1_700_000_000_000, "amount": 0.5},
+        {"time_ms": 1_700_028_800_000, "amount": -0.2},
+    ]
+    assert poll_arb_once() == 2          # both stored
+    assert poll_arb_once() == 0          # same window -> dedup, no double-count
+
+    with session_scope() as db:
+        arb_amounts = sorted(r.amount for r in db.query(ArbFundingEvent).all())
+        assert arb_amounts == [-0.2, 0.5]
+        # The spot leg's symbol is never polled (perp-only), and the directional
+        # FundingEvent table is untouched.
+        assert db.query(FundingEvent).count() == 0
+        assert db.query(ArbFundingEvent).filter_by(symbol="UBTC/USDC").count() == 0
+
+
+def test_poll_arb_once_resilient_to_leg_failure(arb_registry):
+    """One leg's get_funding raising doesn't abort the rest of the poll (it logs +
+    continues to the next leg)."""
+    _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell"},
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy"},
+    ], opened_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
+
+    def _boom(symbol, start, end):
+        raise RuntimeError("venue down")
+
+    arb_registry.get("hyperliquid", "arb").get_funding = _boom
+    # Must not raise; returns 0 (the only perp leg failed).
+    assert poll_arb_once() == 0
+    with session_scope() as db:
+        assert db.query(ArbFundingEvent).count() == 0
+
+
+def test_funding_loop_runs_both_directional_and_arb_polls(strategies_yaml, arb_registry):
+    """The SAME hourly loop runs the directional poll then the arb poll, each in
+    its own session_scope. One short tick (sleep≈0) proves both fire and land in
+    their SEPARATE tables."""
+    import asyncio
+
+    from app.funding_worker import funding_loop
+    from app.routing import StrategyRouter
+
+    router = StrategyRouter(strategies_yaml)
+    # Directional venue funding (BTCUSDT is solely owned by TEST_BTC).
+    arb_registry.state.funding["BTCUSDT"] = [{"time_ms": 1_700_000_000_000, "amount": -0.5}]
+    # Arb perp-leg funding (a non-closed BTC arb on the HL arb account).
+    _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell"},
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy"},
+    ], opened_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    arb_registry.state.funding["BTC"] = [{"time_ms": 1_700_000_000_000, "amount": 0.9}]
+
+    async def _drive():
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            funding_loop(router, poll_interval_sec=0.0, stop_event=stop))
+        await asyncio.sleep(0.05)   # let one tick run
+        stop.set()
+        await asyncio.sleep(0.02)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_drive())
+    with session_scope() as db:
+        assert db.query(FundingEvent).filter_by(symbol="BTCUSDT").count() == 1   # directional
+        assert db.query(ArbFundingEvent).filter_by(symbol="BTC").count() == 1    # arb
+        # Cross-check: directional table has NO arb funding, arb table has NO
+        # directional funding (separate books).
+        assert db.query(FundingEvent).filter_by(symbol="BTC").count() == 0
+        assert db.query(ArbFundingEvent).filter_by(symbol="BTCUSDT").count() == 0
+
+
+def test_poll_arb_once_skips_closed_arbs(arb_registry):
+    """Closed arbs are flat — their perp legs are NOT polled."""
+    _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell"},
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy"},
+    ], status="closed", opened_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+       closed_at=datetime(2026, 6, 2, tzinfo=timezone.utc))
+    arb_registry.state.funding["BTC"] = [{"time_ms": 1_700_000_000_000, "amount": 9.9}]
+    assert poll_arb_once() == 0
+    with session_scope() as db:
+        assert db.query(ArbFundingEvent).count() == 0
+
+
+# ===========================================================================
+# Reporting page
+# ===========================================================================
+
+def test_arb_report_page_renders_200_no_store(client_set):
+    """GET /funding-arb renders 200 with Cache-Control: no-store + reciprocal nav,
+    and is OPEN (no X-Arb-Secret needed — browser nav can't send it)."""
+    r = client_set.get("/funding-arb")          # NO header
+    assert r.status_code == 200, r.text
+    assert r.headers["cache-control"] == "no-store"
+    assert "Funding Arbitrage" in r.text
+    assert 'href="/"' in r.text and 'href="/performance"' in r.text   # reciprocal nav
+    assert "No funding-arb positions yet" in r.text
+
+
+def test_arb_report_page_shows_rows_and_funding(client_set):
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+         "side": "buy", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.01},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+         "side": "sell", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.02},
+    ], opened_at=t0)
+    _add_funding("hyperliquid", "arb", "BTC", t0 + timedelta(hours=1), 1.50)
+    r = client_set.get("/funding-arb")
+    assert r.status_code == 200
+    assert "hyperliquid:arb perp BTC" in r.text     # nested leg row rendered
+    assert "UBTC/USDC" in r.text
+
+    with session_scope() as db:
+        report = _arb_performance(db)
+    assert report["totals"]["funding"] == pytest.approx(1.50)
+    assert report["totals"]["commission"] == pytest.approx(0.03)
+    assert report["totals"]["net"] == pytest.approx(1.50 - 0.03)
+    assert report["totals"]["open_count"] == 1
+    arb = report["arbs"][0]
+    spot_leg = next(lg for lg in arb["legs"] if lg["product"] == "spot")
+    perp_leg = next(lg for lg in arb["legs"] if lg["product"] == "perp")
+    assert spot_leg["funding"] == 0.0                # spot leg shows 0
+    assert perp_leg["funding"] == pytest.approx(1.50)

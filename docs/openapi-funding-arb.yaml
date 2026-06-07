@@ -455,10 +455,31 @@ openapi: 3.1.0
 paths:
   /funding-arb:
     get:
-      description: 'Minimal reporting stub. The real dark-theme report (per-arb funding
-        −
+      description: 'Dark-theme funding-arb report: one row per ``ArbPosition`` with
+        nested legs,
 
-        fees, per-leg breakdown, neutrality) lands in A.6.'
+        headline = funding harvested − fees, per-leg funding (spot 0) / spot+perp
+
+        unrealized / directional-net (≈0 health check) / neutrality skew.
+
+
+        **AUTH (deliberate, documented):** this is an HTML page reached by BROWSER
+
+        NAVIGATION, which cannot attach a custom ``X-Arb-Secret`` header (a fetch
+        can,
+
+        a ``<a href>`` click can''t). It is therefore gated EXACTLY like the existing
+
+        ``/performance`` page — currently OPEN (no auth dependency) — and NOT behind
+
+        ``require_arb_secret``. The JSON ``/funding-arb/{open,close,positions}`` API
+
+        routes that the signal app calls programmatically stay behind ``X-Arb-Secret``
+
+        as-is. (If ``/performance`` is later gated by ``WEBHOOK_SECRET``, gate this
+        the
+
+        same way for parity — they share the same browser-nav threat model.)'
       operationId: arb_report_page_funding_arb_get
       responses:
         '200':
@@ -467,8 +488,6 @@ paths:
               schema:
                 type: string
           description: Successful Response
-      security:
-      - ArbSecret: []
       summary: Funding-arb reporting page (HTML)
       tags:
       - funding-arb

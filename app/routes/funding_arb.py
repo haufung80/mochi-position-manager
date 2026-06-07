@@ -25,19 +25,23 @@ would otherwise double-count the same settlement).
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from .. import arb_executor
+from ..arb_pnl import LegPnLInput, compute_arb_pnl
 from ..config import Settings, get_settings
 from ..db import session_scope
 from ..exchanges.registry import get_registry
 from ..exchanges.symbols import spot_symbol_for, symbol_for
-from ..models import ArbLeg, ArbOrder, ArbPosition
+from ..models import ArbFundingEvent, ArbLeg, ArbOrder, ArbPosition
 from ..schemas_arb import (
     ArbCloseRequest,
     ArbCloseResponse,
@@ -53,6 +57,16 @@ from ..schemas_arb import (
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/funding-arb", tags=["funding-arb"])
+
+_templates_dir = Path(__file__).parent.parent / "templates"
+templates = Jinja2Templates(directory=str(_templates_dir))
+# Reuse the dashboard's presentation filters (usd/qty/fee/when) so the arb report
+# formats numbers identically to /performance — single source of truth, no drift.
+from .dashboard import _fmt_fee, _fmt_qty, _fmt_usd, _fmt_when  # noqa: E402
+templates.env.filters["usd"] = _fmt_usd
+templates.env.filters["qty"] = _fmt_qty
+templates.env.filters["fee"] = _fmt_fee
+templates.env.filters["when"] = _fmt_when
 
 # auto_error=False so we control the precedence (503-before-401) ourselves rather
 # than letting APIKeyHeader 403 on a missing header. The name drives the OpenAPI
@@ -125,42 +139,136 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
-def _leg_view(leg: ArbLeg) -> ArbLegView:
+def _leg_funding(db, arb: ArbPosition, leg: ArbLeg) -> float:
+    """Σ ``ArbFundingEvent.amount`` attributed to one PERP leg, over the arb's
+    window ``[opened_at, closed_at|now]`` and the leg's ``(exchange, account,
+    symbol)``. Spot legs return 0 (funding accrues only on the perp).
+
+    The A.5 open-time symbol exclusivity (one ``(exchange, account, symbol)`` held
+    by at most one non-closed arb) is what makes this single-arb attribution exact:
+    two concurrent BTC arbs can't both claim one account-wide settlement, because
+    they can't both hold the BTC perp symbol on the same account at once.
+    """
+    if leg.product != "perp":
+        return 0.0
+    lo = arb.opened_at
+    hi = arb.closed_at or datetime.now(timezone.utc)
+    q = (
+        db.query(func.coalesce(func.sum(ArbFundingEvent.amount), 0.0))
+        .filter(ArbFundingEvent.exchange == leg.exchange,
+                ArbFundingEvent.account == leg.account,
+                ArbFundingEvent.symbol == leg.symbol)
+    )
+    # Bound the window to the arb's lifetime so a settlement from a PRIOR closed
+    # arb on the same (re-used) symbol can't leak into this one. `opened_at` is
+    # None only before the open finalizes (no funding yet), so an unbounded `lo`
+    # is harmless then.
+    if lo is not None:
+        q = q.filter(ArbFundingEvent.funding_time >= lo)
+    q = q.filter(ArbFundingEvent.funding_time <= hi)
+    return float(q.scalar() or 0.0)
+
+
+def _perp_mark(leg: ArbLeg) -> float:
+    """Live mark for a PERP leg from its OWN venue/account (display path — never
+    raises; 0.0 on any failure so the PnL math contributes 0 unrealized)."""
+    try:
+        d = get_registry().get(leg.exchange, leg.account).get_position_detail(leg.symbol)
+        return float(d.get("mark") or 0.0)
+    except Exception:                       # noqa: BLE001 — display path, never raise
+        return 0.0
+
+
+def _spot_mark(leg: ArbLeg) -> float:
+    """Live mark for a SPOT leg (its venue spot price). Never raises; 0.0 on
+    failure. Falls back to the recorded ``avg_fill`` so a flat unrealized (not a
+    bogus one) is shown when the live read is unavailable."""
+    try:
+        px = float(get_registry().get(leg.exchange, leg.account).get_price(leg.symbol) or 0.0)
+        return px if px > 0 else float(leg.avg_fill or 0.0)
+    except Exception:                       # noqa: BLE001 — display path, never raise
+        return float(leg.avg_fill or 0.0)
+
+
+def _leg_pnl_inputs(db, arb: ArbPosition, legs: list[ArbLeg]) -> list[LegPnLInput]:
+    """Assemble each leg's already-fetched PnL inputs (funding + mark) so the pure
+    ``compute_arb_pnl`` helper does the arithmetic with no exchange access."""
+    inputs: list[LegPnLInput] = []
+    for lg in legs:
+        funding = _leg_funding(db, arb, lg)
+        mark = _perp_mark(lg) if lg.product == "perp" else _spot_mark(lg)
+        inputs.append(LegPnLInput(
+            exchange=lg.exchange, account=lg.account, product=lg.product,
+            symbol=lg.symbol, side=lg.side, filled=lg.filled_qty,
+            avg_fill=lg.avg_fill, mark=mark, funding=funding,
+            commission=lg.commission,
+        ))
+    return inputs
+
+
+def _leg_view(leg: ArbLeg, funding: float | None = None) -> ArbLegView:
     return ArbLegView(
         exchange=leg.exchange, account=leg.account, product=leg.product,
         symbol=leg.symbol, side=leg.side, target_qty=leg.target_qty,
         filled_qty=leg.filled_qty, avg_fill=leg.avg_fill,
-        funding=leg.funding, status=leg.status,
+        funding=leg.funding if funding is None else funding, status=leg.status,
     )
 
 
-def _position_view(arb: ArbPosition, legs: list[ArbLeg]) -> ArbPositionView:
-    """Build the status payload. PnL funding reads off the stored per-leg funding
-    (0 until A.6 attribution runs — documented as fine in the contract)."""
+def _position_view(arb: ArbPosition, legs: list[ArbLeg], db=None) -> ArbPositionView:
+    """Build the status payload with REAL per-arb PnL (A.6).
+
+    ``funding_total`` sums each perp leg's attributed ``ArbFundingEvent`` rows over
+    the arb's window; spot legs are 0. ``commission_total`` = Σ leg commissions.
+    ``spot_unrealized`` / ``perp_unrealized`` are cost-basis marks; ``net =
+    funding_total − commission_total`` (+ basis). The math lives in the pure
+    ``compute_arb_pnl`` helper (tested without live exchanges). When ``db`` is
+    None (no session), funding/marks fall back to the stored per-leg values."""
     long_filled = sum(lg.filled_qty for lg in legs if lg.side == "buy")
     short_filled = sum(lg.filled_qty for lg in legs if lg.side == "sell")
     skew = long_filled - short_filled
     all_success = bool(legs) and all(lg.status == "success" for lg in legs)
     neutral = all_success and abs(skew) <= 1e-9
 
-    funding_by_leg = {
-        f"{lg.exchange}:{lg.account}:{lg.symbol}": lg.funding for lg in legs
-    }
-    funding_total = sum(lg.funding for lg in legs)
-    commission_total = sum(lg.commission for lg in legs)
-    pnl = ArbPnL(
-        funding_total=funding_total,
-        funding_by_leg=funding_by_leg,
-        commission_total=commission_total,
-        spot_unrealized=0.0,
-        perp_unrealized=0.0,
-        directional_net=0.0,
-        net=funding_total - commission_total,
-    )
+    if db is not None:
+        inputs = _leg_pnl_inputs(db, arb, legs)
+        result = compute_arb_pnl(inputs)
+        per_leg_funding = {
+            (i.exchange, i.account, i.symbol): i.funding for i in inputs
+        }
+        pnl = ArbPnL(
+            funding_total=result.funding_total,
+            funding_by_leg=result.funding_by_leg,
+            commission_total=result.commission_total,
+            spot_unrealized=result.spot_unrealized,
+            perp_unrealized=result.perp_unrealized,
+            directional_net=result.directional_net,
+            net=result.net,
+        )
+        leg_views = [
+            _leg_view(lg, per_leg_funding.get((lg.exchange, lg.account, lg.symbol)))
+            for lg in legs
+        ]
+    else:
+        # No session (e.g. a hand-built view in a unit test): use stored funding.
+        funding_by_leg = {
+            f"{lg.exchange}:{lg.account}:{lg.symbol}": (lg.funding if lg.product == "perp" else 0.0)
+            for lg in legs
+        }
+        funding_total = sum(v for v in funding_by_leg.values())
+        commission_total = sum(lg.commission for lg in legs)
+        pnl = ArbPnL(
+            funding_total=funding_total, funding_by_leg=funding_by_leg,
+            commission_total=commission_total, spot_unrealized=0.0,
+            perp_unrealized=0.0, directional_net=0.0,
+            net=funding_total - commission_total,
+        )
+        leg_views = [_leg_view(lg) for lg in legs]
+
     return ArbPositionView(
         arb_id=arb.id, asset=arb.asset, status=arb.status,
         neutral=neutral, neutrality_skew=skew,
-        legs=[_leg_view(lg) for lg in legs], pnl=pnl,
+        legs=leg_views, pnl=pnl,
         opened_at=_iso(arb.opened_at), closed_at=_iso(arb.closed_at),
         error_message=arb.error_message or None,
     )
@@ -356,7 +464,7 @@ def list_positions(
         views = []
         for arb in arbs:
             legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb.id).all()
-            views.append(_position_view(arb, legs))
+            views.append(_position_view(arb, legs, db))
         return views
 
 
@@ -377,7 +485,83 @@ def get_position(
         if arb is None:
             raise HTTPException(status_code=404, detail="no arb with that id")
         legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
-        return _position_view(arb, legs)
+        return _position_view(arb, legs, db)
+
+
+# --- Reporting page ---------------------------------------------------------
+
+def _arb_performance(db) -> dict:
+    """Roll up every ``ArbPosition`` into the reporting-page model: one row per arb
+    with nested legs + per-leg PnL, plus portfolio headline totals.
+
+    Headline = **funding harvested − fees** (Σ ``net`` across arbs). Each row's
+    funding/marks come from the SAME real attribution as the status endpoint
+    (``_leg_pnl_inputs`` → ``compute_arb_pnl``), so the page and the API agree."""
+    rows: list[dict] = []
+    tot_funding = tot_commission = tot_net = 0.0
+    tot_spot_unreal = tot_perp_unreal = 0.0
+    open_count = 0
+
+    arbs = db.query(ArbPosition).order_by(ArbPosition.id.desc()).all()
+    for arb in arbs:
+        legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb.id).all()
+        inputs = _leg_pnl_inputs(db, arb, legs)
+        result = compute_arb_pnl(inputs)
+        by_input = {(i.exchange, i.account, i.symbol): i for i in inputs}
+
+        long_filled = sum(lg.filled_qty for lg in legs if lg.side == "buy")
+        short_filled = sum(lg.filled_qty for lg in legs if lg.side == "sell")
+        skew = long_filled - short_filled
+        all_success = bool(legs) and all(lg.status == "success" for lg in legs)
+        neutral = all_success and abs(skew) <= 1e-9
+
+        leg_rows = []
+        for lg in legs:
+            inp = by_input.get((lg.exchange, lg.account, lg.symbol))
+            leg_unreal = inp.directional_unrealized if inp else 0.0
+            leg_rows.append({
+                "exchange": lg.exchange, "account": lg.account,
+                "product": lg.product, "symbol": lg.symbol, "side": lg.side,
+                "filled_qty": lg.filled_qty, "avg_fill": lg.avg_fill,
+                "mark": inp.mark if inp else 0.0,
+                # Funding is the point on the perp leg; a spot leg always shows 0.
+                "funding": inp.funding if (inp and lg.product == "perp") else 0.0,
+                "commission": lg.commission,
+                "spot_unrealized": leg_unreal if lg.product == "spot" else 0.0,
+                "perp_unrealized": leg_unreal if lg.product == "perp" else 0.0,
+                "directional_net": leg_unreal,
+                "status": lg.status,
+            })
+
+        rows.append({
+            "arb_id": arb.id, "asset": arb.asset, "status": arb.status,
+            "strategy_tag": arb.strategy_tag, "neutral": neutral,
+            "neutrality_skew": skew,
+            "opened_at": arb.opened_at, "closed_at": arb.closed_at,
+            "error_message": arb.error_message or None,
+            "funding_total": result.funding_total,
+            "commission_total": result.commission_total,
+            "spot_unrealized": result.spot_unrealized,
+            "perp_unrealized": result.perp_unrealized,
+            "directional_net": result.directional_net,
+            "net": result.net,
+            "legs": leg_rows,
+        })
+        tot_funding += result.funding_total
+        tot_commission += result.commission_total
+        tot_net += result.net
+        tot_spot_unreal += result.spot_unrealized
+        tot_perp_unreal += result.perp_unrealized
+        if arb.status in ("open", "opening", "closing"):
+            open_count += 1
+
+    totals = {
+        "funding": tot_funding, "commission": tot_commission, "net": tot_net,
+        "spot_unrealized": tot_spot_unreal, "perp_unrealized": tot_perp_unreal,
+        "directional_net": tot_spot_unreal + tot_perp_unreal,
+        "open_count": open_count, "total_count": len(arbs),
+    }
+    return {"arbs": rows, "totals": totals}
 
 
 @router.get(
@@ -385,11 +569,24 @@ def get_position(
     response_class=HTMLResponse,
     summary="Funding-arb reporting page (HTML)",
 )
-def arb_report_page(_auth: None = Depends(require_arb_secret)) -> HTMLResponse:
-    """Minimal reporting stub. The real dark-theme report (per-arb funding −
-    fees, per-leg breakdown, neutrality) lands in A.6."""
-    return HTMLResponse(
-        "<!doctype html><html><head><title>Funding Arb</title></head>"
-        "<body><h1>Funding Arbitrage</h1>"
-        "<p>Reporting page (full report lands in A.6).</p></body></html>"
-    )
+def arb_report_page(request: Request) -> HTMLResponse:
+    """Dark-theme funding-arb report: one row per ``ArbPosition`` with nested legs,
+    headline = funding harvested − fees, per-leg funding (spot 0) / spot+perp
+    unrealized / directional-net (≈0 health check) / neutrality skew.
+
+    **AUTH (deliberate, documented):** this is an HTML page reached by BROWSER
+    NAVIGATION, which cannot attach a custom ``X-Arb-Secret`` header (a fetch can,
+    a ``<a href>`` click can't). It is therefore gated EXACTLY like the existing
+    ``/performance`` page — currently OPEN (no auth dependency) — and NOT behind
+    ``require_arb_secret``. The JSON ``/funding-arb/{open,close,positions}`` API
+    routes that the signal app calls programmatically stay behind ``X-Arb-Secret``
+    as-is. (If ``/performance`` is later gated by ``WEBHOOK_SECRET``, gate this the
+    same way for parity — they share the same browser-nav threat model.)
+    """
+    with session_scope() as db:
+        report = _arb_performance(db)
+    resp = templates.TemplateResponse(
+        "funding_arb.html", {"request": request, "report": report})
+    # Live trading data — never serve a stale arb report from a browser/proxy cache.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
