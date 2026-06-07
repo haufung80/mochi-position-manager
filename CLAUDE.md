@@ -169,3 +169,100 @@ deploy.** The box checkout lives at `/home/ubuntu/mochi`.
 **Manual fallback** (on the box): `cd ~/mochi && git pull && docker compose -f docker-compose.prod.yml
 up -d --build`. (`fly.toml` is a vestige of the earlier Fly.io setup.) See README.md for full
 deploy/TradingView-alert setup.
+
+## Funding-arb execution layer (the `funding-arb` branch)
+
+A second, structurally-separate feature lives on this app: a **delta-neutral funding-arb EXECUTION
+layer**. A separate app (`mochi-carry-signal`) DECIDES and POSTs; THIS app executes both legs, tracks
+the pair as one unit, retries, and reports funding − fees. It is **fire-and-forget + status polling**;
+there is **no auto-unwind** — a stuck leg finalizes the arb to `error` with `neutral=false` and an
+urgent alert, and the signal app decides what to do (this app never auto-closes the surviving leg).
+The authoritative spec is `docs/funding-arb-plan.md` (kept current with the build).
+
+**API** (`app/routes/funding_arb.py`, schemas in `app/schemas_arb.py`): `POST /funding-arb/open
+{idempotency_key, asset, notional?, size_mode, strategy_tag?, legs?}`, `POST /funding-arb/close {arb_id}`,
+`GET /funding-arb/positions[/{arb_id}]` — all behind the `X-Arb-Secret` API-key header. **Auth precedence
+(`require_arb_secret`):** `funding_arb_secret == ""` → **503** (an unconfigured arb API must never imply
+it works, even with a header); header missing/wrong → **401**; else proceed. `GET /funding-arb` is an
+**HTML report** gated EXACTLY like `/performance` (browser-nav, currently OPEN, NOT behind
+`X-Arb-Secret`) — keep them in lockstep if `/performance` is ever gated.
+
+- **Default combo** (`legs` omitted) = **single-venue Hyperliquid cash-and-carry**: long HL spot +
+  short HL perp, dedicated HL `arb` account, **perp at 1×** (`_default_combo`). `size_mode`: `notional`
+  (size each leg from USD; `notional` required >0) | `min` (paper mode — each leg at the exchange
+  MINIMUM order size; `notional` ignored). `Asset` is `BTC|ETH|SOL`. Explicit `legs[]` must be exactly
+  one `buy` + one `sell` (delta-neutral); other combos (Bybit carry, cross-exchange perp-perp, mixed)
+  stay expressible.
+- **Open-time symbol exclusivity (409):** reject an open whose leg `(exchange, account, symbol)` is
+  already held by a non-closed arb — this is what makes account-wide funding attribution exact (HL
+  `get_funding` is account-wide). Idempotency is checked FIRST (a repeat key → `duplicate` even if it
+  would otherwise clash).
+
+### Load-bearing isolation invariant (don't break this)
+
+Arb lives in **four dedicated tables** (`app/models.py`, via `create_all`): `ArbPosition` / `ArbLeg` /
+`ArbOrder` / `ArbFundingEvent`. The directional reporting (`/performance`, `/orders`,
+`_execution_quality`, the `FundingEvent` sums, `_equity_curve`) and `reconcile` are **physically BLIND**
+to arb rows — `Order` / `Alert` / `Position` / `StrategyPosition` / `FundingEvent` and
+`app/db.py` (`_SQLITE_ADDITIVE_COLUMNS`) are **UNTOUCHED**. This is regression-proven in
+`tests/test_arb_isolation.py` (directional fees/funding/equity are byte-equal with vs without arb rows).
+`ArbLeg.filled_qty` is the **NET-received base** (the hedgeable quantity neutrality + close measure
+against).
+
+### Adapters / registry (`app/exchanges/`)
+
+- Account-keyed: `get_registry().get(name, account="default")` — cache key `(name, account)`;
+  `account="default"` keeps every existing directional call site byte-for-byte; `account="arb"` resolves
+  the dedicated, separately-credentialed sub-account. `_guard_hyperliquid_account` **RAISES at
+  construction** if the HL `arb` address == the directional HL address (HL `close_position` is
+  whole-coin and `get_funding` is account-wide, so a shared address would nuke/double-count the
+  directional book). `settings.account_credentials(name, account)` resolves the bucket and fails loudly
+  on an empty non-`default` bucket.
+- **REAL HL spot adapter** (not deferred): `spot_market_order` uses the SDK's `market_open` (an
+  aggressive **IOC limit** — HL has no separate market primitive); resolves the Unit pair via `spotMeta`
+  and the spot mid keyed by the canonical `@N` name. **Fee denomination drives `filled_qty`: HL spot fee
+  is quote-denominated (USDC) → `filled_qty` is GROSS base; Bybit spot fee is base-denominated → NET
+  base.** Both venues enforce a $10 min order on HL.
+
+### Executor & workers (the writer boundary)
+
+- `app/arb_executor.py`: fire the **THINNER leg first** (spot before perp), then **hedge the ACTUAL
+  fill** — re-derive leg-2's target from leg-1's net fill snapped to leg-2's grid; an un-hedgeable
+  fill → `error` + `neutral=false` (no silent residual, no naked hedge if leg-1 didn't fill). **ONE
+  `session_scope` per leg** (independent failure domains). It writes ONLY `ArbLeg`/`ArbOrder` — NEVER
+  `_LEDGER_LOCK` / `Position` / `StrategyPosition` / `Order` / `_apply_fill_to_position`. Close: perp →
+  whole-coin `close_position` (safe — dedicated account); spot → `spot_market_order` sell CLAMPED to the
+  live `get_spot_balance`. Reuses only `OrderResult` + `_next_retry_delay` from `executor.py`.
+- `app/retry_worker.py` has a **SEPARATE `ArbOrder` scan** (`_run_due_arb_retries`, own
+  `session_scope`/limit) → `arb_executor.execute_leg`, which re-resolves the adapter from the order's OWN
+  `(exchange, account)` (fail-loud, never the default account), takes no ledger lock.
+- `app/funding_worker.py` has a **SEPARATE arb poll** (`poll_arb_once`, same hourly loop, own
+  `session_scope`) over non-closed perp legs → `ArbFundingEvent` only (never `FundingEvent`).
+- `app/arb_pnl.py` is the **pure** PnL helper (`net = funding_total − commission_total (+ basis)`;
+  `directional_net = spot_unrealized + perp_unrealized` ≈ 0 is the neutrality health check). `app/notifier.py`
+  adds `arb_opened` / `arb_error` (urgent) / `arb_closed`.
+
+### Contract, tests, go-live
+
+- **Contract:** `docs/openapi-funding-arb.{json,yaml}` is the contract-grade OpenAPI. **Drift is gated by
+  a test** (`tests/test_openapi_contract.py` regenerates in a fresh process and asserts it reproduces the
+  committed JSON byte-for-byte) — so a schema change that isn't re-dumped fails the suite/CI. Regenerate
+  with `make openapi` (`scripts/dump_openapi.py`) and commit.
+- **Tests:** `tests/test_arb_*.py` (models, registry, executor, spot adapter, reporting, API, isolation)
+  + `test_openapi_contract.py`. Run as the existing suite — `.venv/bin/python -m pytest tests/ -q
+  --cov=app --cov-fail-under=75` (same ≥75% gate as the directional side; currently ~85%).
+- **Go-live env** (all optional so directional-only deploys still boot): `FUNDING_ARB_SECRET` (`""` →
+  arb API 503s), `BYBIT_ARB_API_KEY`/`BYBIT_ARB_API_SECRET` (a Bybit **sub-account**),
+  `HYPERLIQUID_ARB_PRIVATE_KEY`/`HYPERLIQUID_ARB_ACCOUNT_ADDRESS` (a **separate** HL account — distinct
+  address, own margin). Resolved by `settings.account_credentials(name, account)`.
+- **Locked decisions (intentional overrides of `docs/funding-arb-plan.md`):** HL spot is **first-class**
+  (the plan deferred it); **single-venue HL carry is the DEFAULT combo**; **`size_mode:"min"` is the
+  paper mode**.
+
+## This is a 3-app system
+
+`mochi-carry-backtester` (research / tuning the carry rule) → `mochi-carry-signal` (live decision +
+approve-to-fire) → **`mochi-position-manager`** (this repo: delta-neutral execution + reporting). The
+integration seam is the **OpenAPI funding-arb contract** (`docs/openapi-funding-arb.yaml`); the signal
+rule is shared by porting from the backtester into `mochi-carry-signal`. The signal app calls this app's
+`/funding-arb/*` API with `X-Arb-Secret`; its `idempotency_key` is this app's dedup key.
