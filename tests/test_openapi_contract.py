@@ -118,7 +118,8 @@ def test_arb_secret_scheme_present_and_applied(schema):
 
 def test_write_routes_document_error_responses(schema):
     open_resp = schema["paths"]["/funding-arb/open"]["post"]["responses"]
-    assert "401" in open_resp and "503" in open_resp
+    # 409 added for symbol-exclusivity (a leg already held by a non-closed arb).
+    assert {"401", "409", "503"} <= set(open_resp)
     close_resp = schema["paths"]["/funding-arb/close"]["post"]["responses"]
     assert {"401", "404", "409", "503"} <= set(close_resp)
 
@@ -239,7 +240,7 @@ def test_missing_or_bad_secret_returns_401(client_secret_set):
     ).status_code == 401
 
 
-def test_correct_secret_open_close_and_status(client_secret_set):
+def test_correct_secret_open_close_and_status(client_secret_set, arb_registry):
     h = {"X-Arb-Secret": "s3cret"}
     # default combo (legs omitted) -> accepted with the HL cash-and-carry pair
     r = client_secret_set.post(
@@ -284,7 +285,7 @@ def test_correct_secret_open_close_and_status(client_secret_set):
     assert page.status_code == 200 and "text/html" in page.headers["content-type"]
 
 
-def test_hl_spot_leg_accepted_over_http(client_secret_set):
+def test_hl_spot_leg_accepted_over_http(client_secret_set, arb_registry):
     """The API must NOT 422 a {hyperliquid, spot} leg (the key design change)."""
     r = client_secret_set.post(
         "/funding-arb/open", headers={"X-Arb-Secret": "s3cret"},

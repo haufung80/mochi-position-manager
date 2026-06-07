@@ -92,13 +92,14 @@
             "type": "string"
           },
           "status": {
-            "description": "pending | success | retrying | dead | error",
+            "description": "pending | success | retrying | dead | error | closed",
             "enum": [
               "pending",
               "success",
               "retrying",
               "dead",
-              "error"
+              "error",
+              "closed"
             ],
             "title": "Status",
             "type": "string"
@@ -1187,7 +1188,7 @@
     },
     "/funding-arb": {
       "get": {
-        "description": "STUB (Phase 0): placeholder reporting page. The real dark-theme report\nlands with the executor/funding phases.",
+        "description": "Minimal reporting stub. The real dark-theme report (per-arb funding \u2212\nfees, per-leg breakdown, neutrality) lands in A.6.",
         "operationId": "arb_report_page_funding_arb_get",
         "responses": {
           "200": {
@@ -1214,7 +1215,7 @@
     },
     "/funding-arb/close": {
       "post": {
-        "description": "STUB (Phase 0): returns ``closing`` for any positive id. The real handler\nwill 404 unknown ids and 409 already-closed arbs (documented in `responses`).",
+        "description": "Set ``status=closing`` and schedule ``_run_close``. **404** unknown id;\n**409** already closed (or closing).",
         "operationId": "close_arb_funding_arb_close_post",
         "requestBody": {
           "content": {
@@ -1273,7 +1274,7 @@
     },
     "/funding-arb/open": {
       "post": {
-        "description": "STUB (Phase 0): validates the request + auth, returns schema-valid canned\ndata. No legs are placed and nothing is persisted.",
+        "description": "Authorise \u2192 resolve combo (explicit ``legs`` or the default HL combo) \u2192\nreject (409) if any leg's ``(exchange, account, symbol)`` is already held by a\nnon-closed arb \u2192 size the pair \u2192 persist ``ArbPosition`` + ``ArbLeg``s in ONE\nshort txn (dedup via ``IntegrityError`` on ``idempotency_key`` \u2192 ``duplicate``)\n\u2192 return ``accepted`` + sized legs \u2192 schedule ``_run_open``.",
         "operationId": "open_arb_funding_arb_open_post",
         "requestBody": {
           "content": {
@@ -1298,6 +1299,9 @@
           },
           "401": {
             "description": "Missing or incorrect X-Arb-Secret."
+          },
+          "409": {
+            "description": "A leg symbol is already held by a non-closed arb."
           },
           "422": {
             "content": {
@@ -1326,7 +1330,6 @@
     },
     "/funding-arb/positions": {
       "get": {
-        "description": "STUB (Phase 0): returns an empty list (no DB yet).",
         "operationId": "list_positions_funding_arb_positions_get",
         "responses": {
           "200": {
@@ -1363,7 +1366,6 @@
     },
     "/funding-arb/positions/{arb_id}": {
       "get": {
-        "description": "STUB (Phase 0): returns a canned open position so the schema is exercised.",
         "operationId": "get_position_funding_arb_positions__arb_id__get",
         "parameters": [
           {

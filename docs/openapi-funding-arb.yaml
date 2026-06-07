@@ -68,13 +68,14 @@ components:
           title: Side
           type: string
         status:
-          description: pending | success | retrying | dead | error
+          description: pending | success | retrying | dead | error | closed
           enum:
           - pending
           - success
           - retrying
           - dead
           - error
+          - closed
           title: Status
           type: string
         symbol:
@@ -454,10 +455,10 @@ openapi: 3.1.0
 paths:
   /funding-arb:
     get:
-      description: 'STUB (Phase 0): placeholder reporting page. The real dark-theme
-        report
+      description: 'Minimal reporting stub. The real dark-theme report (per-arb funding
+        −
 
-        lands with the executor/funding phases.'
+        fees, per-leg breakdown, neutrality) lands in A.6.'
       operationId: arb_report_page_funding_arb_get
       responses:
         '200':
@@ -473,10 +474,10 @@ paths:
       - funding-arb
   /funding-arb/close:
     post:
-      description: 'STUB (Phase 0): returns ``closing`` for any positive id. The real
-        handler
+      description: 'Set ``status=closing`` and schedule ``_run_close``. **404** unknown
+        id;
 
-        will 404 unknown ids and 409 already-closed arbs (documented in `responses`).'
+        **409** already closed (or closing).'
       operationId: close_arb_funding_arb_close_post
       requestBody:
         content:
@@ -512,10 +513,18 @@ paths:
       - funding-arb
   /funding-arb/open:
     post:
-      description: 'STUB (Phase 0): validates the request + auth, returns schema-valid
-        canned
+      description: 'Authorise → resolve combo (explicit ``legs`` or the default HL
+        combo) →
 
-        data. No legs are placed and nothing is persisted.'
+        reject (409) if any leg''s ``(exchange, account, symbol)`` is already held
+        by a
+
+        non-closed arb → size the pair → persist ``ArbPosition`` + ``ArbLeg``s in
+        ONE
+
+        short txn (dedup via ``IntegrityError`` on ``idempotency_key`` → ``duplicate``)
+
+        → return ``accepted`` + sized legs → schedule ``_run_open``.'
       operationId: open_arb_funding_arb_open_post
       requestBody:
         content:
@@ -532,6 +541,8 @@ paths:
           description: Successful Response
         '401':
           description: Missing or incorrect X-Arb-Secret.
+        '409':
+          description: A leg symbol is already held by a non-closed arb.
         '422':
           content:
             application/json:
@@ -547,7 +558,6 @@ paths:
       - funding-arb
   /funding-arb/positions:
     get:
-      description: 'STUB (Phase 0): returns an empty list (no DB yet).'
       operationId: list_positions_funding_arb_positions_get
       responses:
         '200':
@@ -570,8 +580,6 @@ paths:
       - funding-arb
   /funding-arb/positions/{arb_id}:
     get:
-      description: 'STUB (Phase 0): returns a canned open position so the schema is
-        exercised.'
       operationId: get_position_funding_arb_positions__arb_id__get
       parameters:
       - in: path
