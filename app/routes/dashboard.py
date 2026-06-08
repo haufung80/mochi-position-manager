@@ -1,6 +1,7 @@
 from __future__ import annotations
+import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -418,59 +419,149 @@ def _equity_curve(db, end_total=None) -> list[tuple]:
     is anchored to `end_total` (the live headline) so the endpoint always matches the
     page between hourly snapshots. Forward-looking: the curve builds from the first
     snapshot after deploy — earlier history isn't reconstructed."""
-    points: list[tuple] = []
-    for s in db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at).all():
-        ts = s.captured_at
-        if ts is not None and ts.tzinfo is None:   # SQLite returns naive — normalize to UTC
-            ts = ts.replace(tzinfo=timezone.utc)
-        points.append((ts, float(s.total_pnl)))
-    # Tip the line to the live headline — but only when there's already a curve to
-    # tip. No snapshots yet → empty (the page shows "builds within the hour"), never
-    # a lone spike. Anchor at 'now', never before the last snapshot (clock skew).
-    if end_total is not None and points:
-        anchor = max(datetime.now(timezone.utc), points[-1][0])
-        points.append((anchor, float(end_total)))
-    return points
+    # Total-only, all-time — delegates to _equity_series (the multi-series/windowed
+    # builder the page uses) so there's one source of truth for the curve.
+    return _equity_series(db, None, live_total=end_total).get("Total", [])
 
 
-def _equity_svg(points, width: int = 920, height: int = 200, pad: int = 10):
-    """Map equity points to an inline-SVG polyline (+ zero baseline). None when
-    there's nothing to plot."""
-    if not points:
+_EQUITY_WINDOWS = [
+    ("24h", timedelta(hours=24)), ("7D", timedelta(days=7)),
+    ("30D", timedelta(days=30)), ("90D", timedelta(days=90)),
+    ("180D", timedelta(days=180)), ("365D", timedelta(days=365)),
+    ("All", None),
+]
+_EQUITY_WINDOW_MAP = dict(_EQUITY_WINDOWS)
+_EQUITY_DEFAULT_WINDOW = "All"
+# bybit brand-orange / hyperliquid teal; any other venue cycles a fallback palette.
+_SERIES_COLORS = {"bybit": "#f7a600", "hyperliquid": "#26a69a"}
+_SERIES_PALETTE = ["#a78bfa", "#60a5fa", "#fbbf24", "#f472b6", "#34d399"]
+
+
+def _resolve_window(name: str):
+    """(validated_name, timedelta|None). Unknown name -> the default window."""
+    if name in _EQUITY_WINDOW_MAP:
+        return name, _EQUITY_WINDOW_MAP[name]
+    return _EQUITY_DEFAULT_WINDOW, _EQUITY_WINDOW_MAP[_EQUITY_DEFAULT_WINDOW]
+
+
+def _epoch_ts(dt):
+    if dt is None:
         return None
-    ys = [p[1] for p in points]
-    lo, hi = min(ys + [0.0]), max(ys + [0.0])
-    span = (hi - lo) or 1.0
-    n = len(points)
+    if getattr(dt, "tzinfo", None) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
-    # Position points by real elapsed time so dense clusters (hourly funding) don't
-    # crowd out sparse order events; fall back to even spacing if times are missing
-    # or all identical.
-    def _epoch(dt):
-        if dt is None:
-            return None
-        if getattr(dt, "tzinfo", None) is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    ts = [_epoch(p[0]) for p in points]
-    valid = [t for t in ts if t is not None]
+
+def _downsample(pts: list, cap: int = 600) -> list:
+    """Even-sample a long series down to <= cap points (keeps first + last)."""
+    if len(pts) <= cap:
+        return pts
+    step = len(pts) / cap
+    out = [pts[int(i * step)] for i in range(cap)]
+    if out[-1] != pts[-1]:
+        out.append(pts[-1])
+    return out
+
+
+def _equity_series(db, window_delta, live_total=None, live_by_ex=None) -> dict:
+    """Per-exchange + aggregate ('Total') PnL series from EquitySnapshot rows inside
+    the window. Each series is tipped with the live headline value so the right edge
+    always matches the page. Returns {name: [(ts, value)]}; empty when no snapshots."""
+    q = db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at)
+    if window_delta is not None:
+        q = q.filter(EquitySnapshot.captured_at >= datetime.now(timezone.utc) - window_delta)
+    total_pts: list = []
+    ex_pts: dict[str, list] = {}
+    for s in q.all():
+        ts = s.captured_at
+        if ts is not None and ts.tzinfo is None:        # SQLite returns naive
+            ts = ts.replace(tzinfo=timezone.utc)
+        total_pts.append((ts, float(s.total_pnl)))
+        try:
+            by = json.loads(s.by_exchange or "{}")
+        except (ValueError, TypeError):
+            by = {}
+        for ex, val in by.items():
+            ex_pts.setdefault(ex, []).append((ts, float(val)))
+    if not total_pts:
+        return {}
+    series = {"Total": total_pts, **ex_pts}
+    if live_total is not None:                          # tip every series to the live edge
+        anchor = max(datetime.now(timezone.utc), total_pts[-1][0])
+        series["Total"] = total_pts + [(anchor, float(live_total))]
+        for ex in ex_pts:
+            tip = (live_by_ex or {}).get(ex)
+            if tip is not None:
+                series[ex] = ex_pts[ex] + [(anchor, float(tip))]
+    return {k: _downsample(v) for k, v in series.items()}
+
+
+def _equity_metrics(total_series: list):
+    """Essential equity metrics over the Total series: current, period P&L (window
+    Δ), peak (high-water mark), trough, and max drawdown (largest peak-to-trough,
+    plus % of peak). PnL is USD from 0 — no capital base is tracked, so no return-%."""
+    if not total_series:
+        return None
+    vals = [v for _, v in total_series]
+    cur, start = vals[-1], vals[0]
+    peak, trough = max(vals), min(vals)
+    run, max_dd = vals[0], 0.0
+    for v in vals:
+        run = max(run, v)
+        max_dd = max(max_dd, run - v)
+    return {
+        "current": cur, "period": cur - start, "start": start,
+        "peak": peak, "trough": trough, "max_drawdown": max_dd,
+        "max_drawdown_pct": (max_dd / peak * 100) if peak > 0 else None,
+        "dd_from_peak": peak - cur, "points": len(vals),
+    }
+
+
+def _equity_svg(series, width: int = 920, height: int = 200, pad: int = 10):
+    """Multi-series equity SVG: one polyline per series ({name: [(ts, v)]}) on a
+    shared scale + a zero baseline. Accepts a bare point list (treated as the Total
+    line). None when there's nothing to plot. The aggregate 'Total' is drawn last
+    (on top) and thicker; venue lines are dimmer."""
+    if isinstance(series, list):
+        series = {"Total": series} if series else {}
+    series = {k: v for k, v in series.items() if v}
+    if not series:
+        return None
+    all_vals = [v for pts in series.values() for _, v in pts] + [0.0]
+    lo, hi = min(all_vals), max(all_vals)
+    span = (hi - lo) or 1.0
+    all_ts = [_epoch_ts(ts) for pts in series.values() for ts, _ in pts]
+    valid = [t for t in all_ts if t is not None]
     t0 = min(valid) if valid else 0.0
     tspan = (max(valid) - t0) if valid else 0.0
 
-    def fx(i: int) -> float:
-        if tspan and ts[i] is not None:
-            return pad + (width - 2 * pad) * ((ts[i] - t0) / tspan)
-        return pad + (width - 2 * pad) * (i / (n - 1) if n > 1 else 0.0)
-
-    def fy(v: float) -> float:
+    def fy(v):
         return pad + (height - 2 * pad) * (1 - (v - lo) / span)
 
-    poly = " ".join(f"{fx(i):.1f},{fy(v):.1f}" for i, v in enumerate(ys))
-    return {"polyline": poly, "zero_y": round(fy(0.0), 1), "width": width,
-            "height": height, "last": ys[-1], "hi": hi, "lo": lo,
-            "color": "#4ade80" if ys[-1] >= 0 else "#f87171",
-            "start_label": _fmt_when(points[0][0], "%m-%d %H:%M"),
-            "end_label": _fmt_when(points[-1][0], "%m-%d %H:%M")}
+    def fx(t, i, n):
+        if tspan and t is not None:
+            return pad + (width - 2 * pad) * ((t - t0) / tspan)
+        return pad + (width - 2 * pad) * (i / (n - 1) if n > 1 else 0.0)
+
+    order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])
+    palette = iter(_SERIES_PALETTE)
+    lines = []
+    for name in order:
+        pts = series[name]
+        n = len(pts)
+        poly = " ".join(f"{fx(_epoch_ts(ts), i, n):.1f},{fy(v):.1f}"
+                        for i, (ts, v) in enumerate(pts))
+        if name == "Total":
+            color = "#4ade80" if pts[-1][1] >= 0 else "#f87171"
+        else:
+            color = _SERIES_COLORS.get(name) or next(palette, "#9ca3af")
+        lines.append({"name": name, "polyline": poly, "color": color,
+                      "last": pts[-1][1], "is_total": name == "Total"})
+    span_key = "Total" if "Total" in series else order[0]
+    return {"lines": lines, "zero_y": round(fy(0.0), 1), "width": width,
+            "height": height, "lo": lo, "hi": hi,
+            "start_label": _fmt_when(series[span_key][0][0], "%m-%d %H:%M"),
+            "end_label": _fmt_when(series[span_key][-1][0], "%m-%d %H:%M")}
 
 
 def _recent_orders(db, limit: int = 50) -> list[dict]:
@@ -489,13 +580,19 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
 
 
 @router.get("/performance", response_class=HTMLResponse)
-def performance(request: Request):
+def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WINDOW)):
+    wsel, wdelta = _resolve_window(equity_window)
     with session_scope() as db:
         perf = _performance(db, request.app.state.strategy_router)
-        equity = _equity_svg(_equity_curve(db, perf["totals"]["total"]))
+        live_by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
+        series = _equity_series(db, wdelta, perf["totals"]["total"], live_by_ex)
+        equity = _equity_svg(series)
+        metrics = _equity_metrics(series.get("Total", []))
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
-        "request": request, "perf": perf, "equity": equity, "orders": orders,
+        "request": request, "perf": perf, "equity": equity, "metrics": metrics,
+        "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
+        "equity_window": wsel,
     })
     resp.headers["Cache-Control"] = _NO_STORE
     return resp

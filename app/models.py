@@ -283,3 +283,7 @@ class EquitySnapshot(Base):
     unrealized: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Per-exchange total PnL at capture time as a JSON object {exchange: total},
+    # so the curve can draw one line per venue plus the aggregate. JSON keeps it
+    # flexible as venues come and go without a schema change.
+    by_exchange: Mapped[str] = mapped_column(Text, default="{}", nullable=False)

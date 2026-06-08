@@ -1,5 +1,6 @@
 """/performance page: rendering + PnL/fee/equity computation."""
 from __future__ import annotations
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -46,10 +47,12 @@ def _seed_round_trip():
         db.add(FundingEvent(exchange="bybit", symbol="BTCUSDT",
                             funding_time=datetime(2026, 6, 1, tzinfo=timezone.utc),
                             amount=-0.05))
-        # One captured equity point so the curve (now snapshot-driven) has a line.
+        # One captured equity point so the curve (now snapshot-driven) has a line,
+        # with a per-exchange breakdown so the multi-line path renders.
         db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, 1, tzinfo=timezone.utc),
                               total_pnl=19.73, realized=20.0, unrealized=0.0,
-                              funding=-0.05, commission=0.22))
+                              funding=-0.05, commission=0.22,
+                              by_exchange=json.dumps({"bybit": 19.73})))
 
 
 def test_performance_empty_state_renders(client):
@@ -66,7 +69,9 @@ def test_performance_renders_with_data(client):
     r = client.get("/performance")
     assert r.status_code == 200
     assert "S1" in r.text                       # per-strategy + per-exchange rows
-    assert "<polyline" in r.text                # equity curve drawn
+    assert r.text.count("<polyline") >= 2       # multi-line: aggregate Total + per-exchange
+    assert "Max drawdown" in r.text             # equity metrics row
+    assert "equity_window=" in r.text and "365D" in r.text   # window selector
     assert "Recent orders" in r.text
     assert "bybit/BTCUSDT" in r.text            # order row venue
 
@@ -287,7 +292,7 @@ def test_equity_curve_plots_snapshots(client):
         points = _equity_curve(db)
         svg = _equity_svg(points)
     assert [round(v, 2) for _, v in points] == [10.0, 25.0, 40.0]   # rises with the snapshots
-    assert svg is not None and svg["polyline"]
+    assert svg is not None and svg["lines"][0]["polyline"]
 
 
 def test_equity_curve_anchors_tip_to_total(client):

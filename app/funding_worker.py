@@ -8,6 +8,7 @@ thread so the event loop stays free.
 """
 from __future__ import annotations
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -144,10 +145,13 @@ def write_equity_snapshot(router) -> bool:
     from .routes.dashboard import _performance   # local import avoids an import cycle
     try:
         with session_scope() as db:
-            t = _performance(db, router)["totals"]
+            perf = _performance(db, router)
+            t = perf["totals"]
+            by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
             db.add(EquitySnapshot(
                 total_pnl=t["total"], realized=t["realized"], unrealized=t["unrealized"],
-                funding=t["funding"], commission=t["commission"]))
+                funding=t["funding"], commission=t["commission"],
+                by_exchange=json.dumps(by_ex)))
         return True
     except Exception:
         log.exception("equity snapshot failed")
