@@ -181,55 +181,65 @@ def _maybe_backfill_equity() -> None:
         log.exception("startup equity backfill failed")
 
 
+async def _startup_capture(router, delay: float, stop_event) -> None:
+    """One-time, shortly after boot (not AT boot — keeps startup network-free):
+    backfill the equity curve from exchange history + write the first live snapshot,
+    so the curve appears within minutes of a (re)deploy. Runs as its OWN task so it
+    never delays the funding polls."""
+    try:
+        await asyncio.sleep(delay)
+        if stop_event is not None and stop_event.is_set():
+            return
+        await asyncio.to_thread(_maybe_backfill_equity)            # import exchange history first
+        if await asyncio.to_thread(write_equity_snapshot, router):
+            log.info("funding_worker: wrote initial equity snapshot")
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        log.exception("funding_worker startup capture error")
+
+
 async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                        stop_event: asyncio.Event | None = None) -> None:
     """Periodically record funding events. Blocking SDK work runs in a thread."""
     log.info("funding_worker started (poll=%.0fs, first scan after one interval)",
              poll_interval_sec)
-    # Capture an initial equity point shortly after startup (NOT at boot — keep boot
-    # network-free) so the curve appears within ~minutes of a (re)deploy instead of
-    # after a full hour, and so a frequent deploy cadence doesn't starve it.
+    # Startup backfill + first snapshot run as a SEPARATE task so they never gate the
+    # funding polls (and the loop's first poll stays on schedule).
+    cap_task = asyncio.create_task(
+        _startup_capture(router, min(90.0, poll_interval_sec), stop_event))
     try:
-        await asyncio.sleep(min(90.0, poll_interval_sec))
-        if not (stop_event is not None and stop_event.is_set()):
-            await asyncio.to_thread(_maybe_backfill_equity)        # import exchange history first
-            if await asyncio.to_thread(write_equity_snapshot, router):
-                log.info("funding_worker: wrote initial equity snapshot")
-    except asyncio.CancelledError:
-        log.info("funding_worker cancelled")
-        return
-    while True:
-        # Sleep FIRST: funding accrues slowly, and this keeps app startup
-        # network-free (no exchange round-trips on boot / during tests).
-        try:
-            await asyncio.sleep(poll_interval_sec)
-        except asyncio.CancelledError:
-            log.info("funding_worker cancelled")
-            return
-        if stop_event is not None and stop_event.is_set():
-            log.info("funding_worker stopping (stop_event set)")
-            return
-        try:
-            n = await asyncio.to_thread(poll_once, router)
-            if n:
-                log.info("funding_worker: stored %d new funding events", n)
-        except Exception:
-            log.exception("funding_worker loop error")
-        # Dedicated ARB poll — runs in the SAME hourly loop, AFTER the directional
-        # poll, in its OWN session_scope (poll_arb_once). It writes the separate
-        # ArbFundingEvent table only, so the directional funding/equity stay blind
-        # to it; its failure can't abort the directional poll above.
-        try:
-            n = await asyncio.to_thread(poll_arb_once)
-            if n:
-                log.info("funding_worker: stored %d new ARB funding events", n)
-        except Exception:
-            log.exception("funding_worker arb loop error")
-        # Capture one true total-PnL point for the equity curve (AFTER funding is
-        # recorded, so the snapshot includes the freshest funding). Own try/except
-        # so a snapshot failure can't abort the funding polls above.
-        try:
-            if await asyncio.to_thread(write_equity_snapshot, router):
-                log.info("funding_worker: wrote equity snapshot")
-        except Exception:
-            log.exception("funding_worker equity snapshot error")
+        while True:
+            # Sleep FIRST: funding accrues slowly, and this keeps app startup
+            # network-free (no exchange round-trips on boot / during tests).
+            try:
+                await asyncio.sleep(poll_interval_sec)
+            except asyncio.CancelledError:
+                log.info("funding_worker cancelled")
+                return
+            if stop_event is not None and stop_event.is_set():
+                log.info("funding_worker stopping (stop_event set)")
+                return
+            try:
+                n = await asyncio.to_thread(poll_once, router)
+                if n:
+                    log.info("funding_worker: stored %d new funding events", n)
+            except Exception:
+                log.exception("funding_worker loop error")
+            # Dedicated ARB poll — same loop, AFTER the directional poll, own
+            # session_scope; writes only ArbFundingEvent (directional stays blind),
+            # and its failure can't abort the directional poll above.
+            try:
+                n = await asyncio.to_thread(poll_arb_once)
+                if n:
+                    log.info("funding_worker: stored %d new ARB funding events", n)
+            except Exception:
+                log.exception("funding_worker arb loop error")
+            # One true total-PnL point for the equity curve (AFTER funding is recorded).
+            try:
+                if await asyncio.to_thread(write_equity_snapshot, router):
+                    log.info("funding_worker: wrote equity snapshot")
+            except Exception:
+                log.exception("funding_worker equity snapshot error")
+    finally:
+        cap_task.cancel()
