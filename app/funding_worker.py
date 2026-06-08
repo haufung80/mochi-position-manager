@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from .config import get_settings
 from .db import session_scope
 from .exchanges.registry import get_registry
 from .models import ArbFundingEvent, ArbLeg, ArbPosition, EquitySnapshot, FundingEvent
@@ -158,6 +159,28 @@ def write_equity_snapshot(router) -> bool:
         return False
 
 
+def _maybe_backfill_equity() -> None:
+    """ONE-TIME historical equity backfill from each exchange's OWN records — runs
+    once (skips as soon as backfill rows exist), in the background after startup, so
+    the curve shows history with no manual trigger. EQUITY_BACKFILL_START sets the
+    start date (blank = skip). A failed run writes nothing, so the next boot retries
+    until it succeeds, then it never runs again."""
+    start = (get_settings().equity_backfill_start or "").strip()
+    if not start:
+        return
+    with session_scope() as db:
+        if db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").first():
+            return                                  # already backfilled -> one-time
+    try:
+        from .equity_backfill import backfill_equity
+        sdt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        s = backfill_equity(int(sdt.timestamp() * 1000))
+        log.info("equity backfill (startup, one-time) from %s: %d rows (bybit %d, hl %d) errors=%s",
+                 start, s["rows"], s["bybit_events"], s["hl_points"], s["errors"])
+    except Exception:
+        log.exception("startup equity backfill failed")
+
+
 async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                        stop_event: asyncio.Event | None = None) -> None:
     """Periodically record funding events. Blocking SDK work runs in a thread."""
@@ -169,6 +192,7 @@ async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
     try:
         await asyncio.sleep(min(90.0, poll_interval_sec))
         if not (stop_event is not None and stop_event.is_set()):
+            await asyncio.to_thread(_maybe_backfill_equity)        # import exchange history first
             if await asyncio.to_thread(write_equity_snapshot, router):
                 log.info("funding_worker: wrote initial equity snapshot")
     except asyncio.CancelledError:

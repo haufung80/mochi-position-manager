@@ -298,6 +298,63 @@ class BybitExchange:
                 out.append({"time_ms": ts, "amount": amt})
         return out
 
+    def get_closed_pnl(self, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
+        """Realized PnL of every closed position in [start,end] (all symbols) as
+        (time_ms, closedPnl). Paginated in <=7-day windows (Bybit's max range).
+        Best-effort — returns what it can. For the equity backfill."""
+        out: list[tuple[int, float]] = []
+        win = 7 * 24 * 3600 * 1000
+        ws = start_ms
+        while ws < end_ms:
+            we = min(ws + win - 1, end_ms)
+            cursor = ""
+            for _ in range(50):                      # pagination safety cap
+                try:
+                    resp = self._client.get_closed_pnl(
+                        category=CATEGORY, startTime=ws, endTime=we, limit=100, cursor=cursor)
+                except Exception as e:
+                    log.warning("Bybit get_closed_pnl %s-%s failed: %s", ws, we, e)
+                    break
+                result = resp.get("result") or {}
+                for r in result.get("list") or []:
+                    ts = int(r.get("updatedTime") or r.get("createdTime") or 0)
+                    if ts:
+                        out.append((ts, float(r.get("closedPnl") or 0.0)))
+                cursor = result.get("nextPageCursor") or ""
+                if not cursor:
+                    break
+            ws = we + 1
+        return out
+
+    def get_account_funding(self, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
+        """All-symbol funding settlements in [start,end] as (time_ms, amount) (signed;
+        negative = paid). Paginated in <=7-day windows. Best-effort."""
+        out: list[tuple[int, float]] = []
+        win = 7 * 24 * 3600 * 1000
+        ws = start_ms
+        while ws < end_ms:
+            we = min(ws + win - 1, end_ms)
+            cursor = ""
+            for _ in range(50):
+                try:
+                    resp = self._client.get_transaction_log(
+                        category=CATEGORY, type="SETTLEMENT",
+                        startTime=ws, endTime=we, limit=200, cursor=cursor)
+                except Exception as e:
+                    log.warning("Bybit get_account_funding %s-%s failed: %s", ws, we, e)
+                    break
+                result = resp.get("result") or {}
+                for r in result.get("list") or []:
+                    ts = int(r.get("transactionTime") or 0)
+                    amt = float(r.get("funding") or r.get("change") or 0.0)
+                    if ts and amt:
+                        out.append((ts, amt))
+                cursor = result.get("nextPageCursor") or ""
+                if not cursor:
+                    break
+            ws = we + 1
+        return out
+
     def get_min_notional(self, symbol: str) -> float:
         """Bybit minimum order value (USDT), from lotSizeFilter. Falls back to $5."""
         try:

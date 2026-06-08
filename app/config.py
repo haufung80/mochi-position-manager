@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # (estimated) Sharpe. 0 = unset -> $-only metrics (no %, no Sharpe).
     equity_capital_base: float = 0.0
 
+    # Backfill the equity curve from each exchange's own history starting this date
+    # (YYYY-MM-DD), once on startup. Blank = no backfill. Idempotent.
+    equity_backfill_start: str = "2026-05-28"
+
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

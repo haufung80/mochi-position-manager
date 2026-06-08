@@ -310,6 +310,36 @@ class HyperliquidExchange:
         """Hyperliquid enforces a global $10 minimum order value."""
         return 10.0
 
+    def get_pnl_history(self) -> list[tuple[int, float]]:
+        """Account cumulative PnL over time from HL's `portfolio` endpoint, as
+        (time_ms, cumulative_pnl_usd). Prefers the longest/perp window. HL's PnL
+        history reflects account-value change (incl. unrealized). Best-effort — for
+        the equity backfill; returns [] on any shape/transport failure."""
+        if not self._account_address:
+            return []
+        try:
+            data = self._info.post("/info", {"type": "portfolio", "user": self._account_address})
+        except Exception as e:
+            log.warning("HL get_pnl_history failed: %s", e)
+            return []
+        periods: dict = {}
+        try:
+            for name, payload in data:                 # [[period, {...}], ...]
+                periods[name] = payload
+        except (TypeError, ValueError):
+            return []
+        for key in ("perpAllTime", "allTime", "perpMonth", "month"):
+            hist = (periods.get(key) or {}).get("pnlHistory") or []
+            out: list[tuple[int, float]] = []
+            for pt in hist:
+                try:
+                    out.append((int(pt[0]), float(pt[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            if out:
+                return out
+        return []
+
     # ---------- spot (REAL, first-class — Unit spot) ----------
 
     def _spot_base_token(self, symbol: str) -> str:
