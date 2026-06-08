@@ -163,6 +163,17 @@ async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
     """Periodically record funding events. Blocking SDK work runs in a thread."""
     log.info("funding_worker started (poll=%.0fs, first scan after one interval)",
              poll_interval_sec)
+    # Capture an initial equity point shortly after startup (NOT at boot — keep boot
+    # network-free) so the curve appears within ~minutes of a (re)deploy instead of
+    # after a full hour, and so a frequent deploy cadence doesn't starve it.
+    try:
+        await asyncio.sleep(min(90.0, poll_interval_sec))
+        if not (stop_event is not None and stop_event.is_set()):
+            if await asyncio.to_thread(write_equity_snapshot, router):
+                log.info("funding_worker: wrote initial equity snapshot")
+    except asyncio.CancelledError:
+        log.info("funding_worker cancelled")
+        return
     while True:
         # Sleep FIRST: funding accrues slowly, and this keeps app startup
         # network-free (no exchange round-trips on boot / during tests).
