@@ -1,6 +1,6 @@
 """/performance page: rendering + PnL/fee/equity computation."""
 from __future__ import annotations
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.main import app
-from app.models import Alert, FundingEvent, Order
+from app.models import Alert, EquitySnapshot, FundingEvent, Order
 from app.routes.dashboard import _equity_curve, _equity_svg, _performance
 from app.routing import StrategyRouter
 
@@ -46,6 +46,10 @@ def _seed_round_trip():
         db.add(FundingEvent(exchange="bybit", symbol="BTCUSDT",
                             funding_time=datetime(2026, 6, 1, tzinfo=timezone.utc),
                             amount=-0.05))
+        # One captured equity point so the curve (now snapshot-driven) has a line.
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, 1, tzinfo=timezone.utc),
+                              total_pnl=19.73, realized=20.0, unrealized=0.0,
+                              funding=-0.05, commission=0.22))
 
 
 def test_performance_empty_state_renders(client):
@@ -53,7 +57,7 @@ def test_performance_empty_state_renders(client):
     assert r.status_code == 200
     assert "no-store" in r.headers.get("cache-control", "")
     assert "Live Performance" in r.text
-    assert "No PnL history yet" in r.text
+    assert "No snapshots yet" in r.text
     assert "viewport-fit=cover" in r.text          # mobile/Safari responsive
 
 
@@ -271,13 +275,18 @@ def test_backfill_never_touches_realized(tmp_path, stub_exchange):
         assert sp.avg_entry_price == pytest.approx(100.0)  # entry IS rebuilt (net matches)
 
 
-def test_equity_curve_starts_from_zero_and_accumulates(client):
-    _seed_round_trip()
+def test_equity_curve_plots_snapshots(client):
+    """The curve plots periodic EquitySnapshot rows (the true total PnL captured over
+    time), so a real booked gain rises — not the old flat fill-replay band."""
+    t0 = datetime(2026, 6, 7, tzinfo=timezone.utc)
+    with session_scope() as db:
+        for i, v in enumerate((10.0, 25.0, 40.0)):
+            db.add(EquitySnapshot(captured_at=t0 + timedelta(hours=i), total_pnl=v,
+                                  realized=v, unrealized=0.0, funding=0.0, commission=0.0))
     with session_scope() as db:
         points = _equity_curve(db)
         svg = _equity_svg(points)
-    # buy(-0.10 comm), sell(+20 realized -0.12 comm), funding(-0.05) -> 19.73
-    assert points[-1][1] == pytest.approx(19.73)
+    assert [round(v, 2) for _, v in points] == [10.0, 25.0, 40.0]   # rises with the snapshots
     assert svg is not None and svg["polyline"]
 
 

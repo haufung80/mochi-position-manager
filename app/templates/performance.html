@@ -75,7 +75,7 @@
   </div>
 
   <!-- ===== equity curve ===== -->
-  <h2>Equity curve (USDT, from 0)</h2>
+  <h2>Equity curve (USDT, total PnL)</h2>
   <div class="card">
     {% if equity %}
     <svg viewBox="0 0 {{ equity.width }} {{ equity.height }}" width="100%" height="{{ equity.height }}"
@@ -87,11 +87,12 @@
     </svg>
     <div class="muted">{{ equity.start_label }} → {{ equity.end_label }} ·
       last {{ money(equity.last) }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }}</div>
-    <div class="muted">Realized + funding − commission over time; the final point marks open positions
-      to market — the <i>notional</i> total PnL (per-strategy sum; realizable figure is in Exchange
-      positions). Fills before price capture can't be replayed, so early realized PnL reads flat.</div>
+    <div class="muted">True total PnL (realized + unrealized + funding − commission) captured hourly;
+      the final point is anchored to the live headline. Builds forward from deploy — earlier history
+      isn't reconstructed (per-fill PnL wasn't recorded), so it starts when the first snapshot lands.</div>
     {% else %}
-    <p class="muted">No PnL history yet — the curve starts at 0 once orders fill.</p>
+    <p class="muted">No snapshots yet — the curve starts building within the hour (the headline already
+      shows your current Total PnL).</p>
     {% endif %}
   </div>
 

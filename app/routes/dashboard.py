@@ -13,8 +13,7 @@ from .. import network
 from ..config import get_settings
 from ..db import session_scope
 from ..exchanges.registry import get_registry
-from ..executor import _fill_math
-from ..models import Alert, FundingEvent, Order, Position, StrategyPosition
+from ..models import Alert, EquitySnapshot, FundingEvent, Order, Position, StrategyPosition
 from ..reconcile import single_owner_map
 
 log = logging.getLogger(__name__)
@@ -411,46 +410,26 @@ def _performance(db, router) -> dict:
 
 
 def _equity_curve(db, end_total=None) -> list[tuple]:
-    """Cumulative PnL (USDT) from 0 in time order: per-fill realized deltas
-    (replayed via the shared fill math) minus commissions, plus funding events.
-
-    When `end_total` is given, a final point at 'now' is anchored to it — the true
-    current total PnL (realized + unrealized + funding − commission). This matters
-    because many historical fills predate fill-price capture (fill_price=0): their
-    realized PnL can't be replayed here, so the line itself is an approximate /
-    flat-ish band, but the endpoint is pinned to the real total."""
-    events: list[tuple] = []
-    state: dict[tuple, tuple] = {}    # (sid, exchange, symbol) -> (net, avg)
-    for o, sid in (db.query(Order, Alert.strategy_id)
-                     .join(Alert, Order.alert_id == Alert.id)
-                     .filter(Order.status == "success")
-                     .order_by(Order.created_at).all()):
-        delta = -(o.commission or 0.0)
-        price = o.fill_price or 0.0
-        if price > 0 and o.qty_base:
-            key = (sid, o.exchange, o.symbol)
-            net, avg = state.get(key, (0.0, 0.0))
-            signed = o.qty_base * (1.0 if o.side == "buy" else -1.0)
-            net, avg, realized_delta = _fill_math(net, avg, signed, o.qty_base, price)
-            state[key] = (net, avg)
-            delta += realized_delta
-        events.append((o.created_at, delta))
-    for fe in db.query(FundingEvent).all():
-        events.append((fe.funding_time, fe.amount or 0.0))
-
-    events.sort(key=lambda e: e[0] or datetime.min)
-    points, cum = [], 0.0
-    for ts, d in events:
-        cum += d
-        points.append((ts, cum))
+    """Equity curve from periodic `EquitySnapshot` rows — each one is the TRUE total
+    PnL (realized + unrealized + funding − commission) captured at that time by the
+    funding worker, so the line needs no fill-replay reconstruction. (The old replay
+    couldn't price fills that predate fill-price capture, so realized never accrued
+    and the line read flat with only the endpoint spiking.) A final point at 'now'
+    is anchored to `end_total` (the live headline) so the endpoint always matches the
+    page between hourly snapshots. Forward-looking: the curve builds from the first
+    snapshot after deploy — earlier history isn't reconstructed."""
+    points: list[tuple] = []
+    for s in db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at).all():
+        ts = s.captured_at
+        if ts is not None and ts.tzinfo is None:   # SQLite returns naive — normalize to UTC
+            ts = ts.replace(tzinfo=timezone.utc)
+        points.append((ts, float(s.total_pnl)))
+    # Tip the line to the live headline — but only when there's already a curve to
+    # tip. No snapshots yet → empty (the page shows "builds within the hour"), never
+    # a lone spike. Anchor at 'now', never before the last snapshot (clock skew).
     if end_total is not None and points:
-        # Anchor at 'now', but never before the last event (clock skew / a funding_time
-        # on the exchange clock could exceed local now), else the time-positioned SVG
-        # would draw a backward segment.
-        last = points[-1][0]
-        last = last.replace(tzinfo=timezone.utc) if (last and last.tzinfo is None) else last
-        anchor = max(datetime.now(timezone.utc), last) if last else datetime.now(timezone.utc)
-        points.append((anchor, end_total))
+        anchor = max(datetime.now(timezone.utc), points[-1][0])
+        points.append((anchor, float(end_total)))
     return points
 
 

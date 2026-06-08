@@ -15,7 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .db import session_scope
 from .exchanges.registry import get_registry
-from .models import ArbFundingEvent, ArbLeg, ArbPosition, FundingEvent
+from .models import ArbFundingEvent, ArbLeg, ArbPosition, EquitySnapshot, FundingEvent
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +134,26 @@ def poll_arb_once() -> int:
     return inserted
 
 
+def write_equity_snapshot(router) -> bool:
+    """Capture the current TRUE total PnL as one `EquitySnapshot` row — the points
+    the equity curve plots. Reuses the exact `_performance` headline math, so every
+    snapshot equals the page's Total PnL (realized + unrealized + funding −
+    commission). This is reconstruction-proof: each point is the real total at
+    capture time, sidestepping the fill-replay that can't price historical fills.
+    Best-effort — returns True when a row was written, False on any failure."""
+    from .routes.dashboard import _performance   # local import avoids an import cycle
+    try:
+        with session_scope() as db:
+            t = _performance(db, router)["totals"]
+            db.add(EquitySnapshot(
+                total_pnl=t["total"], realized=t["realized"], unrealized=t["unrealized"],
+                funding=t["funding"], commission=t["commission"]))
+        return True
+    except Exception:
+        log.exception("equity snapshot failed")
+        return False
+
+
 async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                        stop_event: asyncio.Event | None = None) -> None:
     """Periodically record funding events. Blocking SDK work runs in a thread."""
@@ -166,3 +186,11 @@ async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                 log.info("funding_worker: stored %d new ARB funding events", n)
         except Exception:
             log.exception("funding_worker arb loop error")
+        # Capture one true total-PnL point for the equity curve (AFTER funding is
+        # recorded, so the snapshot includes the freshest funding). Own try/except
+        # so a snapshot failure can't abort the funding polls above.
+        try:
+            if await asyncio.to_thread(write_equity_snapshot, router):
+                log.info("funding_worker: wrote equity snapshot")
+        except Exception:
+            log.exception("funding_worker equity snapshot error")

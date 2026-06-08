@@ -264,3 +264,22 @@ class ArbFundingEvent(Base):
     funding_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class EquitySnapshot(Base):
+    """Periodic capture of the TRUE total PnL (realized + unrealized + funding −
+    commission) at a point in time, written hourly by the funding worker. The
+    equity curve plots these directly — each point is the real total at capture
+    time, so the line needs no fill-replay reconstruction (which can't handle
+    fills that predate fill-price capture). Forward-looking: the curve builds from
+    the first capture after deploy; earlier history isn't reconstructed."""
+    __tablename__ = "equity_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+    total_pnl: Mapped[float] = mapped_column(Float, nullable=False)
+    realized: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    unrealized: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
