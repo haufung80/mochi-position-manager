@@ -91,3 +91,24 @@ def test_equity_metrics_drawdown_and_period():
     assert m["max_drawdown_pct"] == pytest.approx(60.0)   # 30 / 50
     assert m["dd_from_peak"] == pytest.approx(10.0)       # 50 - 40
     assert _equity_metrics([]) is None
+
+
+def test_equity_metrics_capital_base_percentages():
+    """With a capital base: return-% (on capital), period-return-%, and drawdown-%
+    measured against peak EQUITY (capital + peak PnL). No base -> no %-fields."""
+    series = [(None, 0.0), (None, 100.0), (None, 60.0), (None, 200.0)]   # peak 100, dd 40, end 200
+    m = _equity_metrics(series, capital_base=2000.0)
+    assert m["capital_base"] == 2000.0
+    assert m["return_pct"] == pytest.approx(200.0 / 2000.0 * 100)        # 10%
+    assert m["period_return_pct"] == pytest.approx(200.0 / 2000.0 * 100)
+    assert m["max_drawdown_pct"] == pytest.approx(40.0 / (2000.0 + 100.0) * 100)  # vs peak equity
+    assert m["sharpe"] is None                                           # < 8 points
+    assert "return_pct" not in _equity_metrics(series)                   # no base -> no %
+
+
+def test_equity_metrics_sharpe_with_enough_points():
+    """Sharpe (est.) is computed once there are >= 8 return points and variance > 0."""
+    vals = [0, 10, 5, 15, 12, 22, 18, 28, 34, 30, 40]   # 11 points -> 10 returns
+    series = [(None, float(v)) for v in vals]
+    m = _equity_metrics(series, capital_base=1000.0)
+    assert isinstance(m["sharpe"], float)

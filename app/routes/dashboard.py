@@ -496,25 +496,48 @@ def _equity_series(db, window_delta, live_total=None, live_by_ex=None) -> dict:
     return {k: _downsample(v) for k, v in series.items()}
 
 
-def _equity_metrics(total_series: list):
+def _sharpe(equity_vals: list):
+    """Annualized Sharpe (est.) from snapshot-to-snapshot equity returns (risk-free
+    = 0, ~hourly cadence). None until there are enough points or once variance is 0."""
+    rets = [(equity_vals[i] - equity_vals[i - 1]) / equity_vals[i - 1]
+            for i in range(1, len(equity_vals)) if equity_vals[i - 1] > 0]
+    if len(rets) < 8:
+        return None
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    sd = var ** 0.5
+    return (mean / sd) * (24 * 365) ** 0.5 if sd > 0 else None
+
+
+def _equity_metrics(total_series: list, capital_base: float = 0.0):
     """Essential equity metrics over the Total series: current, period P&L (window
-    Δ), peak (high-water mark), trough, and max drawdown (largest peak-to-trough,
-    plus % of peak). PnL is USD from 0 — no capital base is tracked, so no return-%."""
+    Δ), peak (high-water mark), trough, and max drawdown. With a capital base set,
+    also return-% (on capital), period-return-%, drawdown-% (vs peak equity), and an
+    estimated annualized Sharpe. PnL is USD from 0; %-metrics need the capital base."""
     if not total_series:
         return None
     vals = [v for _, v in total_series]
     cur, start = vals[-1], vals[0]
     peak, trough = max(vals), min(vals)
-    run, max_dd = vals[0], 0.0
+    run, max_dd, dd_peak = vals[0], 0.0, vals[0]
     for v in vals:
         run = max(run, v)
-        max_dd = max(max_dd, run - v)
-    return {
+        if run - v > max_dd:
+            max_dd, dd_peak = run - v, run     # the running peak the largest drop fell from
+    m = {
         "current": cur, "period": cur - start, "start": start,
         "peak": peak, "trough": trough, "max_drawdown": max_dd,
-        "max_drawdown_pct": (max_dd / peak * 100) if peak > 0 else None,
+        "max_drawdown_pct": (max_dd / dd_peak * 100) if dd_peak > 0 else None,
         "dd_from_peak": peak - cur, "points": len(vals),
+        "capital_base": capital_base or 0.0,
     }
+    if capital_base and capital_base > 0:
+        m["return_pct"] = cur / capital_base * 100
+        m["period_return_pct"] = (cur - start) / capital_base * 100
+        dd_peak_equity = capital_base + dd_peak
+        m["max_drawdown_pct"] = (max_dd / dd_peak_equity * 100) if dd_peak_equity > 0 else None
+        m["sharpe"] = _sharpe([capital_base + v for v in vals])
+    return m
 
 
 def _equity_svg(series, width: int = 920, height: int = 200, pad: int = 10):
@@ -587,7 +610,7 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         live_by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
         series = _equity_series(db, wdelta, perf["totals"]["total"], live_by_ex)
         equity = _equity_svg(series)
-        metrics = _equity_metrics(series.get("Total", []))
+        metrics = _equity_metrics(series.get("Total", []), get_settings().equity_capital_base)
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,

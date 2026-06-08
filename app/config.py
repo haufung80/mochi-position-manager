@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # this only affects display. e.g. "America/Toronto", "UTC", "Asia/Singapore".
     display_timezone: str = "America/Toronto"
 
+    # Account capital base (USDT) for the equity curve's %-metrics. The curve tracks
+    # cumulative PnL from 0; with a base set, the page also shows return-% and an
+    # (estimated) Sharpe. 0 = unset -> $-only metrics (no %, no Sharpe).
+    equity_capital_base: float = 0.0
+
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

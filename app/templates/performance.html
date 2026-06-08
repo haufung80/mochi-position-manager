@@ -92,15 +92,20 @@
     {% if metrics %}
     <div class="cards" style="margin-bottom:12px;">
       <div class="card stat"><div class="label">Total PnL</div>
-        <div class="big {{ 'pos' if metrics.current >= 0 else 'neg' }}">${{ metrics.current|usd }}</div></div>
+        <div class="big {{ 'pos' if metrics.current >= 0 else 'neg' }}">${{ metrics.current|usd }}</div>
+        {% if metrics.get('return_pct') is not none %}<div class="muted" style="font-size:10px">{{ metrics.return_pct|round(2) }}% on ${{ metrics.capital_base|usd }}</div>{% endif %}</div>
       <div class="card stat"><div class="label">{{ equity_window }} P&amp;L</div>
-        <div class="big {{ 'pos' if metrics.period >= 0 else 'neg' }}">${{ metrics.period|usd }}</div></div>
+        <div class="big {{ 'pos' if metrics.period >= 0 else 'neg' }}">${{ metrics.period|usd }}</div>
+        {% if metrics.get('period_return_pct') is not none %}<div class="muted" style="font-size:10px">{{ metrics.period_return_pct|round(2) }}%</div>{% endif %}</div>
       <div class="card stat"><div class="label">Peak</div>
         <div class="big {{ 'pos' if metrics.peak >= 0 else 'neg' }}">${{ metrics.peak|usd }}</div></div>
       <div class="card stat"><div class="label">Max drawdown</div>
         <div class="big neg">−${{ metrics.max_drawdown|usd }}</div>
-        {% if metrics.max_drawdown_pct is not none %}<div class="muted" style="font-size:10px">{{ metrics.max_drawdown_pct|round(1) }}% of peak</div>{% endif %}</div>
+        {% if metrics.max_drawdown_pct is not none %}<div class="muted" style="font-size:10px">{{ metrics.max_drawdown_pct|round(2) }}%{{ ' vs peak equity' if metrics.get('capital_base') else ' of peak' }}</div>{% endif %}</div>
     </div>
+    {% if metrics.get('capital_base') %}
+    <div class="muted" style="margin:-4px 0 12px;font-size:11px;">capital base ${{ metrics.capital_base|usd }}{% if metrics.get('sharpe') is not none %} · Sharpe (est.) {{ metrics.sharpe|round(2) }}{% endif %}</div>
+    {% endif %}
     {% endif %}
     {% if equity %}
     <svg viewBox="0 0 {{ equity.width }} {{ equity.height }}" width="100%" height="{{ equity.height }}"
