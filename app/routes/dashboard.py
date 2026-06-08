@@ -532,17 +532,26 @@ def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None) ->
     return {k: _downsample(v) for k, v in series.items()}
 
 
-def _sharpe(equity_vals: list):
-    """Annualized Sharpe (est.) from snapshot-to-snapshot equity returns (risk-free
-    = 0, ~hourly cadence). None until there are enough points or once variance is 0."""
-    rets = [(equity_vals[i] - equity_vals[i - 1]) / equity_vals[i - 1]
-            for i in range(1, len(equity_vals)) if equity_vals[i - 1] > 0]
+def _sharpe(equity_points: list):
+    """Annualized Sharpe (est.) from DAILY equity returns: resample to the last value
+    per UTC day, then mean/std of day-over-day returns × √365 (risk-free = 0). Daily
+    is the stable, standard basis — the snapshots are mixed daily (backfill) + hourly
+    (live), so per-snapshot returns would mis-annualize. `equity_points` = [(ts, value)].
+    None until there are >= 8 daily returns or variance is 0. (Still an estimate:
+    smooth backfilled history understates volatility, so early values read high.)"""
+    by_day: dict = {}
+    for ts, v in equity_points:
+        if ts is not None:
+            by_day[ts.date()] = v               # last value seen for each UTC day
+    vals = [by_day[d] for d in sorted(by_day)]
+    rets = [(vals[i] - vals[i - 1]) / vals[i - 1]
+            for i in range(1, len(vals)) if vals[i - 1] > 0]
     if len(rets) < 8:
         return None
     mean = sum(rets) / len(rets)
     var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
     sd = var ** 0.5
-    return (mean / sd) * (24 * 365) ** 0.5 if sd > 0 else None
+    return (mean / sd) * (365 ** 0.5) if sd > 0 else None
 
 
 def _equity_metrics(total_series: list, capital_base: float = 0.0):
@@ -572,7 +581,7 @@ def _equity_metrics(total_series: list, capital_base: float = 0.0):
         m["period_return_pct"] = (cur - start) / capital_base * 100
         dd_peak_equity = capital_base + dd_peak
         m["max_drawdown_pct"] = (max_dd / dd_peak_equity * 100) if dd_peak_equity > 0 else None
-        m["sharpe"] = _sharpe([capital_base + v for v in vals])
+        m["sharpe"] = _sharpe([(ts, capital_base + v) for ts, v in total_series])
     return m
 
 

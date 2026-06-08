@@ -121,9 +121,10 @@ def test_equity_svg_has_axes_and_hover_columns():
 
 
 def test_equity_metrics_sharpe_with_enough_points():
-    """Sharpe (est.) is computed once there are >= 8 return points and variance > 0."""
-    vals = [0, 10, 5, 15, 12, 22, 18, 28, 34, 30, 40]   # 11 points -> 10 returns
-    series = [(None, float(v)) for v in vals]
+    """Sharpe (est.) is computed from >= 8 DAILY returns (one equity point per day)."""
+    base = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    vals = [0, 10, 5, 15, 12, 22, 18, 28, 34, 30, 40]   # 11 daily points -> 10 daily returns
+    series = [(base + timedelta(days=i), float(v)) for i, v in enumerate(vals)]
     m = _equity_metrics(series, capital_base=1000.0)
     assert isinstance(m["sharpe"], float)
 
