@@ -12,7 +12,8 @@ from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.funding_worker import write_equity_snapshot
 from app.models import EquitySnapshot
-from app.routes.dashboard import _equity_curve, _equity_metrics, _equity_series, _performance
+from app.routes.dashboard import (_equity_curve, _equity_metrics, _equity_series,
+                                   _equity_svg, _performance)
 from app.routing import StrategyRouter
 
 
@@ -104,6 +105,18 @@ def test_equity_metrics_capital_base_percentages():
     assert m["max_drawdown_pct"] == pytest.approx(40.0 / (2000.0 + 100.0) * 100)  # vs peak equity
     assert m["sharpe"] is None                                           # < 8 points
     assert "return_pct" not in _equity_metrics(series)                   # no base -> no %
+
+
+def test_equity_svg_has_axes_and_hover_columns():
+    """The SVG carries value (Y) + time (X) axis ticks and aligned per-point hover
+    columns (date + each series value)."""
+    t1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    svg = _equity_svg({"Total": [(t1, 10.0), (t2, 30.0)], "bybit": [(t1, 6.0), (t2, 18.0)]})
+    assert len(svg["y_ticks"]) == 5 and len(svg["x_ticks"]) == 4        # value + time axes
+    assert svg["columns"] and svg["columns"][-1]["t"]                   # hover data with a date label
+    named = {it["name"] for it in svg["columns"][-1]["items"] if it["val"] is not None}
+    assert {"Total", "bybit"} <= named                                 # both series in the tooltip
 
 
 def test_equity_metrics_sharpe_with_enough_points():

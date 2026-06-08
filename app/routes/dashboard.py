@@ -540,11 +540,12 @@ def _equity_metrics(total_series: list, capital_base: float = 0.0):
     return m
 
 
-def _equity_svg(series, width: int = 920, height: int = 200, pad: int = 10):
-    """Multi-series equity SVG: one polyline per series ({name: [(ts, v)]}) on a
-    shared scale + a zero baseline. Accepts a bare point list (treated as the Total
-    line). None when there's nothing to plot. The aggregate 'Total' is drawn last
-    (on top) and thicker; venue lines are dimmer."""
+def _equity_svg(series, width: int = 920, height: int = 220,
+                ml: int = 52, mr: int = 12, mt: int = 12, mb: int = 22):
+    """Multi-series equity SVG with value (Y) + time (X) axes and per-point hover
+    columns. `series` = {name: [(ts, v)]} (or a bare point list = the Total line).
+    ml/mr/mt/mb are margins for axis labels. None when there's nothing to plot.
+    'Total' is drawn last (on top) and thicker; venue lines are dimmer."""
     if isinstance(series, list):
         series = {"Total": series} if series else {}
     series = {k: v for k, v in series.items() if v}
@@ -557,32 +558,57 @@ def _equity_svg(series, width: int = 920, height: int = 200, pad: int = 10):
     valid = [t for t in all_ts if t is not None]
     t0 = min(valid) if valid else 0.0
     tspan = (max(valid) - t0) if valid else 0.0
+    px_l, px_r, px_t, px_b = ml, width - mr, mt, height - mb
 
     def fy(v):
-        return pad + (height - 2 * pad) * (1 - (v - lo) / span)
+        return px_t + (px_b - px_t) * (1 - (v - lo) / span)
 
-    def fx(t, i, n):
+    def fx(t, i=0, n=1):
         if tspan and t is not None:
-            return pad + (width - 2 * pad) * ((t - t0) / tspan)
-        return pad + (width - 2 * pad) * (i / (n - 1) if n > 1 else 0.0)
+            return px_l + (px_r - px_l) * ((t - t0) / tspan)
+        return px_l + (px_r - px_l) * (i / (n - 1) if n > 1 else 0.0)
 
     order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])
     palette = iter(_SERIES_PALETTE)
+    color_of: dict[str, str] = {}
     lines = []
     for name in order:
         pts = series[name]
         n = len(pts)
-        poly = " ".join(f"{fx(_epoch_ts(ts), i, n):.1f},{fy(v):.1f}"
-                        for i, (ts, v) in enumerate(pts))
         if name == "Total":
             color = "#4ade80" if pts[-1][1] >= 0 else "#f87171"
         else:
             color = _SERIES_COLORS.get(name) or next(palette, "#9ca3af")
+        color_of[name] = color
+        poly = " ".join(f"{fx(_epoch_ts(ts), i, n):.1f},{fy(v):.1f}"
+                        for i, (ts, v) in enumerate(pts))
         lines.append({"name": name, "polyline": poly, "color": color,
                       "last": pts[-1][1], "is_total": name == "Total"})
+
+    y_ticks = [{"v": lo + span * k / 4, "y": round(fy(lo + span * k / 4), 1)} for k in range(5)]
+    x_ticks = []
+    if tspan:
+        for k in range(4):
+            t = t0 + tspan * k / 3
+            x_ticks.append({"label": _fmt_when(datetime.fromtimestamp(t, tz=timezone.utc), "%m-%d"),
+                            "x": round(px_l + (px_r - px_l) * k / 3, 1)})
+
+    columns = []                                  # aligned hover points (date + each series value)
+    if "Total" in series:
+        ex_maps = {name: dict(pts) for name, pts in series.items() if name != "Total"}
+        for ts, tv in _downsample(series["Total"], 160):
+            items = []
+            for name in order:
+                val = tv if name == "Total" else ex_maps.get(name, {}).get(ts)
+                items.append({"name": name, "color": color_of[name],
+                              "val": round(val, 2) if val is not None else None})
+            columns.append({"x": round(fx(_epoch_ts(ts)), 1),
+                            "t": _fmt_when(ts, "%m-%d %H:%M"), "items": items})
+
     span_key = "Total" if "Total" in series else order[0]
-    return {"lines": lines, "zero_y": round(fy(0.0), 1), "width": width,
-            "height": height, "lo": lo, "hi": hi,
+    return {"lines": lines, "zero_y": round(fy(0.0), 1), "width": width, "height": height,
+            "plot_left": px_l, "plot_right": px_r, "plot_top": px_t, "plot_bottom": round(px_b, 1),
+            "lo": lo, "hi": hi, "y_ticks": y_ticks, "x_ticks": x_ticks, "columns": columns,
             "start_label": _fmt_when(series[span_key][0][0], "%m-%d %H:%M"),
             "end_label": _fmt_when(series[span_key][-1][0], "%m-%d %H:%M")}
 
