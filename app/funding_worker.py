@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -27,6 +27,18 @@ _LOOKBACK_MS = 3 * 24 * 3600 * 1000          # re-scan 3 days each poll; dedup a
 # Arb perp legs live on a non-closed ArbPosition (closed pairs are flat — no more
 # settlements accrue). Matches the per-arb attribution window in funding_arb.py.
 _ARB_NON_CLOSED = ("opening", "open", "closing", "error")
+
+
+def _hour_floor() -> datetime:
+    """The current top-of-hour (HH:00:00 UTC) — the canonical snapshot timestamp."""
+    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _seconds_to_next_hour() -> float:
+    """Seconds until the next HH:00:00 UTC, so the loop wakes on the hour."""
+    now = datetime.now(timezone.utc)
+    nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    return max(1.0, (nxt - now).total_seconds())
 
 
 def _venue_pairs(router) -> list[tuple[str, str]]:
@@ -136,13 +148,12 @@ def poll_arb_once() -> int:
     return inserted
 
 
-def write_equity_snapshot(router) -> bool:
-    """Capture the current TRUE total PnL as one `EquitySnapshot` row — the points
-    the equity curve plots. Reuses the exact `_performance` headline math, so every
-    snapshot equals the page's Total PnL (realized + unrealized + funding −
-    commission). This is reconstruction-proof: each point is the real total at
-    capture time, sidestepping the fill-replay that can't price historical fills.
-    Best-effort — returns True when a row was written, False on any failure."""
+def write_equity_snapshot(router, captured_at=None) -> bool:
+    """Capture the current TRUE total PnL as one `EquitySnapshot` row — the points the
+    equity curve plots. Reuses the exact `_performance` headline math, so every
+    snapshot equals the page's Total PnL (realized + unrealized + funding − commission).
+    `captured_at` pins the timestamp — the loop passes the top of the hour so points
+    land on HH:00; defaults to now. Best-effort — True when a row was written."""
     from .routes.dashboard import _performance   # local import avoids an import cycle
     try:
         with session_scope() as db:
@@ -150,6 +161,7 @@ def write_equity_snapshot(router) -> bool:
             t = perf["totals"]
             by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
             db.add(EquitySnapshot(
+                captured_at=captured_at or datetime.now(timezone.utc),
                 total_pnl=t["total"], realized=t["realized"], unrealized=t["unrealized"],
                 funding=t["funding"], commission=t["commission"],
                 by_exchange=json.dumps(by_ex)))
@@ -181,39 +193,40 @@ def _maybe_backfill_equity() -> None:
         log.exception("startup equity backfill failed")
 
 
-async def _startup_capture(router, delay: float, stop_event) -> None:
+async def _startup_backfill(delay: float, stop_event) -> None:
     """One-time, shortly after boot (not AT boot — keeps startup network-free):
-    backfill the equity curve from exchange history + write the first live snapshot,
-    so the curve appears within minutes of a (re)deploy. Runs as its OWN task so it
-    never delays the funding polls."""
+    backfill the equity curve from exchange history. Runs as its OWN task so it never
+    delays the funding polls. No off-hour snapshot is written here — the curve stays
+    current via the live-anchored right edge + persisted history, and the hourly
+    snapshots land on HH:00."""
     try:
         await asyncio.sleep(delay)
         if stop_event is not None and stop_event.is_set():
             return
-        await asyncio.to_thread(_maybe_backfill_equity)            # import exchange history first
-        if await asyncio.to_thread(write_equity_snapshot, router):
-            log.info("funding_worker: wrote initial equity snapshot")
+        await asyncio.to_thread(_maybe_backfill_equity)
     except asyncio.CancelledError:
         pass
     except Exception:
-        log.exception("funding_worker startup capture error")
+        log.exception("funding_worker startup backfill error")
 
 
 async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
-                       stop_event: asyncio.Event | None = None) -> None:
-    """Periodically record funding events. Blocking SDK work runs in a thread."""
-    log.info("funding_worker started (poll=%.0fs, first scan after one interval)",
-             poll_interval_sec)
-    # Startup backfill + first snapshot run as a SEPARATE task so they never gate the
-    # funding polls (and the loop's first poll stays on schedule).
+                       stop_event: asyncio.Event | None = None,
+                       align_hour: bool = True) -> None:
+    """Record funding + one equity snapshot per hour, aligned to the top of the hour
+    (HH:00) by default — so points are evenly spaced regardless of when the app started
+    or how often it's redeployed. Blocking SDK work runs in a thread. align_hour=False
+    uses poll_interval_sec directly (tests)."""
+    log.info("funding_worker started (align_hour=%s, poll=%.0fs)", align_hour, poll_interval_sec)
+    # One-time backfill runs as a SEPARATE task so it never gates the funding polls.
     cap_task = asyncio.create_task(
-        _startup_capture(router, min(90.0, poll_interval_sec), stop_event))
+        _startup_backfill(min(90.0, poll_interval_sec), stop_event))
     try:
         while True:
-            # Sleep FIRST: funding accrues slowly, and this keeps app startup
-            # network-free (no exchange round-trips on boot / during tests).
+            # Sleep to the next HH:00 (or poll_interval_sec in tests). Sleeping FIRST
+            # keeps app startup network-free.
             try:
-                await asyncio.sleep(poll_interval_sec)
+                await asyncio.sleep(_seconds_to_next_hour() if align_hour else poll_interval_sec)
             except asyncio.CancelledError:
                 log.info("funding_worker cancelled")
                 return
@@ -235,9 +248,11 @@ async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                     log.info("funding_worker: stored %d new ARB funding events", n)
             except Exception:
                 log.exception("funding_worker arb loop error")
-            # One true total-PnL point for the equity curve (AFTER funding is recorded).
+            # One true total-PnL point for the equity curve, stamped on the hour (HH:00)
+            # so the curve is evenly spaced. (AFTER funding is recorded.)
             try:
-                if await asyncio.to_thread(write_equity_snapshot, router):
+                cap = _hour_floor() if align_hour else None
+                if await asyncio.to_thread(write_equity_snapshot, router, cap):
                     log.info("funding_worker: wrote equity snapshot")
             except Exception:
                 log.exception("funding_worker equity snapshot error")

@@ -315,7 +315,7 @@ def test_funding_loop_runs_both_directional_and_arb_polls(strategies_yaml, arb_r
     async def _drive():
         stop = asyncio.Event()
         task = asyncio.create_task(
-            funding_loop(router, poll_interval_sec=0.0, stop_event=stop))
+            funding_loop(router, poll_interval_sec=0.0, stop_event=stop, align_hour=False))
         await asyncio.sleep(0.05)   # let one tick run
         stop.set()
         await asyncio.sleep(0.02)

@@ -148,3 +148,17 @@ def test_equity_dataset_caches_within_ttl(tmp_path, stub_exchange, monkeypatch):
     with session_scope() as db:
         dashboard._equity_dataset(db, router, force=True)   # ?refresh -> rebuild
     assert calls["n"] == 2
+
+
+def test_snapshot_pinned_to_top_of_hour(tmp_path, stub_exchange):
+    """write_equity_snapshot stamps the row at the given top-of-hour timestamp, so the
+    hourly curve points land on HH:00; the helpers expose that boundary."""
+    from app.funding_worker import write_equity_snapshot, _hour_floor, _seconds_to_next_hour
+    top = _hour_floor()
+    assert top.minute == 0 and top.second == 0 and top.microsecond == 0
+    assert 1 <= _seconds_to_next_hour() <= 3600
+    router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    assert write_equity_snapshot(router, captured_at=top) is True
+    with session_scope() as db:
+        cap = db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at.desc()).first().captured_at
+    assert cap.minute == 0 and cap.second == 0           # stamped on the hour
