@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -421,7 +422,7 @@ def _equity_curve(db, end_total=None) -> list[tuple]:
     snapshot after deploy — earlier history isn't reconstructed."""
     # Total-only, all-time — delegates to _equity_series (the multi-series/windowed
     # builder the page uses) so there's one source of truth for the curve.
-    return _equity_series(db, None, live_total=end_total).get("Total", [])
+    return _equity_series(_load_snapshots(db), None, live_total=end_total).get("Total", [])
 
 
 _EQUITY_WINDOWS = [
@@ -431,7 +432,7 @@ _EQUITY_WINDOWS = [
     ("All", None),
 ]
 _EQUITY_WINDOW_MAP = dict(_EQUITY_WINDOWS)
-_EQUITY_DEFAULT_WINDOW = "All"
+_EQUITY_DEFAULT_WINDOW = "30D"
 # bybit brand-orange / hyperliquid teal; any other venue cycles a fallback palette.
 _SERIES_COLORS = {"bybit": "#f7a600", "hyperliquid": "#26a69a"}
 _SERIES_PALETTE = ["#a78bfa", "#60a5fa", "#fbbf24", "#f472b6", "#34d399"]
@@ -463,24 +464,59 @@ def _downsample(pts: list, cap: int = 600) -> list:
     return out
 
 
-def _equity_series(db, window_delta, live_total=None, live_by_ex=None) -> dict:
-    """Per-exchange + aggregate ('Total') PnL series from EquitySnapshot rows inside
-    the window. Each series is tipped with the live headline value so the right edge
-    always matches the page. Returns {name: [(ts, value)]}; empty when no snapshots."""
-    q = db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at)
-    if window_delta is not None:
-        q = q.filter(EquitySnapshot.captured_at >= datetime.now(timezone.utc) - window_delta)
-    total_pts: list = []
-    ex_pts: dict[str, list] = {}
-    for s in q.all():
+# --- equity dataset cache: switching timeframes / rapid reloads reuse this instead
+# --- of re-fetching the exchanges and re-reading snapshots on every render. ---
+_EQ_CACHE: dict = {"at": 0.0, "snapshots": None, "perf": None}
+_EQ_CACHE_TTL = 30.0
+
+
+def _load_snapshots(db) -> list[tuple]:
+    """All equity snapshots as (ts_utc, total_pnl, by_exchange_dict), time-ordered."""
+    out: list[tuple] = []
+    for s in db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at).all():
         ts = s.captured_at
         if ts is not None and ts.tzinfo is None:        # SQLite returns naive
             ts = ts.replace(tzinfo=timezone.utc)
-        total_pts.append((ts, float(s.total_pnl)))
         try:
             by = json.loads(s.by_exchange or "{}")
         except (ValueError, TypeError):
             by = {}
+        out.append((ts, float(s.total_pnl), by))
+    return out
+
+
+def _equity_dataset(db, router, force: bool = False):
+    """(all_snapshots, perf) cached for _EQ_CACHE_TTL seconds. The whole equity curve
+    (every timeframe) and the page headline are built from this, so switching windows
+    or reloading within the TTL re-fetches nothing — not the exchanges (perf), not the
+    snapshot rows. The funding worker calls _performance directly (uncached) for fresh
+    snapshots; ?refresh=true forces a rebuild here."""
+    now = time.time()
+    if force or _EQ_CACHE["snapshots"] is None or now - _EQ_CACHE["at"] > _EQ_CACHE_TTL:
+        _EQ_CACHE["snapshots"] = _load_snapshots(db)
+        _EQ_CACHE["perf"] = _performance(db, router)
+        _EQ_CACHE["at"] = now
+    return _EQ_CACHE["snapshots"], _EQ_CACHE["perf"]
+
+
+def _clear_equity_cache() -> None:
+    """Drop the cached dataset (test isolation / forced refresh)."""
+    _EQ_CACHE.update(at=0.0, snapshots=None, perf=None)
+
+
+def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None) -> dict:
+    """Per-exchange + aggregate ('Total') PnL series from in-memory `snapshots` (from
+    _load_snapshots) inside the window. Each series is tipped with the live headline
+    value so the right edge matches the page. Returns {name: [(ts, value)]}; empty
+    when there are no snapshots in the window."""
+    rows = snapshots
+    if window_delta is not None:
+        cutoff = datetime.now(timezone.utc) - window_delta
+        rows = [r for r in snapshots if r[0] is not None and r[0] >= cutoff]
+    total_pts: list = []
+    ex_pts: dict[str, list] = {}
+    for ts, total, by in rows:
+        total_pts.append((ts, total))
         for ex, val in by.items():
             ex_pts.setdefault(ex, []).append((ts, float(val)))
     if not total_pts:
@@ -629,12 +665,15 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
 
 
 @router.get("/performance", response_class=HTMLResponse)
-def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WINDOW)):
+def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WINDOW),
+                refresh: bool = Query(False)):
     wsel, wdelta = _resolve_window(equity_window)
     with session_scope() as db:
-        perf = _performance(db, request.app.state.strategy_router)
+        # Cached dataset: snapshots + live perf, reused across timeframe switches so
+        # changing the window re-fetches nothing within the TTL. ?refresh=true forces it.
+        snapshots, perf = _equity_dataset(db, request.app.state.strategy_router, force=refresh)
         live_by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
-        series = _equity_series(db, wdelta, perf["totals"]["total"], live_by_ex)
+        series = _equity_series(snapshots, wdelta, perf["totals"]["total"], live_by_ex)
         equity = _equity_svg(series)
         metrics = _equity_metrics(series.get("Total", []), get_settings().equity_capital_base)
         orders = _recent_orders(db, limit=50)

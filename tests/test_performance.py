@@ -66,7 +66,7 @@ def test_performance_empty_state_renders(client):
 
 def test_performance_renders_with_data(client):
     _seed_round_trip()
-    r = client.get("/performance")
+    r = client.get("/performance?equity_window=All")   # All so the seed date stays in-window
     assert r.status_code == 200
     assert "S1" in r.text                       # per-strategy + per-exchange rows
     assert r.text.count("<polyline") >= 2       # multi-line: aggregate Total + per-exchange

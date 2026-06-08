@@ -12,8 +12,8 @@ from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.funding_worker import write_equity_snapshot
 from app.models import EquitySnapshot
-from app.routes.dashboard import (_equity_curve, _equity_metrics, _equity_series,
-                                   _equity_svg, _performance)
+from app.routes.dashboard import (_equity_curve, _equity_dataset, _equity_metrics,
+                                   _equity_series, _equity_svg, _load_snapshots, _performance)
 from app.routing import StrategyRouter
 
 
@@ -71,8 +71,9 @@ def test_equity_series_windows_and_per_exchange():
                               by_exchange=json.dumps({"bybit": 18.0, "hyperliquid": 12.0})))
     live_by_ex = {"bybit": 20.0, "hyperliquid": 13.0}
     with session_scope() as db:
-        wide = _equity_series(db, None, live_total=33.0, live_by_ex=live_by_ex)            # All
-        day = _equity_series(db, timedelta(hours=24), live_total=33.0, live_by_ex=live_by_ex)
+        snaps = _load_snapshots(db)
+        wide = _equity_series(snaps, None, live_total=33.0, live_by_ex=live_by_ex)         # All
+        day = _equity_series(snaps, timedelta(hours=24), live_total=33.0, live_by_ex=live_by_ex)
     # All-time: 2 snapshots + 1 live tip on the aggregate; one line per venue too
     assert set(wide) == {"Total", "bybit", "hyperliquid"}
     assert len(wide["Total"]) == 3 and wide["Total"][-1][1] == pytest.approx(33.0)
@@ -125,3 +126,24 @@ def test_equity_metrics_sharpe_with_enough_points():
     series = [(None, float(v)) for v in vals]
     m = _equity_metrics(series, capital_base=1000.0)
     assert isinstance(m["sharpe"], float)
+
+
+def test_equity_dataset_caches_within_ttl(tmp_path, stub_exchange, monkeypatch):
+    """The dataset (snapshots + perf) is cached: a 2nd call within the TTL re-runs
+    neither _performance nor the snapshot query; force=True rebuilds it."""
+    from app.routes import dashboard
+    router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    with session_scope() as db:
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, tzinfo=timezone.utc), total_pnl=5.0))
+    calls = {"n": 0}
+    real = dashboard._performance
+    monkeypatch.setattr(dashboard, "_performance",
+                        lambda db, r: calls.__setitem__("n", calls["n"] + 1) or real(db, r))
+    dashboard._clear_equity_cache()
+    with session_scope() as db:
+        s1, p1 = dashboard._equity_dataset(db, router)
+        s2, p2 = dashboard._equity_dataset(db, router)      # cached
+    assert calls["n"] == 1 and s1 is s2 and p1 is p2        # built once, reused
+    with session_scope() as db:
+        dashboard._equity_dataset(db, router, force=True)   # ?refresh -> rebuild
+    assert calls["n"] == 2

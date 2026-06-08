@@ -48,10 +48,10 @@ class Settings(BaseSettings):
     # this only affects display. e.g. "America/Toronto", "UTC", "Asia/Singapore".
     display_timezone: str = "America/Toronto"
 
-    # Account capital base (USDT) for the equity curve's %-metrics. The curve tracks
-    # cumulative PnL from 0; with a base set, the page also shows return-% and an
-    # (estimated) Sharpe. 0 = unset -> $-only metrics (no %, no Sharpe).
-    equity_capital_base: float = 0.0
+    # Account capital base (USDT) for the equity curve's %-metrics — the starting
+    # equity the earliest data point sits on. Enables return-%, an (estimated) Sharpe,
+    # and drawdown as % of equity. 0 = $-only metrics. Override per deploy via .env.
+    equity_capital_base: float = 2000.0
 
     # Backfill the equity curve from each exchange's own history starting this date
     # (YYYY-MM-DD), once on startup. Blank = no backfill. Idempotent.
