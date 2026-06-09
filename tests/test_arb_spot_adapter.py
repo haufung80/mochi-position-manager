@@ -25,10 +25,52 @@ def test_spot_symbol_for_both_venues():
     assert spot_symbol_for("hyperliquid", "BTC") == "UBTC/USDC"
     assert spot_symbol_for("hyperliquid", "ETH") == "UETH/USDC"
     assert spot_symbol_for("hyperliquid", "SOL") == "USOL/USDC"
+    # HL-native tokens trade under their BARE name (no 'U' prefix).
+    assert spot_symbol_for("hyperliquid", "HYPE") == "HYPE/USDC"
+    assert spot_symbol_for("hyperliquid", "PURR") == "PURR/USDC"
+    assert spot_symbol_for("bybit", "HYPE") == "HYPEUSDT"
     with pytest.raises(ValueError):
         spot_symbol_for("hyperliquid", "DOGE")
     with pytest.raises(ValueError):
         spot_symbol_for("kraken", "BTC")
+
+
+def test_hl_spot_base_token_native_vs_unit():
+    """HL-native tokens (HYPE/PURR) resolve to their BARE token; Unit majors keep the
+    'U' prefix. This is what lets 'HYPE/USDC' resolve to its real pair instead of a
+    non-existent 'UHYPE'."""
+    ex = HyperliquidExchange(private_key="", account_address="", dry_run=True)
+    assert ex._spot_base_token("UBTC/USDC") == "UBTC"
+    assert ex._spot_base_token("HYPE/USDC") == "HYPE"     # not 'UHYPE'
+    assert ex._spot_base_token("PURR/USDC") == "PURR"     # not 'UPURR'
+    assert ex._spot_base_token("BTC") == "UBTC"           # bare canonical -> Unit token
+    assert ex._spot_base_token("HYPE") == "HYPE"          # bare native stays native
+
+
+def test_hl_canonical_spot_decimals_native():
+    from app.exchanges.hyperliquid import _canonical_spot_decimals
+    assert _canonical_spot_decimals("UBTC/USDC") == 5     # Unit major, unchanged
+    assert _canonical_spot_decimals("HYPE/USDC") == 2
+    assert _canonical_spot_decimals("PURR/USDC") == 0     # whole units
+
+
+def test_hl_spot_dry_run_native_tokens():
+    """DRY_RUN spot orders for the native tokens round to their szDecimals (HYPE 2dp,
+    PURR whole units), no network."""
+    ex = HyperliquidExchange(private_key="", account_address="", dry_run=True)
+    r = ex.spot_market_order("HYPE/USDC", "buy", 1.239)
+    assert r.success and r.filled_qty_base == 1.24
+    r2 = ex.spot_market_order("PURR/USDC", "buy", 33.7)
+    assert r2.success and r2.filled_qty_base == 34.0
+
+
+def test_arb_open_request_accepts_native_assets():
+    """The arb API accepts the HL-native assets HYPE/PURR (and still rejects junk)."""
+    from app.schemas_arb import ArbOpenRequest
+    for a in ("BTC", "ETH", "SOL", "HYPE", "PURR"):
+        ArbOpenRequest(idempotency_key="k", asset=a, size_mode="min")
+    with pytest.raises(Exception):
+        ArbOpenRequest(idempotency_key="k", asset="DOGE", size_mode="min")
 
 
 # --- 1. through the FakeRegistry (both venues, incl. HL spot working) --------

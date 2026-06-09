@@ -113,12 +113,17 @@ def test_symbol_for_known_exchanges():
     assert symbol_for("bybit", "BTC") == "BTCUSDT"
     assert symbol_for("bybit", "XRP") == "XRPUSDT"        # new ticker
     assert symbol_for("hyperliquid", "XRP") == "XRP"
+    # HL-native perps (funding-arb): bare ticker on Hyperliquid.
+    assert symbol_for("hyperliquid", "HYPE") == "HYPE"
+    assert symbol_for("hyperliquid", "PURR") == "PURR"
 
 
 def test_canonical_step_sizes():
     from app.exchanges.symbols import canonical_step_size, base_asset_of
     assert canonical_step_size("BTC") == 0.001
     assert canonical_step_size("XRP") == 0.1
+    assert canonical_step_size("HYPE") == 0.01            # HL szDecimals 2
+    assert canonical_step_size("PURR") == 1.0             # HL szDecimals 0 (whole units)
     assert base_asset_of("bybit", "XRPUSDT") == "XRP"     # reverse map
     assert base_asset_of("hyperliquid", "XRP") == "XRP"
     assert symbol_for("hyperliquid", "ETH") == "ETH"

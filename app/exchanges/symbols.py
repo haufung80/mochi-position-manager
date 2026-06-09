@@ -14,9 +14,12 @@ Examples:
 """
 from __future__ import annotations
 
-# Canonical base assets supported across all configured exchanges.
-# Add new ones here ONLY if every supported exchange lists the perp.
-SUPPORTED_BASE_ASSETS: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB", "XRP")
+# Canonical base assets supported across the configured exchanges.
+# BTC/ETH/SOL/BNB/XRP list on both Bybit + Hyperliquid. HYPE/PURR are
+# Hyperliquid-NATIVE (used by the funding-arb HL cash-and-carry): HYPE is also on
+# Bybit, but PURR is HL-only — so don't route a *directional* PURR strategy to Bybit
+# (the arb default combo is HL-only, so the arb is unaffected).
+SUPPORTED_BASE_ASSETS: tuple[str, ...] = ("BTC", "ETH", "SOL", "BNB", "XRP", "HYPE", "PURR")
 
 # Quote-currency suffix appended to base asset to form the exchange-native
 # perp symbol. Empty string means "use the bare base ticker".
@@ -57,6 +60,8 @@ CANONICAL_STEP_SIZES: dict[str, float] = {
     "SOL": 0.1,
     "BNB": 0.01,
     "XRP": 0.1,
+    "HYPE": 0.01,   # HL szDecimals 2
+    "PURR": 1.0,    # HL szDecimals 0 (whole units)
 }
 
 
@@ -87,11 +92,20 @@ def base_asset_of(exchange: str, symbol: str) -> str:
 #                   time (robust to id churn).
 HYPERLIQUID_SPOT_BASE_PREFIX = "U"   # Unit-wrapped spot tokens: UBTC, UETH, USOL
 HYPERLIQUID_SPOT_QUOTE = "USDC"
+# HL-NATIVE spot tokens trade under their BARE name (HYPE/USDC, PURR/USDC) — no 'U'
+# prefix, unlike the Unit-bridged majors (UBTC/USDC). Keep in sync with the perp
+# universe: a native asset must list both an HL perp and an HL spot for cash-and-carry.
+HYPERLIQUID_NATIVE_SPOT: frozenset[str] = frozenset({"HYPE", "PURR"})
 
 
 def hyperliquid_spot_token(base_asset: str) -> str:
-    """The HL Unit spot BASE token name for a canonical base asset (BTC -> UBTC)."""
-    return f"{HYPERLIQUID_SPOT_BASE_PREFIX}{base_asset.upper()}"
+    """The HL spot BASE token name for a canonical base asset: Unit-bridged majors get
+    the 'U' prefix (BTC -> UBTC); HL-native tokens keep their bare name (HYPE -> HYPE,
+    PURR -> PURR)."""
+    base = base_asset.upper()
+    if base in HYPERLIQUID_NATIVE_SPOT:
+        return base
+    return f"{HYPERLIQUID_SPOT_BASE_PREFIX}{base}"
 
 
 def spot_symbol_for(exchange: str, base_asset: str) -> str:

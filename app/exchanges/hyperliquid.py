@@ -10,6 +10,7 @@ from hyperliquid.utils import constants
 
 from ..schemas import OrderResult
 from .symbols import (
+    HYPERLIQUID_NATIVE_SPOT,
     HYPERLIQUID_SPOT_QUOTE,
     base_asset_of,
     canonical_step_size,
@@ -22,14 +23,20 @@ Side = Literal["buy", "sell"]
 # Unit-spot base-token szDecimals as listed on HL (UBTC/UETH/USOL). Used ONLY as
 # an offline/DRY_RUN fallback when `spotMeta` can't be fetched; production reads
 # the live value from `spotMeta`.
-_HL_SPOT_SZ_DECIMALS: dict[str, int] = {"BTC": 5, "ETH": 4, "SOL": 3}
+_HL_SPOT_SZ_DECIMALS: dict[str, int] = {
+    "BTC": 5, "ETH": 4, "SOL": 3,        # Unit-bridged majors (keyed by canonical base)
+    "HYPE": 2, "PURR": 0,                # HL-native (PURR trades in whole units)
+}
 
 
 def _canonical_spot_decimals(symbol: str) -> int:
-    """Offline-safe spot szDecimals for a spot symbol ('UBTC/USDC' | 'UBTC' |
-    'BTC'). Falls back to 4 for unknown assets."""
+    """Offline-safe spot szDecimals for a spot symbol ('UBTC/USDC' | 'UBTC' | 'BTC' |
+    'HYPE/USDC' | 'PURR'). Falls back to 4 for unknown assets."""
     token = symbol.split("/")[0].upper()
-    base = token[1:] if token.startswith("U") and len(token) > 1 else token
+    # Strip the Unit 'U' prefix to recover the canonical base, but NOT for HL-native
+    # tokens (HYPE/PURR don't start with U anyway; guard keeps a future U-named native safe).
+    base = (token[1:] if token.startswith("U") and len(token) > 1
+            and token not in HYPERLIQUID_NATIVE_SPOT else token)
     return _HL_SPOT_SZ_DECIMALS.get(base, 4)
 
 
@@ -343,14 +350,17 @@ class HyperliquidExchange:
     # ---------- spot (REAL, first-class — Unit spot) ----------
 
     def _spot_base_token(self, symbol: str) -> str:
-        """The HL Unit spot BASE token name for whatever spot symbol form is
-        passed: a canonical base ('BTC'), the Unit token ('UBTC'), or the
-        readable pair ('UBTC/USDC'). The canonical '@NNN' id is resolved
-        separately from `spotMeta`."""
-        token = symbol.split("/")[0].upper()      # 'UBTC/USDC' -> 'UBTC'
-        if token.startswith("U") and len(token) > 1:
-            return token                          # already a Unit token name
-        return hyperliquid_spot_token(token)      # 'BTC' -> 'UBTC'
+        """The HL spot BASE token name for whatever spot symbol form is passed: a
+        readable pair ('UBTC/USDC', 'HYPE/USDC') or a token ('UBTC', 'HYPE') carries
+        the EXACT token verbatim (Unit majors are 'U'+base; HL-native tokens like
+        HYPE/PURR are the bare name); a bare canonical base ('BTC') maps via
+        hyperliquid_spot_token. The canonical '@NNN' id is resolved from `spotMeta`."""
+        token = symbol.split("/")[0].upper()      # 'UBTC/USDC' -> 'UBTC'; 'HYPE/USDC' -> 'HYPE'
+        if "/" in symbol:
+            return token                          # readable pair already names the token
+        if token.startswith("U") and len(token) > 1 and token not in HYPERLIQUID_NATIVE_SPOT:
+            return token                          # a Unit token ('UBTC') passed directly
+        return hyperliquid_spot_token(token)      # 'BTC' -> 'UBTC', 'HYPE' -> 'HYPE'
 
     def _resolve_spot(self, symbol: str) -> tuple[str, int]:
         """Resolve a spot symbol to (canonical_pair_name, base_szDecimals).

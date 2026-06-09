@@ -97,9 +97,10 @@ def test_position_view_and_pnl_schemas(schema):
         assert field in leg
 
 
-def test_asset_is_btc_eth_sol(schema):
+def test_asset_enum(schema):
     asset = schema["components"]["schemas"]["ArbOpenRequest"]["properties"]["asset"]
-    assert asset["enum"] == ["BTC", "ETH", "SOL"]
+    # BTC/ETH/SOL (Unit-bridged) + HYPE/PURR (HL-native).
+    assert asset["enum"] == ["BTC", "ETH", "SOL", "HYPE", "PURR"]
 
 
 # --- ArbSecret security scheme exists + applied to the write routes ---------

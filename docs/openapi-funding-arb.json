@@ -162,7 +162,9 @@
             "enum": [
               "BTC",
               "ETH",
-              "SOL"
+              "SOL",
+              "HYPE",
+              "PURR"
             ],
             "title": "Asset",
             "type": "string"
@@ -327,7 +329,9 @@
             "enum": [
               "BTC",
               "ETH",
-              "SOL"
+              "SOL",
+              "HYPE",
+              "PURR"
             ],
             "title": "Asset",
             "type": "string"

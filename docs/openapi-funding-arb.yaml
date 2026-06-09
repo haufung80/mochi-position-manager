@@ -134,6 +134,8 @@ components:
           - BTC
           - ETH
           - SOL
+          - HYPE
+          - PURR
           title: Asset
           type: string
         idempotency_key:
@@ -256,6 +258,8 @@ components:
           - BTC
           - ETH
           - SOL
+          - HYPE
+          - PURR
           title: Asset
           type: string
         closed_at:

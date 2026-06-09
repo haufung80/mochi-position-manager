@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field, model_validator
 Exchange = Literal["bybit", "hyperliquid"]
 Product = Literal["spot", "perp"]
 Side = Literal["buy", "sell"]
-Asset = Literal["BTC", "ETH", "SOL"]
+Asset = Literal["BTC", "ETH", "SOL", "HYPE", "PURR"]
 SizeMode = Literal["notional", "min"]
 
 
