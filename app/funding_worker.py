@@ -29,15 +29,16 @@ _LOOKBACK_MS = 3 * 24 * 3600 * 1000          # re-scan 3 days each poll; dedup a
 _ARB_NON_CLOSED = ("opening", "open", "closing", "error")
 
 
-def _hour_floor() -> datetime:
-    """The current top-of-hour (HH:00:00 UTC) — the canonical snapshot timestamp."""
-    return datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+def _hour_floor(now: datetime | None = None) -> datetime:
+    """The top-of-hour (HH:00:00 UTC) for `now` (default: current) — the canonical
+    snapshot timestamp and the single definition of the hourly boundary."""
+    return (now or datetime.now(timezone.utc)).replace(minute=0, second=0, microsecond=0)
 
 
 def _seconds_to_next_hour() -> float:
     """Seconds until the next HH:00:00 UTC, so the loop wakes on the hour."""
     now = datetime.now(timezone.utc)
-    nxt = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    nxt = _hour_floor(now) + timedelta(hours=1)
     return max(1.0, (nxt - now).total_seconds())
 
 
@@ -154,7 +155,8 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
     snapshot equals the page's Total PnL (realized + unrealized + funding − commission).
     `captured_at` pins the timestamp — the loop passes the top of the hour so points
     land on HH:00; defaults to now. Best-effort — True when a row was written."""
-    from .routes.dashboard import _performance, _by_exchange_totals   # local: avoid import cycle
+    from .routes.dashboard import (_performance, _by_exchange_totals,   # local: avoid import cycle
+                                   _clear_equity_cache)
     try:
         with session_scope() as db:
             perf = _performance(db, router)
@@ -165,6 +167,7 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
                 total_pnl=t["total"], realized=t["realized"], unrealized=t["unrealized"],
                 funding=t["funding"], commission=t["commission"],
                 by_exchange=json.dumps(by_ex)))
+        _clear_equity_cache()           # a fresh point is persisted -> don't serve the stale dataset
         return True
     except Exception:
         log.exception("equity snapshot failed")
@@ -207,6 +210,8 @@ def _maybe_backfill_equity() -> None:
             with session_scope() as db:
                 db.merge(AppMeta(key="equity_backfill", value=fingerprint,
                                  updated_at=datetime.now(timezone.utc)))
+            from .routes.dashboard import _clear_equity_cache
+            _clear_equity_cache()                   # new history rows -> drop the cached dataset
     except Exception:
         log.exception("startup equity backfill failed")
 

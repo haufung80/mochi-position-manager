@@ -181,6 +181,22 @@ def test_equity_svg_hover_carries_sparse_venue():
     assert hl(svg["columns"][9]) == pytest.approx(109.0)  # exact at hour 9
 
 
+def test_write_equity_snapshot_clears_dataset_cache(tmp_path, stub_exchange):
+    """Writing a fresh snapshot invalidates the cached dataset, so the next render sees
+    the new point instead of a (<=TTL) stale one — the worker's hourly point shows up
+    without waiting out the cache."""
+    from app.routes import dashboard
+    router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    dashboard._clear_equity_cache()
+    with session_scope() as db:
+        snaps1, _ = dashboard._equity_dataset(db, router)     # warm the cache (0 snapshots)
+    assert snaps1 == []
+    write_equity_snapshot(router)                             # persists a point AND clears the cache
+    with session_scope() as db:
+        snaps2, _ = dashboard._equity_dataset(db, router)     # cache cleared -> rebuilt with the new row
+    assert len(snaps2) == 1
+
+
 def test_snapshot_pinned_to_top_of_hour(tmp_path, stub_exchange):
     """write_equity_snapshot stamps the row at the given top-of-hour timestamp, so the
     hourly curve points land on HH:00; the helpers expose that boundary."""

@@ -110,7 +110,8 @@
     {% if equity %}
     <div id="eqwrap" style="position:relative;">
     <svg viewBox="0 0 {{ equity.width }} {{ equity.height }}" width="100%" height="{{ equity.height }}"
-         preserveAspectRatio="none" role="img" aria-label="cumulative PnL by exchange" style="overflow:visible;">
+         preserveAspectRatio="none" role="img" aria-label="cumulative PnL by exchange"
+         style="overflow:visible;touch-action:pan-y;cursor:crosshair;">
       {% for t in equity.y_ticks %}
       <line x1="{{ equity.plot_left }}" y1="{{ t.y }}" x2="{{ equity.plot_right }}" y2="{{ t.y }}" stroke="#1b1f27" stroke-width="1"/>
       <text x="{{ equity.plot_left - 5 }}" y="{{ t.y + 3 }}" text-anchor="end" font-size="9" fill="#888">${{ t.v|usd }}</text>
@@ -134,7 +135,7 @@
       <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:{{ ln.color }};margin-right:5px;vertical-align:middle;"></span>{{ ln.name }} {{ money(ln.last) }}</span>
       {% endfor %}
     </div>
-    <div class="muted" style="margin-top:6px;">{{ equity.start_label }} → {{ equity.end_label }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }} · hover for point detail</div>
+    <div class="muted" style="margin-top:6px;">{{ equity.start_label }} → {{ equity.end_label }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }} · hover or drag across to scrub</div>
     <div class="muted">True total PnL (realized + unrealized + funding − commission) captured hourly, per exchange + aggregate; right edge anchored to the live headline. Builds forward from deploy — earlier history isn't reconstructed (per-fill PnL wasn't recorded).</div>
     <script>
     (function(){
@@ -143,9 +144,9 @@
       var wrap=document.getElementById('eqwrap'), svg=wrap.querySelector('svg'),
           hov=document.getElementById('eqhover'), tip=document.getElementById('eqtip');
       var VBW={{ equity.width }}, PT={{ equity.plot_top }}, PB={{ equity.plot_bottom }};
-      function move(e){
+      function scrub(clientX){
         var r=svg.getBoundingClientRect(); if(!r.width) return;
-        var vx=(e.clientX-r.left)/r.width*VBW, best=cols[0], bd=1e9, i;
+        var vx=(clientX-r.left)/r.width*VBW, best=cols[0], bd=1e9, i;
         for(i=0;i<cols.length;i++){ var d=Math.abs(cols[i].x-vx); if(d<bd){bd=d; best=cols[i];} }
         hov.setAttribute('x1',best.x); hov.setAttribute('x2',best.x);
         hov.setAttribute('y1',PT); hov.setAttribute('y2',PB); hov.style.display='';
@@ -153,11 +154,15 @@
         for(i=0;i<best.items.length;i++){ var it=best.items[i]; if(it.val==null) continue;
           html+='<div><span style="color:'+it.color+'">■</span> '+it.name+' $'+it.val.toFixed(2)+'</div>'; }
         tip.innerHTML=html; tip.style.display='block';
-        var lx=e.clientX-r.left+14; if(lx>r.width-130) lx=e.clientX-r.left-118;
-        tip.style.left=lx+'px'; tip.style.top=Math.max(0,e.clientY-r.top-8)+'px';
+        var lx=clientX-r.left+14; if(lx>r.width-130) lx=clientX-r.left-118;
+        tip.style.left=Math.max(0,lx)+'px'; tip.style.top='2px';   // pinned to top so a finger never covers it
       }
-      svg.addEventListener('mousemove',move);
-      svg.addEventListener('mouseleave',function(){ hov.style.display='none'; tip.style.display='none'; });
+      // Pointer events unify desktop hover + touch drag; touch-action:pan-y (on the svg)
+      // lets a vertical swipe still scroll the page while a horizontal drag scrubs.
+      // On touch the tip persists after lift (only a mouse leaving hides it).
+      svg.addEventListener('pointermove', function(e){ scrub(e.clientX); });
+      svg.addEventListener('pointerdown', function(e){ scrub(e.clientX); });
+      svg.addEventListener('pointerleave', function(e){ if(e.pointerType==='mouse'){ hov.style.display='none'; tip.style.display='none'; } });
     })();
     </script>
     {% else %}

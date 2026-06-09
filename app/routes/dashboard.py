@@ -39,6 +39,15 @@ def _display_tz():
         return timezone.utc
 
 
+def _as_utc(dt):
+    """A naive datetime is assumed UTC (SQLite drops tzinfo); an aware one passes
+    through; None passes through. One place for the 'stored timestamps are UTC'
+    assumption that the render/curve helpers all rely on."""
+    if dt is not None and getattr(dt, "tzinfo", None) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _fmt_when(dt, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
     """Render a stored timestamp in the configured display timezone.
 
@@ -46,9 +55,7 @@ def _fmt_when(dt, fmt: str = "%Y-%m-%d %H:%M:%S %Z") -> str:
     assumed to be UTC. None renders empty (some columns are nullable)."""
     if dt is None:
         return ""
-    if getattr(dt, "tzinfo", None) is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(_display_tz()).strftime(fmt)
+    return _as_utc(dt).astimezone(_display_tz()).strftime(fmt)
 
 
 templates.env.filters["when"] = _fmt_when
@@ -453,11 +460,8 @@ def _resolve_window(name: str):
 
 
 def _epoch_ts(dt):
-    if dt is None:
-        return None
-    if getattr(dt, "tzinfo", None) is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    dt = _as_utc(dt)
+    return dt.timestamp() if dt is not None else None
 
 
 def _downsample(pts: list, cap: int = 600) -> list:
@@ -496,9 +500,7 @@ def _load_snapshots(db) -> list[tuple]:
     """All equity snapshots as (ts_utc, total_pnl, by_exchange_dict), time-ordered."""
     out: list[tuple] = []
     for s in db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at).all():
-        ts = s.captured_at
-        if ts is not None and ts.tzinfo is None:        # SQLite returns naive
-            ts = ts.replace(tzinfo=timezone.utc)
+        ts = _as_utc(s.captured_at)                      # SQLite returns naive -> assume UTC
         try:
             by = json.loads(s.by_exchange or "{}")
         except (ValueError, TypeError):

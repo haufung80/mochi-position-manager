@@ -277,6 +277,16 @@ class BybitExchange:
             log.warning("Bybit get_step_size failed for %s (using canonical): %s", symbol, e)
         return canonical_step_size(base_asset_of(self.name, symbol))
 
+    @staticmethod
+    def _settlement_row(r: dict):
+        """Decode one Bybit v5 SETTLEMENT transaction-log row -> (time_ms, amount), or
+        None to skip (no time/amount). Funding is in `funding` (signed; negative =
+        paid). One decoder so the live funding poll and the equity backfill can't drift
+        on field names."""
+        ts = int(r.get("transactionTime") or 0)
+        amt = float(r.get("funding") or r.get("change") or 0.0)
+        return (ts, amt) if ts and amt else None
+
     def get_funding(self, symbol: str, start_ms: int, end_ms: int) -> list[dict]:
         """Funding settlements from the account transaction log. NOTE: Bybit v5
         records funding as type=SETTLEMENT with the amount in `funding` (signed;
@@ -292,10 +302,9 @@ class BybitExchange:
             return []
         out: list[dict] = []
         for r in rows:
-            ts = int(r.get("transactionTime") or 0)
-            amt = float(r.get("funding") or r.get("change") or 0.0)
-            if ts and amt:
-                out.append({"time_ms": ts, "amount": amt})
+            row = self._settlement_row(r)
+            if row:
+                out.append({"time_ms": row[0], "amount": row[1]})
         return out
 
     def get_closed_pnl(self, start_ms: int, end_ms: int) -> list[tuple[int, float]]:
@@ -345,10 +354,9 @@ class BybitExchange:
                     break
                 result = resp.get("result") or {}
                 for r in result.get("list") or []:
-                    ts = int(r.get("transactionTime") or 0)
-                    amt = float(r.get("funding") or r.get("change") or 0.0)
-                    if ts and amt:
-                        out.append((ts, amt))
+                    row = self._settlement_row(r)
+                    if row:
+                        out.append(row)
                 cursor = result.get("nextPageCursor") or ""
                 if not cursor:
                     break
