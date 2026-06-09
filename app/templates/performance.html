@@ -116,6 +116,9 @@
       <line x1="{{ equity.plot_left }}" y1="{{ t.y }}" x2="{{ equity.plot_right }}" y2="{{ t.y }}" stroke="#1b1f27" stroke-width="1"/>
       <text x="{{ equity.plot_left - 5 }}" y="{{ t.y + 3 }}" text-anchor="end" font-size="9" fill="#888">${{ t.v|usd }}</text>
       {% endfor %}
+      {% for t in equity.y_ticks_right %}    {# right axis: account value = capital + PnL #}
+      <text x="{{ equity.plot_right + 6 }}" y="{{ t.y + 3 }}" text-anchor="start" font-size="9" fill="#7c8aa0">${{ t.v|usd }}</text>
+      {% endfor %}
       <line x1="{{ equity.plot_left }}" y1="{{ equity.zero_y }}" x2="{{ equity.plot_right }}" y2="{{ equity.zero_y }}"
             stroke="#2a2e38" stroke-width="1" stroke-dasharray="4 4"/>
       {% for t in equity.x_ticks %}
@@ -136,6 +139,7 @@
       {% endfor %}
     </div>
     <div class="muted" style="margin-top:6px;">{{ equity.start_label }} → {{ equity.end_label }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }} · hover or drag across to scrub</div>
+    {% if equity.y_ticks_right %}<div class="muted" style="font-size:10px;">left axis: PnL · right axis: account value (capital + PnL)</div>{% endif %}
     <div class="muted">True total PnL (realized + unrealized + funding − commission) captured hourly, per exchange + aggregate; right edge anchored to the live headline. Builds forward from deploy — earlier history isn't reconstructed (per-fill PnL wasn't recorded).</div>
     <script>
     (function(){

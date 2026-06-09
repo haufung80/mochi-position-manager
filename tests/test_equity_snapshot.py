@@ -120,6 +120,21 @@ def test_equity_svg_has_axes_and_hover_columns():
     assert {"Total", "bybit"} <= named                                 # both series in the tooltip
 
 
+def test_equity_svg_right_axis_is_account_value():
+    """With a capital base, the SVG adds a RIGHT y-axis re-labelling the SAME gridlines
+    as account value (capital + PnL) — same y positions, value offset by the base; the
+    zero-PnL tick reads as the capital base. No base → no right axis."""
+    t1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    series = {"Total": [(t1, 0.0), (t2, 100.0)]}
+    svg = _equity_svg(series, capital_base=2000.0)
+    assert len(svg["y_ticks_right"]) == len(svg["y_ticks"]) == 5
+    for left, right in zip(svg["y_ticks"], svg["y_ticks_right"]):
+        assert right["v"] == pytest.approx(left["v"] + 2000.0)         # re-labelled as capital + PnL
+        assert right["y"] == left["y"]                                 # same gridline
+    assert _equity_svg(series)["y_ticks_right"] == []                  # no base -> no right axis
+
+
 def test_equity_metrics_sharpe_with_enough_points():
     """Sharpe (est.) is computed from >= 8 DAILY returns (one equity point per day)."""
     base = datetime(2026, 5, 18, tzinfo=timezone.utc)

@@ -628,11 +628,16 @@ def _equity_metrics(total_series: list, capital_base: float = 0.0):
 
 
 def _equity_svg(series, width: int = 920, height: int = 220,
-                ml: int = 52, mr: int = 12, mt: int = 12, mb: int = 22):
+                ml: int = 52, mr: int = 12, mt: int = 12, mb: int = 22,
+                capital_base: float = 0.0):
     """Multi-series equity SVG with value (Y) + time (X) axes and per-point hover
     columns. `series` = {name: [(ts, v)]} (or a bare point list = the Total line).
     ml/mr/mt/mb are margins for axis labels. None when there's nothing to plot.
-    'Total' is drawn last (on top) and thicker; venue lines are dimmer."""
+    'Total' is drawn last (on top) and thicker; venue lines are dimmer.
+
+    With `capital_base` > 0, a RIGHT y-axis re-labels the SAME gridlines in account-
+    value terms (capital_base + PnL) — the line stays PnL-from-0, the left axis reads
+    PnL, the right reads the capital amount (the zero-PnL line == the capital base)."""
     if isinstance(series, list):
         series = {"Total": series} if series else {}
     series = {k: v for k, v in series.items() if v}
@@ -645,7 +650,9 @@ def _equity_svg(series, width: int = 920, height: int = 220,
     valid = [t for t in all_ts if t is not None]
     t0 = min(valid) if valid else 0.0
     tspan = (max(valid) - t0) if valid else 0.0
-    px_l, px_r, px_t, px_b = ml, width - mr, mt, height - mb
+    # Reserve room on the right for the capital-axis labels when shown.
+    mr_eff = max(mr, 54) if capital_base and capital_base > 0 else mr
+    px_l, px_r, px_t, px_b = ml, width - mr_eff, mt, height - mb
 
     def fy(v):
         return px_t + (px_b - px_t) * (1 - (v - lo) / span)
@@ -673,6 +680,9 @@ def _equity_svg(series, width: int = 920, height: int = 220,
                       "last": pts[-1][1], "is_total": name == "Total"})
 
     y_ticks = [{"v": lo + span * k / 4, "y": round(fy(lo + span * k / 4), 1)} for k in range(5)]
+    # Right axis: the SAME gridlines re-labelled as account value (capital + PnL).
+    y_ticks_right = ([{"v": t["v"] + capital_base, "y": t["y"]} for t in y_ticks]
+                     if capital_base and capital_base > 0 else [])
     x_ticks = []
     if tspan:
         for k in range(4):
@@ -696,7 +706,8 @@ def _equity_svg(series, width: int = 920, height: int = 220,
     span_key = "Total" if "Total" in series else order[0]
     return {"lines": lines, "zero_y": round(fy(0.0), 1), "width": width, "height": height,
             "plot_left": px_l, "plot_right": px_r, "plot_top": px_t, "plot_bottom": round(px_b, 1),
-            "lo": lo, "hi": hi, "y_ticks": y_ticks, "x_ticks": x_ticks, "columns": columns,
+            "lo": lo, "hi": hi, "y_ticks": y_ticks, "y_ticks_right": y_ticks_right,
+            "x_ticks": x_ticks, "columns": columns,
             "start_label": _fmt_when(series[span_key][0][0], "%m-%d %H:%M"),
             "end_label": _fmt_when(series[span_key][-1][0], "%m-%d %H:%M")}
 
@@ -726,8 +737,9 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         snapshots, perf = _equity_dataset(db, request.app.state.strategy_router, force=refresh)
         live_by_ex = _by_exchange_totals(perf)
         series = _equity_series(snapshots, wdelta, perf["totals"]["total"], live_by_ex)
-        equity = _equity_svg(series)
-        metrics = _equity_metrics(series.get("Total", []), get_settings().equity_capital_base)
+        cap = get_settings().equity_capital_base
+        equity = _equity_svg(series, capital_base=cap)      # right axis = account value
+        metrics = _equity_metrics(series.get("Total", []), cap)
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,

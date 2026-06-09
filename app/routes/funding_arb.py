@@ -669,8 +669,8 @@ def arb_report_page(request: Request,
         snapshots, report = _arb_equity_dataset(db, force=refresh)
         series = _equity_series(snapshots, wdelta, report["totals"]["net"],
                                 _arb_by_venue(report))
-        equity = _equity_svg(series)
         capital = _arb_capital_base(report)              # config, else deployed notional
+        equity = _equity_svg(series, capital_base=capital)   # right axis = capital + net
         metrics = _equity_metrics(series.get("Total", []), capital_base=capital)
     resp = templates.TemplateResponse("funding_arb.html", {
         "request": request, "report": report, "equity": equity, "metrics": metrics,
