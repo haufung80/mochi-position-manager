@@ -116,27 +116,33 @@ def test_size_pair_min_mode_clears_each_leg_min(arb_registry):
     assert qty * 50000.0 >= 10.0          # clears the spot min-notional
 
 
-def test_size_pair_min_mode_pads_low_price_coarse_step_asset(arb_registry):
-    """A low-price, whole-unit asset (PURR ~ $0.088, step 1) must size ABOVE the $10
-    floor with margin — not land exactly on it. Landing on it is the real arb #1
-    failure: 114 PURR ≈ $10.02 → HL rejected on a downtick."""
-    arb_registry.state.prices["PURR/USDC"] = 0.0879
-    arb_registry.state.prices["PURR"] = 0.0879
-    arb_registry.state.spot_min_notionals["PURR/USDC"] = 10.0
-    arb_registry.state.min_notionals["PURR"] = 10.0
-    arb_registry.state.spot_step_sizes["PURR/USDC"] = 1.0      # whole units (szDecimals 0)
-    arb_registry.state.step_sizes["PURR"] = 1.0
+@pytest.mark.parametrize("label, price, step", [
+    ("BTC-like: high price, fine step", 50000.0, 0.001),
+    ("HYPE-like: mid price", 59.0, 0.01),
+    ("PURR-like: low price, whole units (the arb #1 failure)", 0.0879, 1.0),
+    ("sub-$1 whole-unit coin", 0.5, 1.0),
+    ("very-low price, fine step", 0.02, 0.1),
+])
+def test_size_pair_min_clears_floor_with_margin(arb_registry, label, price, step):
+    """size_mode='min' must clear the $10 venue floor WITH MARGIN for ANY coin profile,
+    never landing exactly on it — that's the arb #1 failure (114 PURR ≈ $10.02 → HL
+    rejected on a downtick). This sweep guards future coin additions: drop the
+    _MIN_NOTIONAL_BUFFER and the low-price/coarse-step rows fail here, not on the box."""
+    arb_registry.state.prices["SPOT"] = price
+    arb_registry.state.prices["PERP"] = price
+    arb_registry.state.spot_min_notionals["SPOT"] = 10.0
+    arb_registry.state.min_notionals["PERP"] = 10.0
+    arb_registry.state.spot_step_sizes["SPOT"] = step
+    arb_registry.state.step_sizes["PERP"] = step
     arb_id = _mk_arb()
-    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="PURR/USDC",
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="SPOT",
              side="buy", target_qty=0.0)
-    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="PURR",
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="PERP",
              side="sell", target_qty=0.0)
     with session_scope() as db:
         legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
         qty = arb_executor.size_pair(legs, size_mode="min", notional=None)
-    assert qty == float(int(qty))         # whole units
-    assert qty > 114                      # strictly more than the bare $10 boundary (114)
-    assert qty * 0.0879 >= 11.0           # clears $10 with margin (was ~$10.02 -> rejected)
+    assert qty * price >= 10.0 * 1.1, f"{label}: ${qty * price:.2f} too close to the $10 floor"
 
 
 def test_size_pair_rejects_when_notional_below_a_leg_min(arb_registry):

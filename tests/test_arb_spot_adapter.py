@@ -10,12 +10,18 @@ Three layers:
 """
 from __future__ import annotations
 
+import os
+from typing import get_args
+
 import pytest
 
 from app.exchanges.bybit import BybitExchange
-from app.exchanges.hyperliquid import HyperliquidExchange
-from app.exchanges.symbols import spot_symbol_for
+from app.exchanges.hyperliquid import HyperliquidExchange, _HL_SPOT_SZ_DECIMALS
+from app.exchanges.symbols import (CANONICAL_STEP_SIZES, HYPERLIQUID_NATIVE_SPOT,
+                                   SUPPORTED_BASE_ASSETS, hyperliquid_spot_token,
+                                   spot_symbol_for, symbol_for)
 from app.schemas import OrderResult
+from app.schemas_arb import Asset
 
 
 # --- spot symbol mapping -----------------------------------------------------
@@ -71,6 +77,55 @@ def test_arb_open_request_accepts_native_assets():
         ArbOpenRequest(idempotency_key="k", asset=a, size_mode="min")
     with pytest.raises(Exception):
         ArbOpenRequest(idempotency_key="k", asset="DOGE", size_mode="min")
+
+
+# --- adding a new arb coin must stay fully wired (regression: the PURR rollout) ----
+
+@pytest.mark.parametrize("asset", get_args(Asset))
+def test_every_arb_asset_is_fully_wired(asset):
+    """Every coin in the arb `Asset` enum must have its HL perp + spot symbols, a
+    canonical step size, and an offline spot-szDecimals entry. Adding a coin to the
+    enum without wiring these fails HERE, not at order time on the box."""
+    assert asset in SUPPORTED_BASE_ASSETS
+    assert symbol_for("hyperliquid", asset)                  # perp symbol resolves
+    assert spot_symbol_for("hyperliquid", asset)             # spot symbol resolves
+    assert CANONICAL_STEP_SIZES.get(asset, 0) > 0            # sizing step present
+    assert asset in _HL_SPOT_SZ_DECIMALS                     # offline spot szDecimals present
+
+
+@pytest.mark.parametrize("asset", get_args(Asset))
+def test_arb_asset_native_unit_spot_consistent(asset):
+    """The adapter must recover the SAME spot base token the symbols module encodes, so
+    a native coin (HYPE/PURR → bare token) and a Unit-bridged coin (BTC → UBTC) can't
+    drift. A native coin NOT marked native would resolve to a bogus 'U'+name — the
+    original PURR/HYPE bug — and fail this."""
+    ex = HyperliquidExchange(private_key="", account_address="", dry_run=True)
+    spot_sym = spot_symbol_for("hyperliquid", asset)         # 'HYPE/USDC' | 'UBTC/USDC'
+    assert ex._spot_base_token(spot_sym) == hyperliquid_spot_token(asset)
+    if asset in HYPERLIQUID_NATIVE_SPOT:
+        assert hyperliquid_spot_token(asset) == asset and not spot_sym.startswith("U")
+    else:
+        assert hyperliquid_spot_token(asset) == "U" + asset
+
+
+@pytest.mark.skipif(not os.getenv("HL_LIVE_TESTS"),
+                    reason="opt-in live check; run `HL_LIVE_TESTS=1 pytest -k live_arb_asset` when adding a coin")
+@pytest.mark.parametrize("asset", get_args(Asset))
+def test_live_arb_asset_has_hl_perp_and_spot(asset):
+    """DEFINITIVE check against HL's public API (opt-in): every arb asset has an HL perp
+    AND a USDC spot pair under the token name our code resolves — i.e. the native/Unit
+    classification is actually correct on HL. RUN THIS WHEN ADDING A COIN."""
+    import requests
+    info = "https://api.hyperliquid.xyz/info"
+    perps = {u["name"] for u in requests.post(info, json={"type": "meta"}, timeout=15).json()["universe"]}
+    assert symbol_for("hyperliquid", asset) in perps, f"{asset}: no HL perp"
+    sm = requests.post(info, json={"type": "spotMeta"}, timeout=15).json()
+    idx = {t["name"].upper(): t["index"] for t in sm["tokens"]}
+    tok = hyperliquid_spot_token(asset).upper()
+    assert tok in idx, f"{asset}: spot token {tok} not on HL (native/Unit misclassified?)"
+    usdc = idx.get("USDC")
+    assert any(len(p["tokens"]) == 2 and p["tokens"][0] == idx[tok] and p["tokens"][1] == usdc
+               for p in sm["universe"]), f"{asset}: no {tok}/USDC spot pair on HL"
 
 
 # --- 1. through the FakeRegistry (both venues, incl. HL spot working) --------
