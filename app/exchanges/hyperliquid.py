@@ -391,9 +391,10 @@ class HyperliquidExchange:
         aggressive **IOC limit** at the slippage-adjusted mid, which routes to the
         spot asset automatically (spot ids >= 10000). We reuse it for spot.
 
-        HL spot fees are quote-denominated (USDC), so `filled_qty_base` is the
-        gross filled base; the true `commission_asset` is still surfaced. DRY_RUN
-        (or no key) short-circuits to a simulated net-base result with NO network,
+        HL spot BUY fees are charged in the BASE coin received (PURR / HYPE / UBTC),
+        so `filled_qty_base` is NET of the fee (like Bybit); a SELL fee is USDC-
+        denominated, so the base sold is gross. `commission_asset` is surfaced either
+        way. DRY_RUN (or no key) short-circuits to a simulated result with NO network,
         mirroring the perp path."""
         try:
             pair_name, sz_decimals = (
@@ -447,10 +448,20 @@ class HyperliquidExchange:
             except Exception as e:
                 log.warning("HL spot fee enrichment failed (continuing): %s", e)
 
+            # HL spot BUY fees are charged in the BASE coin received (e.g. PURR / HYPE /
+            # UBTC), so the actually-held, hedgeable base is NET of the fee — mirror the
+            # Bybit base-fee netting. A SELL fee is USDC-denominated, so the base sold is
+            # gross (unaffected). Guarded by the fee asset matching the leg's base token.
+            net_filled = filled or qty_base
+            base_tok = self._spot_base_token(symbol)
+            if (side == "buy" and commission > 0 and commission_asset
+                    and commission_asset.upper() == base_tok.upper()):
+                net_filled = max(0.0, net_filled - commission)
+
             return OrderResult(
                 success=True,
                 exchange_order_id=oid,
-                filled_qty_base=filled or qty_base,   # quote-denom fee: base is gross
+                filled_qty_base=net_filled,
                 avg_price=avg_px,
                 commission=commission,
                 commission_asset=commission_asset,

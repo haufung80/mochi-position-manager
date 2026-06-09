@@ -220,9 +220,10 @@ against).
   on an empty non-`default` bucket.
 - **REAL HL spot adapter** (not deferred): `spot_market_order` uses the SDK's `market_open` (an
   aggressive **IOC limit** — HL has no separate market primitive); resolves the Unit pair via `spotMeta`
-  and the spot mid keyed by the canonical `@N` name. **Fee denomination drives `filled_qty`: HL spot fee
-  is quote-denominated (USDC) → `filled_qty` is GROSS base; Bybit spot fee is base-denominated → NET
-  base.** Both venues enforce a $10 min order on HL.
+  and the spot mid keyed by the canonical `@N` name. **Fee denomination drives `filled_qty`: a spot BUY
+  fee is base-denominated on BOTH HL (PURR/HYPE/UBTC, the received coin) and Bybit → `filled_qty` is NET
+  base; a spot SELL fee is USDC-denominated → the base sold stays gross.** Both venues enforce a $10 min
+  order on HL.
 
 ### Executor & workers (the writer boundary)
 

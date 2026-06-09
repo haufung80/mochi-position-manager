@@ -288,9 +288,9 @@ def _on_leg_success(leg: ArbLeg, order: ArbOrder, result: OrderResult) -> None:
     """Record the NET fill on both the ArbOrder and the ArbLeg.
 
     ``filled_qty_base`` is already the actually-held base coming out of the
-    adapter (Bybit spot buy = net of the base-coin fee; HL spot = gross because
-    its fee is quote-denominated; perp = filled contracts). We store that as the
-    hedgeable quantity neutrality + close are measured against."""
+    adapter (a spot BUY = net of the base-coin fee on BOTH Bybit and HL; a spot
+    SELL / perp = the gross filled qty). We store that as the hedgeable quantity
+    neutrality + close are measured against."""
     filled = result.filled_qty_base or order.qty_base
     order.status = "success"
     order.exchange_order_id = result.exchange_order_id

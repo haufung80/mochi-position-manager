@@ -349,6 +349,19 @@ def test_hl_spot_resolves_from_canonical_base():
     assert r.success and ex._exchange.calls[0]["name"] == "@142"
 
 
+def test_hl_spot_buy_nets_base_denominated_fee(monkeypatch):
+    """HL spot BUY fee is charged in the base coin → filled_qty_base is NET of it (the
+    hedgeable held base, like Bybit); a SELL fee is USDC → the base sold stays gross."""
+    ex = _hl_real()
+    monkeypatch.setattr(ex, "_fill_fee", lambda oid: (0.0001, "UBTC"))   # base-denominated
+    rb = ex.spot_market_order("UBTC/USDC", "buy", 0.02)
+    assert rb.success and rb.commission_asset == "UBTC"
+    assert rb.filled_qty_base == pytest.approx(0.02 - 0.0001)            # net of the base fee
+    monkeypatch.setattr(ex, "_fill_fee", lambda oid: (0.05, "USDC"))     # quote-denominated
+    rs = ex.spot_market_order("UBTC/USDC", "sell", 0.02)
+    assert rs.success and rs.filled_qty_base == pytest.approx(0.02)      # base sold stays gross
+
+
 def test_hl_get_price_spot_pair_returns_spot_mid_no_warning(caplog):
     """A spot pair ('UBTC/USDC') resolves to its canonical '@142' and reads THAT
     key's mid from all_mids — with NO warning logged (the noisy 'symbol not
