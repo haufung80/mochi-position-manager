@@ -57,6 +57,13 @@ log = logging.getLogger(__name__)
 # Below this |base qty| a leg is treated as flat / a hedge mismatch is dust.
 _QTY_EPS: float = 1e-12
 
+# Headroom over a venue's MINIMUM order value when sizing size_mode="min" orders, so a
+# coarse-step / low-price asset (e.g. PURR ~ $0.088, whole-unit steps) clears the floor
+# with margin instead of landing exactly on it and being rejected when the price ticks
+# down between sizing and fill (or vs the venue's own valuation price). "min" is a tiny
+# paper order either way, so over-sizing it slightly is harmless.
+_MIN_NOTIONAL_BUFFER: float = 1.2
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -206,9 +213,12 @@ def size_pair(legs: list[ArbLeg], *, size_mode: str,
         )
 
     if size_mode == "min":
-        # qty must clear EACH leg's own min-notional at its own ref price.
+        # qty must clear EACH leg's own min-notional at its own ref price, PADDED by
+        # _MIN_NOTIONAL_BUFFER so a low-price / coarse-step asset clears the floor with
+        # margin (PURR at ~$0.088 in whole units would otherwise size to exactly $10 and
+        # be rejected on a downtick). The re-check below still uses the TRUE minimum.
         per_leg_min_qty = [
-            _min_qty_for_notional(_leg_min_notional(ex, leg),
+            _min_qty_for_notional(_leg_min_notional(ex, leg) * _MIN_NOTIONAL_BUFFER,
                                   _leg_ref_price(ex, leg) or ref_price, coarse)
             for ex, leg in zip(adapters, legs)
         ]
