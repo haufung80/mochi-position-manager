@@ -17,7 +17,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from .config import get_settings
 from .db import session_scope
 from .exchanges.registry import get_registry
-from .models import ArbFundingEvent, ArbLeg, ArbPosition, EquitySnapshot, FundingEvent
+from .models import AppMeta, ArbFundingEvent, ArbLeg, ArbPosition, EquitySnapshot, FundingEvent
 
 log = logging.getLogger(__name__)
 
@@ -154,12 +154,12 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
     snapshot equals the page's Total PnL (realized + unrealized + funding − commission).
     `captured_at` pins the timestamp — the loop passes the top of the hour so points
     land on HH:00; defaults to now. Best-effort — True when a row was written."""
-    from .routes.dashboard import _performance   # local import avoids an import cycle
+    from .routes.dashboard import _performance, _by_exchange_totals   # local: avoid import cycle
     try:
         with session_scope() as db:
             perf = _performance(db, router)
             t = perf["totals"]
-            by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
+            by_ex = _by_exchange_totals(perf)
             db.add(EquitySnapshot(
                 captured_at=captured_at or datetime.now(timezone.utc),
                 total_pnl=t["total"], realized=t["realized"], unrealized=t["unrealized"],
@@ -171,24 +171,42 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
         return False
 
 
+# Bump when the backfill LOGIC changes: the fingerprint shifts, so the one-time
+# backfill re-runs once on the next boot (replacing its rows) instead of being locked
+# out by the rows it already wrote — no manual DB surgery on the box. Ordinary reboots
+# (same version + start) don't re-run it.
+_BACKFILL_VERSION = 1
+
+
 def _maybe_backfill_equity() -> None:
-    """ONE-TIME historical equity backfill from each exchange's OWN records — runs
-    once (skips as soon as backfill rows exist), in the background after startup, so
-    the curve shows history with no manual trigger. EQUITY_BACKFILL_START sets the
-    start date (blank = skip). A failed run writes nothing, so the next boot retries
-    until it succeeds, then it never runs again."""
+    """ONE-TIME historical equity backfill from each exchange's OWN records, in the
+    background after startup, so the curve shows history with no manual trigger.
+    EQUITY_BACKFILL_START sets the start date (blank = skip).
+
+    Guarded by a fingerprint (version + start) in `app_meta`, NOT merely by "backfill
+    rows exist": that keeps it re-runnable after a code fix (bump _BACKFILL_VERSION)
+    without hand-deleting rows on the box, while staying one-time across normal
+    reboots. The marker is written ONLY after a CLEAN run (rows written, no venue
+    errors), so a partial/failed pull retries next boot instead of locking in bad
+    data (e.g. one venue's history transiently unavailable)."""
     start = (get_settings().equity_backfill_start or "").strip()
     if not start:
         return
+    fingerprint = f"v{_BACKFILL_VERSION}:{start}"
     with session_scope() as db:
-        if db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").first():
-            return                                  # already backfilled -> one-time
+        m = db.get(AppMeta, "equity_backfill")
+        if m is not None and m.value == fingerprint:
+            return                                  # already done for this version+start
     try:
         from .equity_backfill import backfill_equity
         sdt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         s = backfill_equity(int(sdt.timestamp() * 1000))
-        log.info("equity backfill (startup, one-time) from %s: %d rows (bybit %d, hl %d) errors=%s",
+        log.info("equity backfill from %s: %d rows (bybit %d, hl %d) errors=%s",
                  start, s["rows"], s["bybit_events"], s["hl_points"], s["errors"])
+        if s["rows"] > 0 and not s["errors"]:       # mark done only on a clean run
+            with session_scope() as db:
+                db.merge(AppMeta(key="equity_backfill", value=fingerprint,
+                                 updated_at=datetime.now(timezone.utc)))
     except Exception:
         log.exception("startup equity backfill failed")
 

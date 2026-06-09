@@ -411,6 +411,13 @@ def _performance(db, router) -> dict:
             "exchange_positions": actual}
 
 
+def _by_exchange_totals(perf: dict) -> dict:
+    """{exchange: total_pnl} from a _performance() result — the per-venue equity
+    values. Used by BOTH the page's live tip and the snapshot writer, so the stored
+    `by_exchange` history and the live right-edge can never key venues differently."""
+    return {r["exchange"]: r["total"] for r in perf["per_exchange"]}
+
+
 def _equity_curve(db, end_total=None) -> list[tuple]:
     """Equity curve from periodic `EquitySnapshot` rows — each one is the TRUE total
     PnL (realized + unrealized + funding − commission) captured at that time by the
@@ -462,6 +469,21 @@ def _downsample(pts: list, cap: int = 600) -> list:
     if out[-1] != pts[-1]:
         out.append(pts[-1])
     return out
+
+
+def _value_at(pts: list, epoch):
+    """Carry-forward value of the last point at-or-before `epoch` (None before the
+    series' first point). Lets a venue's value be read at the Total line's sampled
+    timestamps even though each series is downsampled independently — an exact-key
+    lookup otherwise drops the venue on points whose timestamps don't coincide."""
+    val = None
+    for ts, v in pts:
+        e = _epoch_ts(ts)
+        if e is None or e <= epoch:
+            val = v
+        else:
+            break
+    return val
 
 
 # --- equity dataset cache: switching timeframes / rapid reloads reuse this instead
@@ -520,7 +542,18 @@ def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None) ->
         for ex, val in by.items():
             ex_pts.setdefault(ex, []).append((ts, float(val)))
     if not total_pts:
-        return {}
+        # No snapshot inside the window. If history EXISTS (just outside this window)
+        # and there's a live value, still show that single live point so a short window
+        # on an account that has history never renders blank. With NO snapshots at all
+        # it's the genuine empty state ("No snapshots yet") — don't draw a lone spike.
+        if live_total is None or not snapshots:
+            return {}
+        now = datetime.now(timezone.utc)
+        out = {"Total": [(now, float(live_total))]}
+        for ex, tip in (live_by_ex or {}).items():
+            if tip is not None:
+                out[ex] = [(now, float(tip))]
+        return out
     series = {"Total": total_pts, **ex_pts}
     if live_total is not None:                          # tip every series to the live edge
         anchor = max(datetime.now(timezone.utc), total_pts[-1][0])
@@ -640,14 +673,15 @@ def _equity_svg(series, width: int = 920, height: int = 220,
 
     columns = []                                  # aligned hover points (date + each series value)
     if "Total" in series:
-        ex_maps = {name: dict(pts) for name, pts in series.items() if name != "Total"}
+        ex_series = {name: pts for name, pts in series.items() if name != "Total"}
         for ts, tv in _downsample(series["Total"], 160):
+            te = _epoch_ts(ts)
             items = []
             for name in order:
-                val = tv if name == "Total" else ex_maps.get(name, {}).get(ts)
+                val = tv if name == "Total" else _value_at(ex_series[name], te)
                 items.append({"name": name, "color": color_of[name],
                               "val": round(val, 2) if val is not None else None})
-            columns.append({"x": round(fx(_epoch_ts(ts)), 1),
+            columns.append({"x": round(fx(te), 1),
                             "t": _fmt_when(ts, "%m-%d %H:%M"), "items": items})
 
     span_key = "Total" if "Total" in series else order[0]
@@ -681,7 +715,7 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         # Cached dataset: snapshots + live perf, reused across timeframe switches so
         # changing the window re-fetches nothing within the TTL. ?refresh=true forces it.
         snapshots, perf = _equity_dataset(db, request.app.state.strategy_router, force=refresh)
-        live_by_ex = {r["exchange"]: r["total"] for r in perf["per_exchange"]}
+        live_by_ex = _by_exchange_totals(perf)
         series = _equity_series(snapshots, wdelta, perf["totals"]["total"], live_by_ex)
         equity = _equity_svg(series)
         metrics = _equity_metrics(series.get("Total", []), get_settings().equity_capital_base)

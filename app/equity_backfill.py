@@ -82,6 +82,15 @@ def backfill_equity(start_ms: int, now_ms: int | None = None) -> dict:
         log.warning("equity backfill: hyperliquid history failed: %s", e)
     summary["hl_points"] = len(hl_points)
 
+    if summary["errors"]:
+        # A venue pull RAISED — don't replace good rows with a partial set (one venue at
+        # 0). Leave the existing backfill intact; the caller won't mark it done while
+        # errors are present, so it retries next boot until a clean pull. (A venue that
+        # legitimately returns no rows without raising is fine and writes through.)
+        log.warning("equity backfill: venue error(s) %s — existing backfill left untouched",
+                    summary["errors"])
+        return summary
+
     if not bybit_events and not hl_points:
         summary["errors"].append("no data from either venue — existing backfill left untouched")
         return summary

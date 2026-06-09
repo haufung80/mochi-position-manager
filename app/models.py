@@ -290,3 +290,16 @@ class EquitySnapshot(Base):
     # "live" = captured by the worker; "backfill" = imported from the exchanges'
     # own history. Lets a re-run replace only the backfilled rows, never live ones.
     source: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
+
+
+class AppMeta(Base):
+    """Tiny key-value store for app-level markers that must survive restarts but
+    don't fit another table — e.g. the equity-backfill fingerprint, so the one-time
+    backfill re-runs when its version/start changes (a code fix) without needing
+    manual DB surgery, but stays one-time across ordinary reboots."""
+    __tablename__ = "app_meta"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)

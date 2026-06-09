@@ -150,6 +150,37 @@ def test_equity_dataset_caches_within_ttl(tmp_path, stub_exchange, monkeypatch):
     assert calls["n"] == 2
 
 
+def test_equity_series_empty_window_keeps_live_tip():
+    """A window with no snapshots in it still shows the live point (+ per-venue tips),
+    so the chart and metrics aren't blank when there IS a real current PnL (short
+    windows, a stalled worker, a fresh deploy before the first snapshot)."""
+    now = datetime.now(timezone.utc)
+    snaps = [(now - timedelta(days=10), 10.0, {"bybit": 10.0})]      # only an out-of-window point
+    s = _equity_series(snaps, timedelta(hours=24), live_total=33.0,
+                       live_by_ex={"bybit": 20.0, "hyperliquid": 13.0})
+    assert s["Total"][-1][1] == pytest.approx(33.0)                  # live tip kept, not dropped
+    assert s["bybit"][-1][1] == pytest.approx(20.0)
+    assert s["hyperliquid"][-1][1] == pytest.approx(13.0)
+    assert _equity_svg(s) is not None                                # renders a chart...
+    assert _equity_metrics(s["Total"])["current"] == pytest.approx(33.0)   # ...and metrics
+    assert _equity_series(snaps, timedelta(hours=24)) == {}          # but no live value -> empty
+
+
+def test_equity_svg_hover_carries_sparse_venue():
+    """Hover columns read each venue by carry-forward, so a venue whose points don't
+    coincide with every Total timestamp (independent downsampling / a venue added later)
+    keeps a value instead of dropping out — and is correctly absent before its first point."""
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    total = [(base + timedelta(hours=i), float(i)) for i in range(10)]
+    hyper = [(base + timedelta(hours=i), 100.0 + i) for i in (2, 5, 9)]    # gaps at hours 3,4,6,7,8
+    svg = _equity_svg({"Total": total, "hyperliquid": hyper})
+    def hl(col):
+        return next(it["val"] for it in col["items"] if it["name"] == "hyperliquid")
+    assert hl(svg["columns"][0]) is None                  # before hyperliquid's first point
+    assert hl(svg["columns"][3]) == pytest.approx(102.0)  # carry-forward from hour 2 (was dropped before)
+    assert hl(svg["columns"][9]) == pytest.approx(109.0)  # exact at hour 9
+
+
 def test_snapshot_pinned_to_top_of_hour(tmp_path, stub_exchange):
     """write_equity_snapshot stamps the row at the given top-of-hour timestamp, so the
     hourly curve points land on HH:00; the helpers expose that boundary."""

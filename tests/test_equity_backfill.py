@@ -81,6 +81,32 @@ def test_backfill_no_data_leaves_existing_untouched(monkeypatch):
         assert db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").count() == 1
 
 
+def test_backfill_venue_error_leaves_existing_untouched(monkeypatch):
+    """A venue EXCEPTION during a (re-)run must not replace good backfill rows with a
+    partial set — existing rows are preserved and the error is reported, so the startup
+    hook won't mark it done and will retry."""
+    start, now = _ms(2026, 5, 28), _ms(2026, 6, 2)
+    with session_scope() as db:
+        for d in (28, 29, 30):
+            db.add(EquitySnapshot(captured_at=datetime(2026, 5, d, 12, tzinfo=timezone.utc),
+                                  total_pnl=10.0, by_exchange='{"bybit": 10.0}', source="backfill"))
+
+    class BoomBybit:
+        def get_closed_pnl(self, s, e): raise RuntimeError("bybit down")
+        def get_account_funding(self, s, e): return []
+
+    class FakeHL:
+        def get_pnl_history(self): return [(_ms(2026, 5, 28), 0.0), (_ms(2026, 5, 31), 40.0)]
+
+    monkeypatch.setattr(equity_backfill, "get_registry",
+                        lambda: type("R", (), {"get": lambda self, n, account="default":
+                                               BoomBybit() if n == "bybit" else FakeHL()})())
+    s = backfill_equity(start, now_ms=now)
+    assert s["rows"] == 0 and any("bybit" in e for e in s["errors"])
+    with session_scope() as db:                    # prior rows preserved, not partial-replaced
+        assert db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").count() == 3
+
+
 def test_backfill_does_not_touch_live_snapshots(monkeypatch):
     start, now = _ms(2026, 5, 28), _ms(2026, 6, 2)
     with session_scope() as db:
@@ -103,24 +129,45 @@ def test_backfill_does_not_touch_live_snapshots(monkeypatch):
         assert db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").count() == 6
 
 
-def test_maybe_backfill_equity_one_time_and_config(monkeypatch):
-    """The startup hook skips when blank, runs once when configured, and is one-time
-    (skips once backfill rows exist)."""
+def test_maybe_backfill_equity_fingerprint_guard(monkeypatch):
+    """Startup hook: skips when blank; runs once per (version, start) fingerprint stored
+    in app_meta; re-runs when the fingerprint changes (a start change here; a
+    _BACKFILL_VERSION bump after a code fix is identical); and a failed/partial run
+    (errors, or 0 rows) does NOT mark done, so it retries until a clean run."""
     from app import funding_worker
+    from app.models import AppMeta
     calls = []
+    result = {"rows": 6, "bybit_events": 3, "hl_points": 3, "errors": []}     # clean by default
     monkeypatch.setattr("app.equity_backfill.backfill_equity",
-                        lambda start_ms, now_ms=None: calls.append(start_ms)
-                        or {"rows": 0, "bybit_events": 0, "hl_points": 0, "errors": []})
-    monkeypatch.setattr(funding_worker, "get_settings",
-                        lambda: type("S", (), {"equity_backfill_start": ""})())
+                        lambda start_ms, now_ms=None: calls.append(start_ms) or dict(result))
+
+    def cfg(start):
+        monkeypatch.setattr(funding_worker, "get_settings",
+                            lambda: type("S", (), {"equity_backfill_start": start})())
+
+    cfg("")
     funding_worker._maybe_backfill_equity()
-    assert calls == []                              # blank -> skip
-    monkeypatch.setattr(funding_worker, "get_settings",
-                        lambda: type("S", (), {"equity_backfill_start": "2026-05-28"})())
+    assert calls == []                                       # blank -> skip
+
+    cfg("2026-05-28")
     funding_worker._maybe_backfill_equity()
-    assert len(calls) == 1                          # configured + no rows -> runs once
-    with session_scope() as db:                     # a backfill row already present...
-        db.add(EquitySnapshot(captured_at=datetime(2026, 5, 28, 12, tzinfo=timezone.utc),
-                              total_pnl=1.0, by_exchange="{}", source="backfill"))
     funding_worker._maybe_backfill_equity()
-    assert len(calls) == 1                          # ...so it doesn't run again (one-time)
+    assert len(calls) == 1                                   # clean run -> one-time
+    with session_scope() as db:                             # ...recorded a fingerprint marker
+        ver = funding_worker._BACKFILL_VERSION
+        assert db.get(AppMeta, "equity_backfill").value == f"v{ver}:2026-05-28"
+
+    cfg("2026-01-01")                                        # fingerprint changed -> re-runs
+    funding_worker._maybe_backfill_equity()
+    assert len(calls) == 2
+
+    result.update(rows=0, errors=["bybit: boom"])           # a failing/partial pull...
+    cfg("2026-02-02")
+    funding_worker._maybe_backfill_equity()
+    funding_worker._maybe_backfill_equity()
+    assert len(calls) == 4                                   # ...never marks done -> retries each boot
+
+    result.update(rows=6, errors=[])                         # recovers -> marks done, then stops
+    funding_worker._maybe_backfill_equity()
+    funding_worker._maybe_backfill_equity()
+    assert len(calls) == 5
