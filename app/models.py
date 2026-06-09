@@ -197,6 +197,9 @@ class ArbLeg(Base):
     target_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     filled_qty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)  # NET base received
     avg_fill: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Reference mid at order time (the leg's own venue), captured so execution
+    # slippage = avg_fill vs ref can be reported. 0 = not captured (legacy legs).
+    ref_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

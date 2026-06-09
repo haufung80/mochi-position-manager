@@ -362,9 +362,12 @@ def execute_leg(db: Session, leg: ArbLeg,
     order.updated_at = _utcnow()
     db.flush()
 
+    ref = _leg_ref_price(ex, leg)               # mid at order time, recorded for slippage
     result = _place_leg_order(ex, leg)
     if result.success:
         _on_leg_success(leg, order, result)
+        if ref > 0:
+            leg.ref_price = ref
     else:
         _on_leg_failure(leg, order, result)
     return order

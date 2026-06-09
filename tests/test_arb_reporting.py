@@ -514,3 +514,38 @@ def test_arb_report_page_shows_apr(client_set):
     assert r.status_code == 200, r.text
     assert "APR (est.)" in r.text
     assert "on $1000" in r.text                     # auto capital = 0.02 * 50000, return-% caption
+
+
+# ===========================================================================
+# Basis P&L, slippage, and the closed-arb neutrality fix
+# ===========================================================================
+
+def test_arb_basis_slippage_and_closed_not_skew():
+    """_arb_performance surfaces basis (entry spread) + slippage (fill vs the recorded
+    mid), and flags neutrality only for open-ish arbs — a closed/flat arb is not 'skew'."""
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    aid = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy",
+         "filled": 0.02, "avg_fill": 50010.0},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell",
+         "filled": 0.02, "avg_fill": 50100.0},
+    ], status="open", opened_at=t0)
+    with session_scope() as db:                      # record the mid-at-fill on each leg
+        for lg in db.query(ArbLeg).filter(ArbLeg.arb_id == aid):
+            lg.ref_price = 50000.0
+    cid = _make_arb("PURR", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "PURR/USDC", "side": "buy"},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "PURR", "side": "sell"},
+    ], status="closed")
+    with session_scope() as db:
+        report = _arb_performance(db)
+    a = next(x for x in report["arbs"] if x["arb_id"] == aid)
+    assert a["basis"] == pytest.approx((50100.0 - 50010.0) * 0.02)          # (sell − buy) × qty
+    assert a["slippage_known"] is True
+    assert a["slippage"] == pytest.approx((50010 - 50000) * 0.02 + (50000 - 50100) * 0.02)
+    assert a["show_neutrality"] is True
+    c = next(x for x in report["arbs"] if x["arb_id"] == cid)
+    assert c["show_neutrality"] is False             # closed -> NOT flagged skew
+    assert c["slippage_known"] is False              # no ref / no fills
+    assert report["totals"]["basis"] == pytest.approx(a["basis"])           # closed adds 0
+    assert report["totals"]["slippage_known"] is True

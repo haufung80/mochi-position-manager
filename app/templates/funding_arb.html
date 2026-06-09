@@ -77,11 +77,18 @@
       <div class="big {{ 'pos' if report.totals.net >= 0 else 'neg' }}">${{ report.totals.net|usd }}</div></div>
     <div class="card stat"><div class="label">Funding harvested</div>
       <div class="big {{ 'pos' if report.totals.funding >= 0 else 'neg' }}">${{ report.totals.funding|usd }}</div></div>
+    <div class="card stat"><div class="label">Basis (entry spread)</div>
+      <div class="big {{ 'pos' if report.totals.basis >= 0 else 'neg' }}">${{ report.totals.basis|usd }}</div>
+      <div class="muted" style="font-size:10px">spread captured at entry · realizes on convergence</div></div>
     <div class="card stat"><div class="label">Commission</div>
       <div class="big">${{ report.totals.commission|usd }}</div></div>
-    <div class="card stat"><div class="label">Arbs (open / total)</div>
-      <div class="big">{{ report.totals.open_count }} / {{ report.totals.total_count }}</div>
-      <div class="muted" style="font-size:10px">directional net {{ money(report.totals.directional_net) }} (≈0)</div></div>
+  </div>
+  <div class="muted" style="margin:2px 0 16px;font-size:12px;">
+    Slippage {% if report.totals.slippage_known %}<b class="{{ 'neg' if report.totals.slippage > 0 else 'pos' }}">${{ report.totals.slippage|usd }}</b>{% else %}<span title="no reference mid recorded for these legs">—</span>{% endif %}
+    · Dir. net {{ money(report.totals.directional_net) }} <span style="font-size:10px">(≈0 neutrality)</span>
+    {% if metrics and metrics.get('sharpe') is not none %} · Sharpe (est.) <b>{{ metrics.sharpe|round(2) }}</b>{% endif %}
+    {% if metrics and metrics.get('apr') is not none %} · APR (est.) <b>{{ metrics.apr|round(1) }}%</b>{% endif %}
+    · {{ report.totals.open_count }} open / {{ report.totals.total_count }} total
   </div>
 
   <!-- ===== equity curve (arb net — per venue + aggregate) ===== -->
@@ -155,7 +162,7 @@
       var wrap=document.getElementById('eqwrap'), svg=wrap.querySelector('svg'),
           hov=document.getElementById('eqhover'), tip=document.getElementById('eqtip');
       var VBW={{ equity.width }}, PT={{ equity.plot_top }}, PB={{ equity.plot_bottom }};
-      function scrub(clientX){
+      function scrub(clientX, isTouch){
         var r=svg.getBoundingClientRect(); if(!r.width) return;
         var vx=(clientX-r.left)/r.width*VBW, best=cols[0], bd=1e9, i;
         for(i=0;i<cols.length;i++){ var d=Math.abs(cols[i].x-vx); if(d<bd){bd=d; best=cols[i];} }
@@ -164,12 +171,16 @@
         var html='<div style="color:#888;margin-bottom:2px;">'+best.t+'</div>';
         for(i=0;i<best.items.length;i++){ var it=best.items[i]; if(it.val==null) continue;
           html+='<div><span style="color:'+it.color+'">■</span> '+it.name+' $'+it.val.toFixed(2)+'</div>'; }
-        tip.innerHTML=html; tip.style.display='block';
-        var lx=clientX-r.left+14; if(lx>r.width-130) lx=clientX-r.left-118;
-        tip.style.left=Math.max(0,lx)+'px'; tip.style.top='2px';
+        tip.innerHTML=html; tip.style.display='block'; tip.style.top='2px';
+        if(isTouch){   // pin to the top, on the side AWAY from the finger so the thumb never covers the readout/curve
+          tip.style.left=((clientX-r.left) < r.width/2 ? (r.width - tip.offsetWidth - 6) : 6)+'px';
+        } else {
+          var lx=clientX-r.left+14; if(lx>r.width-130) lx=clientX-r.left-118;
+          tip.style.left=Math.max(0,lx)+'px';
+        }
       }
-      svg.addEventListener('pointermove', function(e){ scrub(e.clientX); });
-      svg.addEventListener('pointerdown', function(e){ scrub(e.clientX); });
+      svg.addEventListener('pointermove', function(e){ scrub(e.clientX, e.pointerType!=='mouse'); });
+      svg.addEventListener('pointerdown', function(e){ scrub(e.clientX, e.pointerType!=='mouse'); });
       svg.addEventListener('pointerleave', function(e){ if(e.pointerType==='mouse'){ hov.style.display='none'; tip.style.display='none'; } });
     })();
     </script>
@@ -186,8 +197,8 @@
     <table>
       <thead><tr>
         <th class="l">Arb / Leg</th><th class="l">Status</th><th>Funding</th>
-        <th>Commission</th><th>Spot unreal.</th><th>Perp unreal.</th>
-        <th>Dir. net</th><th>Skew</th><th>Net</th>
+        <th>Basis</th><th>Commission</th><th>Spot unreal.</th><th>Perp unreal.</th>
+        <th>Dir. net</th><th>Net</th>
       </tr></thead>
       <tbody>
         {% for a in report.arbs %}
@@ -195,15 +206,14 @@
           <td class="l"><strong>#{{ a.arb_id }} {{ a.asset }}</strong>
             {% if a.strategy_tag %}<span class="muted">· {{ a.strategy_tag }}</span>{% endif %}</td>
           <td class="l"><span class="pill s-{{ a.status }}">{{ a.status }}</span>
-            {% if a.neutral %}<span class="muted" title="both legs filled + balanced">· neutral</span>
-            {% else %}<span class="neg" title="legs not balanced / not all filled">· skew</span>{% endif %}
+            {% if a.show_neutrality %}{% if a.neutral %}<span class="muted" title="both legs filled + balanced">· neutral</span>{% else %}<span class="neg" title="legs not balanced / not all filled (skew {{ a.neutrality_skew|qty }})">· skew</span>{% endif %}{% endif %}
             {% if a.error_message %}<span class="muted" title="{{ a.error_message }}"> ⓘ</span>{% endif %}</td>
           <td>{{ money(a.funding_total) }}</td>
+          <td>{{ money(a.basis) }}</td>
           <td class="muted">${{ a.commission_total|usd }}</td>
           <td>{{ money(a.spot_unrealized) }}</td>
           <td>{{ money(a.perp_unrealized) }}</td>
           <td>{{ money(a.directional_net) }}</td>
-          <td class="muted">{{ a.neutrality_skew|qty }}</td>
           <td><strong>{{ money(a.net) }}</strong></td>
         </tr>
         {% for lg in a.legs %}
@@ -212,31 +222,33 @@
             <span class="muted">{{ lg.side }} {{ lg.filled_qty|qty }}{% if lg.avg_fill %} @ ${{ lg.avg_fill|usd }}{% endif %}</span></td>
           <td class="l"><span class="pill s-{{ lg.status }}">{{ lg.status }}</span></td>
           <td>{% if lg.product == 'perp' %}{{ money(lg.funding) }}{% else %}<span class="muted">0</span>{% endif %}</td>
+          <td></td>
           <td class="muted">{% if lg.commission %}{{ lg.commission|fee }}{% else %}—{% endif %}</td>
           <td>{% if lg.product == 'spot' %}{{ money(lg.spot_unrealized) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>{% if lg.product == 'perp' %}{{ money(lg.perp_unrealized) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>{{ money(lg.directional_net) }}</td>
-          <td></td><td></td>
+          <td></td>
         </tr>
         {% endfor %}
         {% endfor %}
         <tr style="border-top:2px solid #3a3f4b">
           <td class="l"><b>Total</b></td><td></td>
           <td>{{ money(report.totals.funding) }}</td>
+          <td>{{ money(report.totals.basis) }}</td>
           <td class="muted">${{ report.totals.commission|usd }}</td>
           <td>{{ money(report.totals.spot_unrealized) }}</td>
           <td>{{ money(report.totals.perp_unrealized) }}</td>
           <td>{{ money(report.totals.directional_net) }}</td>
-          <td></td>
           <td><strong>{{ money(report.totals.net) }}</strong></td>
         </tr>
       </tbody>
     </table>
-    <div class="muted">Per arb: <b>Net = funding − commission</b> (+ basis). Funding accrues on the
-      PERP leg only (spot shows 0). Spot/perp unrealized are cost-basis marks; their sum
-      (<b>Dir. net</b>) should sit near 0 on a balanced pair — a large value flags broken
-      neutrality (also see <b>Skew</b> = long.filled − short.filled). This book is fully
-      isolated from the directional /performance page.</div>
+    <div class="muted"><b>Net = funding − commission</b> (realized). <b>Basis</b> = the spread
+      captured at entry (perp short avg − spot long avg, realizes as the basis converges).
+      Funding accrues on the PERP leg only (spot shows 0). Spot/perp unrealized are cost-basis
+      marks; <b>Dir. net</b> (their sum) sits ≈0 on a balanced pair — a large value (or the
+      <b>skew</b> badge) flags broken neutrality. Fully isolated from the directional
+      /performance page.</div>
     {% else %}<p class="muted">No funding-arb positions yet.</p>{% endif %}
   </div>
 </body>

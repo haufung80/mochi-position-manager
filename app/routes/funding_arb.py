@@ -508,6 +508,8 @@ def _arb_performance(db) -> dict:
     rows: list[dict] = []
     tot_funding = tot_commission = tot_net = 0.0
     tot_spot_unreal = tot_perp_unreal = 0.0
+    tot_basis = tot_slippage = 0.0
+    tot_slippage_known = False
     open_count = 0
 
     arbs = db.query(ArbPosition).order_by(ArbPosition.id.desc()).all()
@@ -522,6 +524,20 @@ def _arb_performance(db) -> dict:
         skew = long_filled - short_filled
         all_success = bool(legs) and all(lg.status == "success" for lg in legs)
         neutral = all_success and abs(skew) <= 1e-9
+        # Only an open-ish pair has a meaningful neutrality state; a closed/error arb
+        # is flat (don't flag it as "skew").
+        show_neutrality = arb.status in ("opening", "open", "closing")
+        # Basis (entry spread captured) = Σ signed fill cash (sell +, buy −): for a
+        # cash-and-carry, (perp_sell_avg − spot_buy_avg)·qty — the edge locked at entry.
+        basis = sum((lg.avg_fill or 0.0) * (lg.filled_qty or 0.0)
+                    * (1 if lg.side == "sell" else -1) for lg in legs)
+        # Slippage cost vs the recorded mid at fill (buy above mid / sell below mid =
+        # positive cost); only legs that captured a ref price count.
+        slip_legs = [lg for lg in legs if (lg.ref_price or 0) > 0 and (lg.filled_qty or 0) > 0]
+        slippage = sum(((lg.avg_fill - lg.ref_price) if lg.side == "buy"
+                        else (lg.ref_price - lg.avg_fill)) * lg.filled_qty
+                       for lg in slip_legs)
+        slippage_known = bool(slip_legs)
 
         leg_rows = []
         for lg in legs:
@@ -544,11 +560,12 @@ def _arb_performance(db) -> dict:
         rows.append({
             "arb_id": arb.id, "asset": arb.asset, "status": arb.status,
             "strategy_tag": arb.strategy_tag, "neutral": neutral,
-            "neutrality_skew": skew,
+            "neutrality_skew": skew, "show_neutrality": show_neutrality,
             "opened_at": arb.opened_at, "closed_at": arb.closed_at,
             "error_message": arb.error_message or None,
             "funding_total": result.funding_total,
             "commission_total": result.commission_total,
+            "basis": basis, "slippage": slippage, "slippage_known": slippage_known,
             "spot_unrealized": result.spot_unrealized,
             "perp_unrealized": result.perp_unrealized,
             "directional_net": result.directional_net,
@@ -560,11 +577,15 @@ def _arb_performance(db) -> dict:
         tot_net += result.net
         tot_spot_unreal += result.spot_unrealized
         tot_perp_unreal += result.perp_unrealized
+        tot_basis += basis
+        tot_slippage += slippage
+        tot_slippage_known = tot_slippage_known or slippage_known
         if arb.status in ("open", "opening", "closing"):
             open_count += 1
 
     totals = {
         "funding": tot_funding, "commission": tot_commission, "net": tot_net,
+        "basis": tot_basis, "slippage": tot_slippage, "slippage_known": tot_slippage_known,
         "spot_unrealized": tot_spot_unreal, "perp_unrealized": tot_perp_unreal,
         "directional_net": tot_spot_unreal + tot_perp_unreal,
         "open_count": open_count, "total_count": len(arbs),
