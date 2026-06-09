@@ -171,3 +171,52 @@ def test_maybe_backfill_equity_fingerprint_guard(monkeypatch):
     funding_worker._maybe_backfill_equity()
     funding_worker._maybe_backfill_equity()
     assert len(calls) == 5
+
+
+def test_backfill_caps_current_day_to_the_hour(monkeypatch):
+    """The latest (partial) day is stamped on the hour, not at the off-hour run time, so
+    the backfill never introduces an off-hour point on the curve."""
+    start = _ms(2026, 5, 28)
+    now = _ms(2026, 6, 2, 2) + 46 * 60 * 1000                # Jun 2 02:46 UTC (off-hour run)
+
+    class FakeBybit:
+        def get_closed_pnl(self, s, e): return [(_ms(2026, 5, 29), 100.0)]
+        def get_account_funding(self, s, e): return []
+
+    class FakeHL:
+        def get_pnl_history(self): return []
+
+    monkeypatch.setattr(equity_backfill, "get_registry",
+                        lambda: type("R", (), {"get": lambda self, n, account="default":
+                                               FakeBybit() if n == "bybit" else FakeHL()})())
+    backfill_equity(start, now_ms=now)
+    with session_scope() as db:
+        last = (db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill")
+                .order_by(EquitySnapshot.captured_at.desc()).first().captured_at)
+    assert last.hour == 2 and last.minute == 0 and last.second == 0   # 02:00, not 02:46
+
+
+def test_cleanup_offhour_live_snapshots():
+    """One-time sweep removes off-hour source='live' rows (pre-hour-align startup
+    snapshots) but keeps on-hour live rows and all backfill rows; then it's idempotent."""
+    from app import funding_worker
+    from app.models import AppMeta
+    with session_scope() as db:
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 8, 20, 0, tzinfo=timezone.utc),
+                              total_pnl=1.0, source="live"))         # on-hour -> keep
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 8, 20, 14, 33, tzinfo=timezone.utc),
+                              total_pnl=2.0, source="live"))         # off-hour -> delete
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 8, 12, 0, tzinfo=timezone.utc),
+                              total_pnl=3.0, source="backfill"))     # backfill -> keep
+    funding_worker._maybe_cleanup_offhour_live()
+    with session_scope() as db:
+        live = db.query(EquitySnapshot).filter(EquitySnapshot.source == "live").all()
+        assert len(live) == 1 and live[0].captured_at.minute == 0
+        assert db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").count() == 1
+        assert db.get(AppMeta, "offhour_live_cleanup") is not None
+    with session_scope() as db:                                 # marker present -> idempotent (won't re-sweep)
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 8, 21, 5, tzinfo=timezone.utc),
+                              total_pnl=4.0, source="live"))
+    funding_worker._maybe_cleanup_offhour_live()
+    with session_scope() as db:
+        assert db.query(EquitySnapshot).filter(EquitySnapshot.source == "live").count() == 2

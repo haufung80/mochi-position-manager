@@ -178,7 +178,7 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
 # backfill re-runs once on the next boot (replacing its rows) instead of being locked
 # out by the rows it already wrote — no manual DB surgery on the box. Ordinary reboots
 # (same version + start) don't re-run it.
-_BACKFILL_VERSION = 1
+_BACKFILL_VERSION = 2     # v2: current-day point floored to the hour (was the off-hour run time)
 
 
 def _maybe_backfill_equity() -> None:
@@ -216,6 +216,38 @@ def _maybe_backfill_equity() -> None:
         log.exception("startup equity backfill failed")
 
 
+_OFFHOUR_CLEANUP_VERSION = 1     # bump to re-sweep
+
+
+def _maybe_cleanup_offhour_live() -> None:
+    """ONE-TIME: drop pre-hour-align startup snapshots — `source="live"` rows NOT
+    stamped on HH:00:00. Before the hour-align fix each redeploy wrote a snapshot ~90s
+    after boot (off-hour); the loop now writes ONLY on the hour, so any off-hour live
+    row is leftover cruft. Touches ONLY off-hour `source="live"` rows — never backfill,
+    never an on-hour row. Guarded by an app_meta marker so it runs once."""
+    fingerprint = f"v{_OFFHOUR_CLEANUP_VERSION}"
+    with session_scope() as db:
+        m = db.get(AppMeta, "offhour_live_cleanup")
+        if m is not None and m.value == fingerprint:
+            return
+    try:
+        n = 0
+        with session_scope() as db:
+            for r in db.query(EquitySnapshot).filter(EquitySnapshot.source == "live").all():
+                ts = r.captured_at
+                if ts is not None and (ts.minute or ts.second or ts.microsecond):
+                    db.delete(r)
+                    n += 1
+            db.merge(AppMeta(key="offhour_live_cleanup", value=fingerprint,
+                             updated_at=datetime.now(timezone.utc)))
+        if n:
+            log.info("equity: swept %d off-hour (pre-hour-align) live snapshots", n)
+            from .routes.dashboard import _clear_equity_cache
+            _clear_equity_cache()
+    except Exception:
+        log.exception("off-hour live snapshot cleanup failed")
+
+
 async def _startup_backfill(delay: float, stop_event) -> None:
     """One-time, shortly after boot (not AT boot — keeps startup network-free):
     backfill the equity curve from exchange history. Runs as its OWN task so it never
@@ -226,6 +258,7 @@ async def _startup_backfill(delay: float, stop_event) -> None:
         await asyncio.sleep(delay)
         if stop_event is not None and stop_event.is_set():
             return
+        await asyncio.to_thread(_maybe_cleanup_offhour_live)   # one-time: drop pre-fix off-hour rows
         await asyncio.to_thread(_maybe_backfill_equity)
     except asyncio.CancelledError:
         pass

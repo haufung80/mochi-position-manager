@@ -21,6 +21,7 @@ from .models import EquitySnapshot
 
 log = logging.getLogger(__name__)
 _DAY_MS = 86_400_000
+_HOUR_MS = 3_600_000
 
 
 def _build_daily_rows(bybit_events, hl_points, start_ms: int, now_ms: int):
@@ -96,10 +97,13 @@ def backfill_equity(start_ms: int, now_ms: int | None = None) -> dict:
         return summary
 
     rows = _build_daily_rows(bybit_events, hl_points, start_ms, now_ms)
+    now_hour = (now_ms // _HOUR_MS) * _HOUR_MS             # floor 'now' to the hour
     with session_scope() as db:
         db.query(EquitySnapshot).filter(EquitySnapshot.source == "backfill").delete()
         for d, b, h in rows:
-            cap_ms = min(d + _DAY_MS // 2, now_ms)         # noon UTC, never in the future
+            # noon UTC, or the current hour for the latest (partial) day — always on
+            # HH:00, never the off-hour run time, never the future.
+            cap_ms = min(d + _DAY_MS // 2, now_hour)
             db.add(EquitySnapshot(
                 captured_at=datetime.fromtimestamp(cap_ms / 1000, tz=timezone.utc),
                 total_pnl=b + h, realized=0.0, unrealized=0.0, funding=0.0, commission=0.0,
