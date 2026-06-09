@@ -17,7 +17,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from .config import get_settings
 from .db import session_scope
 from .exchanges.registry import get_registry
-from .models import AppMeta, ArbFundingEvent, ArbLeg, ArbPosition, EquitySnapshot, FundingEvent
+from .models import (AppMeta, ArbEquitySnapshot, ArbFundingEvent, ArbLeg, ArbPosition,
+                     EquitySnapshot, FundingEvent)
 
 log = logging.getLogger(__name__)
 
@@ -174,6 +175,32 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
         return False
 
 
+def write_arb_equity_snapshot(captured_at=None) -> bool:
+    """Capture the funding-arb book's current NET (funding − commission) as one
+    `ArbEquitySnapshot` row — the /funding-arb equity curve's points. Reuses the SAME
+    `_arb_performance` roll-up as the report page, so the snapshot equals the page
+    headline. Writes ONLY when arb positions exist (the curve builds forward from the
+    first arb) and ONLY to the arb table — never `equity_snapshots` (the isolation
+    invariant). `captured_at` pins the timestamp (HH:00 from the loop). Best-effort."""
+    from .routes.funding_arb import (_arb_performance, _arb_by_venue,
+                                     _clear_arb_equity_cache)
+    try:
+        with session_scope() as db:
+            if db.query(ArbPosition.id).first() is None:
+                return False                      # no arb book yet -> no curve point
+            report = _arb_performance(db)
+            t = report["totals"]
+            db.add(ArbEquitySnapshot(
+                captured_at=captured_at or datetime.now(timezone.utc),
+                net=t["net"], funding=t["funding"], commission=t["commission"],
+                by_venue=json.dumps(_arb_by_venue(report)), source="live"))
+        _clear_arb_equity_cache()
+        return True
+    except Exception:
+        log.exception("arb equity snapshot failed")
+        return False
+
+
 # Bump when the backfill LOGIC changes: the fingerprint shifts, so the one-time
 # backfill re-runs once on the next boot (replacing its rows) instead of being locked
 # out by the rows it already wrote — no manual DB surgery on the box. Ordinary reboots
@@ -312,5 +339,11 @@ async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                     log.info("funding_worker: wrote equity snapshot")
             except Exception:
                 log.exception("funding_worker equity snapshot error")
+            # Arb equity point (own table, isolated) — same HH:00, after the arb poll.
+            try:
+                if await asyncio.to_thread(write_arb_equity_snapshot, cap):
+                    log.info("funding_worker: wrote arb equity snapshot")
+            except Exception:
+                log.exception("funding_worker arb equity snapshot error")
     finally:
         cap_task.cancel()

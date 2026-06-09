@@ -481,6 +481,21 @@ paths:
 
         same way for parity — they share the same browser-nav threat model.)'
       operationId: arb_report_page_funding_arb_get
+      parameters:
+      - in: query
+        name: equity_window
+        required: false
+        schema:
+          default: 30D
+          title: Equity Window
+          type: string
+      - in: query
+        name: refresh
+        required: false
+        schema:
+          default: false
+          title: Refresh
+          type: boolean
       responses:
         '200':
           content:
@@ -488,6 +503,12 @@ paths:
               schema:
                 type: string
           description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
       summary: Funding-arb reporting page (HTML)
       tags:
       - funding-arb

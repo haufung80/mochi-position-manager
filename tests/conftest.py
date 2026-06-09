@@ -20,9 +20,11 @@ get_settings.cache_clear()
 def _clean_db():
     from app.db import engine, init_db, Base
     from app.routes.dashboard import _clear_equity_cache
+    from app.routes.funding_arb import _clear_arb_equity_cache
     Base.metadata.drop_all(bind=engine)
     init_db()
-    _clear_equity_cache()       # module-global cache must not leak across tests
+    _clear_equity_cache()           # module-global caches must not leak across tests
+    _clear_arb_equity_cache()
     yield
 
 

@@ -24,11 +24,14 @@ would otherwise double-count the same settlement).
 """
 from __future__ import annotations
 
+import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
+from fastapi import (APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request,
+                     Response, status)
 from fastapi.responses import HTMLResponse
 from fastapi.security import APIKeyHeader
 from fastapi.templating import Jinja2Templates
@@ -41,7 +44,7 @@ from ..config import Settings, get_settings
 from ..db import session_scope
 from ..exchanges.registry import get_registry
 from ..exchanges.symbols import spot_symbol_for, symbol_for
-from ..models import ArbFundingEvent, ArbLeg, ArbOrder, ArbPosition
+from ..models import ArbEquitySnapshot, ArbFundingEvent, ArbLeg, ArbOrder, ArbPosition
 from ..schemas_arb import (
     ArbCloseRequest,
     ArbCloseResponse,
@@ -62,7 +65,12 @@ _templates_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_templates_dir))
 # Reuse the dashboard's presentation filters (usd/qty/fee/when) so the arb report
 # formats numbers identically to /performance — single source of truth, no drift.
-from .dashboard import _fmt_fee, _fmt_qty, _fmt_usd, _fmt_when  # noqa: E402
+from .dashboard import (  # noqa: E402
+    _fmt_fee, _fmt_qty, _fmt_usd, _fmt_when,
+    # Pure equity-curve render helpers (operate on passed-in data — they never read
+    # the directional `equity_snapshots`, so reusing them keeps the isolation intact).
+    _equity_series, _equity_svg, _equity_metrics, _resolve_window,
+    _EQUITY_WINDOWS, _EQUITY_DEFAULT_WINDOW)
 templates.env.filters["usd"] = _fmt_usd
 templates.env.filters["qty"] = _fmt_qty
 templates.env.filters["fee"] = _fmt_fee
@@ -564,12 +572,65 @@ def _arb_performance(db) -> dict:
     return {"arbs": rows, "totals": totals}
 
 
+# --- arb equity curve: own snapshot table + cache, fully isolated from the
+# --- directional /performance curve (which reads only `equity_snapshots`). ---
+_ARB_EQ_CACHE: dict = {"at": 0.0, "snapshots": None, "report": None}
+_ARB_EQ_CACHE_TTL = 30.0
+
+
+def _arb_by_venue(report: dict) -> dict:
+    """{exchange: net} = Σ(funding − commission) per leg exchange, from an
+    `_arb_performance` report. The per-venue equity values for the curve's live tip;
+    the snapshot writer stores the SAME map, so history and the live edge can't drift.
+    Single-venue HL today → {"hyperliquid": net}."""
+    by: dict[str, float] = {}
+    for a in report["arbs"]:
+        for lg in a["legs"]:
+            by[lg["exchange"]] = (by.get(lg["exchange"], 0.0)
+                                  + (lg["funding"] or 0.0) - (lg["commission"] or 0.0))
+    return by
+
+
+def _load_arb_snapshots(db) -> list[tuple]:
+    """All `ArbEquitySnapshot` rows as (ts_utc, net, by_venue_dict), time-ordered."""
+    out: list[tuple] = []
+    for s in db.query(ArbEquitySnapshot).order_by(ArbEquitySnapshot.captured_at).all():
+        ts = s.captured_at
+        if ts is not None and ts.tzinfo is None:        # SQLite returns naive -> assume UTC
+            ts = ts.replace(tzinfo=timezone.utc)
+        try:
+            by = json.loads(s.by_venue or "{}")
+        except (ValueError, TypeError):
+            by = {}
+        out.append((ts, float(s.net), by))
+    return out
+
+
+def _arb_equity_dataset(db, force: bool = False):
+    """(arb_snapshots, arb_report) cached for _ARB_EQ_CACHE_TTL — so switching the
+    curve's timeframe re-fetches neither the snapshot rows nor the live marks. A
+    separate cache from the directional `_equity_dataset`."""
+    now = time.time()
+    if force or _ARB_EQ_CACHE["snapshots"] is None or now - _ARB_EQ_CACHE["at"] > _ARB_EQ_CACHE_TTL:
+        _ARB_EQ_CACHE["snapshots"] = _load_arb_snapshots(db)
+        _ARB_EQ_CACHE["report"] = _arb_performance(db)
+        _ARB_EQ_CACHE["at"] = now
+    return _ARB_EQ_CACHE["snapshots"], _ARB_EQ_CACHE["report"]
+
+
+def _clear_arb_equity_cache() -> None:
+    """Drop the cached arb dataset (snapshot write / forced refresh / test isolation)."""
+    _ARB_EQ_CACHE.update(at=0.0, snapshots=None, report=None)
+
+
 @router.get(
     "",
     response_class=HTMLResponse,
     summary="Funding-arb reporting page (HTML)",
 )
-def arb_report_page(request: Request) -> HTMLResponse:
+def arb_report_page(request: Request,
+                    equity_window: str = Query(_EQUITY_DEFAULT_WINDOW),
+                    refresh: bool = Query(False)) -> HTMLResponse:
     """Dark-theme funding-arb report: one row per ``ArbPosition`` with nested legs,
     headline = funding harvested − fees, per-leg funding (spot 0) / spot+perp
     unrealized / directional-net (≈0 health check) / neutrality skew.
@@ -583,10 +644,20 @@ def arb_report_page(request: Request) -> HTMLResponse:
     as-is. (If ``/performance`` is later gated by ``WEBHOOK_SECRET``, gate this the
     same way for parity — they share the same browser-nav threat model.)
     """
+    wsel, wdelta = _resolve_window(equity_window)
     with session_scope() as db:
-        report = _arb_performance(db)
-    resp = templates.TemplateResponse(
-        "funding_arb.html", {"request": request, "report": report})
+        # Cached (snapshots + live report) so timeframe switches re-fetch nothing within
+        # the TTL; ?refresh=true forces it. The equity curve plots arb NET over time —
+        # per venue + aggregate, tipped to the live headline (same as /performance).
+        snapshots, report = _arb_equity_dataset(db, force=refresh)
+        series = _equity_series(snapshots, wdelta, report["totals"]["net"],
+                                _arb_by_venue(report))
+        equity = _equity_svg(series)
+        metrics = _equity_metrics(series.get("Total", []))   # $-only (no arb capital base)
+    resp = templates.TemplateResponse("funding_arb.html", {
+        "request": request, "report": report, "equity": equity, "metrics": metrics,
+        "equity_windows": [w for w, _ in _EQUITY_WINDOWS], "equity_window": wsel,
+    })
     # Live trading data — never serve a stale arb report from a browser/proxy cache.
     resp.headers["Cache-Control"] = "no-store"
     return resp

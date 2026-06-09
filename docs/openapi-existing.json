@@ -1190,6 +1190,28 @@
       "get": {
         "description": "Dark-theme funding-arb report: one row per ``ArbPosition`` with nested legs,\nheadline = funding harvested \u2212 fees, per-leg funding (spot 0) / spot+perp\nunrealized / directional-net (\u22480 health check) / neutrality skew.\n\n**AUTH (deliberate, documented):** this is an HTML page reached by BROWSER\nNAVIGATION, which cannot attach a custom ``X-Arb-Secret`` header (a fetch can,\na ``<a href>`` click can't). It is therefore gated EXACTLY like the existing\n``/performance`` page \u2014 currently OPEN (no auth dependency) \u2014 and NOT behind\n``require_arb_secret``. The JSON ``/funding-arb/{open,close,positions}`` API\nroutes that the signal app calls programmatically stay behind ``X-Arb-Secret``\nas-is. (If ``/performance`` is later gated by ``WEBHOOK_SECRET``, gate this the\nsame way for parity \u2014 they share the same browser-nav threat model.)",
         "operationId": "arb_report_page_funding_arb_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "equity_window",
+            "required": false,
+            "schema": {
+              "default": "30D",
+              "title": "Equity Window",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1200,6 +1222,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Funding-arb reporting page (HTML)",
@@ -1529,6 +1561,28 @@
     "/performance": {
       "get": {
         "operationId": "performance_performance_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "equity_window",
+            "required": false,
+            "schema": {
+              "default": "30D",
+              "title": "Equity Window",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1539,6 +1593,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Performance"

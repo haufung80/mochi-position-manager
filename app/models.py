@@ -266,6 +266,27 @@ class ArbFundingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
+class ArbEquitySnapshot(Base):
+    """Periodic capture of the funding-arb book's NET (funding − commission, + basis)
+    at a point in time — the points the /funding-arb equity curve plots. Mirrors
+    EquitySnapshot but lives in its OWN table, so the directional /performance curve
+    (which reads only `equity_snapshots`) stays physically blind to the arb book (the
+    isolation invariant). Built forward from the first arb; no exchange backfill (the
+    arb book has no pre-history)."""
+    __tablename__ = "arb_equity_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False, index=True)
+    net: Mapped[float] = mapped_column(Float, nullable=False)
+    funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Per-venue net {exchange: funding − commission} as JSON, so the curve draws one
+    # line per venue plus the aggregate (single-venue HL today → one line).
+    by_venue: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="live", nullable=False)
+
+
 class EquitySnapshot(Base):
     """Periodic capture of the TRUE total PnL (realized + unrealized + funding −
     commission) at a point in time, written hourly by the funding worker. The

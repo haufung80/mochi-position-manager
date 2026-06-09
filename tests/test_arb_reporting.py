@@ -388,3 +388,75 @@ def test_arb_report_page_shows_rows_and_funding(client_set):
     perp_leg = next(lg for lg in arb["legs"] if lg["product"] == "perp")
     assert spot_leg["funding"] == 0.0                # spot leg shows 0
     assert perp_leg["funding"] == pytest.approx(1.50)
+
+
+# ===========================================================================
+# Equity curve (own table, isolated from the directional /performance curve)
+# ===========================================================================
+
+def test_write_arb_equity_snapshot_captures_net_and_by_venue():
+    """The hourly arb snapshot stores net (= funding − commission) + a per-venue map,
+    pinned to the given hour, in the arb table ONLY (never directional)."""
+    from app.funding_worker import write_arb_equity_snapshot
+    from app.models import ArbEquitySnapshot, EquitySnapshot
+    from app.routes.funding_arb import _load_arb_snapshots
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+         "side": "buy", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.01},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+         "side": "sell", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.02},
+    ], opened_at=t0)
+    _add_funding("hyperliquid", "arb", "BTC", t0 + timedelta(hours=1), 1.50)
+    assert write_arb_equity_snapshot(datetime(2026, 6, 1, 2, tzinfo=timezone.utc)) is True
+    with session_scope() as db:
+        assert db.query(EquitySnapshot).count() == 0          # isolation: directional untouched
+        assert db.query(ArbEquitySnapshot).count() == 1
+        snaps = _load_arb_snapshots(db)
+    ts, net, by = snaps[0]
+    assert net == pytest.approx(1.50 - 0.03)                  # funding − commission
+    assert by["hyperliquid"] == pytest.approx(1.50 - 0.03)    # single-venue HL
+    assert ts.hour == 2 and ts.minute == 0                    # pinned to the hour
+
+
+def test_write_arb_equity_snapshot_skips_when_no_arbs():
+    """No arb book yet → no curve point written (the curve builds forward)."""
+    from app.funding_worker import write_arb_equity_snapshot
+    from app.models import ArbEquitySnapshot
+    assert write_arb_equity_snapshot() is False
+    with session_scope() as db:
+        assert db.query(ArbEquitySnapshot).count() == 0
+
+
+def test_arb_equity_curve_isolated_from_directional():
+    """The directional curve sees ONLY equity_snapshots; the arb loader sees ONLY
+    arb_equity_snapshots — neither leaks into the other (isolation invariant)."""
+    from app.models import ArbEquitySnapshot, EquitySnapshot
+    from app.routes.dashboard import _equity_curve, _load_snapshots
+    from app.routes.funding_arb import _load_arb_snapshots
+    t = datetime(2026, 6, 1, 12, tzinfo=timezone.utc)
+    with session_scope() as db:
+        db.add(ArbEquitySnapshot(captured_at=t, net=5.0, by_venue='{"hyperliquid": 5.0}'))
+        db.add(EquitySnapshot(captured_at=t, total_pnl=99.0, by_exchange='{"bybit": 99.0}'))
+    with session_scope() as db:
+        directional = _load_snapshots(db)
+        assert len(directional) == 1 and directional[0][1] == pytest.approx(99.0)  # not the arb 5.0
+        assert _equity_curve(db)[-1][1] == pytest.approx(99.0)
+        arb = _load_arb_snapshots(db)
+        assert len(arb) == 1 and arb[0][1] == pytest.approx(5.0)                    # not the directional 99
+
+
+def test_arb_report_page_renders_equity_curve(client_set):
+    """/funding-arb renders the equity-curve section (window chips + scrub + venue
+    legend) once arb snapshots exist."""
+    from app.models import ArbEquitySnapshot
+    with session_scope() as db:
+        db.add(ArbEquitySnapshot(captured_at=datetime(2026, 6, 1, 12, tzinfo=timezone.utc),
+                                 net=1.0, by_venue='{"hyperliquid": 1.0}'))
+        db.add(ArbEquitySnapshot(captured_at=datetime(2026, 6, 1, 13, tzinfo=timezone.utc),
+                                 net=1.5, by_venue='{"hyperliquid": 1.5}'))
+    r = client_set.get("/funding-arb?equity_window=All")
+    assert r.status_code == 200, r.text
+    assert "Equity curve" in r.text
+    assert "hyperliquid" in r.text                 # venue line in the legend
+    assert "drag across to scrub" in r.text        # hover/scrub affordance
