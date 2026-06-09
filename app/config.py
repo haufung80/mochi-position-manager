@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     # (YYYY-MM-DD), once on startup. Blank = no backfill. Idempotent.
     equity_backfill_start: str = "2026-05-28"
 
+    # Capital base (USDT) for the funding-arb curve's return-% / APR. 0 (default) =
+    # auto: use the notional currently deployed across open arbs (so APR shows out of
+    # the box while an arb is open). Set a fixed value to pin a stable denominator.
+    arb_capital_base: float = 0.0
+
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

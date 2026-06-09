@@ -129,6 +129,19 @@ def test_equity_metrics_sharpe_with_enough_points():
     assert isinstance(m["sharpe"], float)
 
 
+def test_equity_metrics_apr():
+    """APR annualizes return-on-capital over the data's actual span; a sub-0.5d span
+    has no APR (avoids absurd annualization in the first hour)."""
+    base = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    series = [(base + timedelta(days=i), float(i * 10)) for i in range(11)]   # 0..100 over 10 days
+    m = _equity_metrics(series, capital_base=1000.0)
+    assert m["return_pct"] == pytest.approx(10.0)                 # 100 / 1000
+    assert m["apr_days"] == pytest.approx(10.0)
+    assert m["apr"] == pytest.approx(0.1 * 365 / 10 * 100)        # 365% annualized
+    short = [(base, 0.0), (base + timedelta(hours=2), 5.0)]       # 2h span
+    assert "apr" not in _equity_metrics(short, capital_base=1000.0)
+
+
 def test_equity_dataset_caches_within_ttl(tmp_path, stub_exchange, monkeypatch):
     """The dataset (snapshots + perf) is cached: a 2nd call within the TTL re-runs
     neither _performance nor the snapshot query; force=True rebuilds it."""

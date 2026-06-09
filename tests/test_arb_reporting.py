@@ -460,3 +460,57 @@ def test_arb_report_page_renders_equity_curve(client_set):
     assert "Equity curve" in r.text
     assert "hyperliquid" in r.text                 # venue line in the legend
     assert "drag across to scrub" in r.text        # hover/scrub affordance
+
+
+# ===========================================================================
+# Return-% / APR (capital base: auto from deployed notional, or configured)
+# ===========================================================================
+
+_HL_PAIR = [
+    {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+     "side": "buy", "filled": 0.02, "avg_fill": 50000.0},      # 0.02 * 50000 = $1000
+    {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+     "side": "sell", "filled": 0.02, "avg_fill": 50000.0},
+]
+
+
+def test_arb_capital_base_auto_from_open_arbs():
+    """Auto capital = deployed notional across OPEN arbs (the MAX leg per arb, since
+    the two legs are the same position — not their sum); flat book → 0 ($-only)."""
+    from app.routes.funding_arb import _arb_capital_base
+    aid = _make_arb("BTC", _HL_PAIR, status="open",
+                    opened_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    with session_scope() as db:
+        assert _arb_capital_base(_arb_performance(db)) == pytest.approx(1000.0)   # not 2000
+    with session_scope() as db:                    # close it -> nothing deployed
+        db.query(ArbPosition).filter_by(id=aid).update({"status": "closed"})
+    with session_scope() as db:
+        assert _arb_capital_base(_arb_performance(db)) == 0.0
+
+
+def test_arb_capital_base_config_override(monkeypatch):
+    """A configured arb_capital_base pins the denominator (ignores deployed notional)."""
+    from app.routes.funding_arb import _arb_capital_base
+    monkeypatch.setattr("app.routes.funding_arb.get_settings",
+                        lambda: type("S", (), {"arb_capital_base": 5000.0})())
+    _make_arb("BTC", _HL_PAIR, status="open",
+              opened_at=datetime(2026, 6, 1, tzinfo=timezone.utc))
+    with session_scope() as db:
+        assert _arb_capital_base(_arb_performance(db)) == pytest.approx(5000.0)
+
+
+def test_arb_report_page_shows_apr(client_set):
+    """With an open arb (deployed capital) + a multi-day curve, the page shows
+    return-% and an annualized APR."""
+    from app.models import ArbEquitySnapshot
+    t0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    _make_arb("BTC", _HL_PAIR, status="open", opened_at=t0)
+    _add_funding("hyperliquid", "arb", "BTC", t0 + timedelta(hours=1), 20.0)   # net = +20
+    with session_scope() as db:
+        db.add(ArbEquitySnapshot(captured_at=t0, net=0.0, by_venue='{"hyperliquid": 0.0}'))
+        db.add(ArbEquitySnapshot(captured_at=t0 + timedelta(days=2), net=20.0,
+                                 by_venue='{"hyperliquid": 20.0}'))
+    r = client_set.get("/funding-arb?equity_window=All")
+    assert r.status_code == 200, r.text
+    assert "APR (est.)" in r.text
+    assert "on $1000" in r.text                     # auto capital = 0.02 * 50000, return-% caption

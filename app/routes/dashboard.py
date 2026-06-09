@@ -617,6 +617,13 @@ def _equity_metrics(total_series: list, capital_base: float = 0.0):
         dd_peak_equity = capital_base + dd_peak
         m["max_drawdown_pct"] = (max_dd / dd_peak_equity * 100) if dd_peak_equity > 0 else None
         m["sharpe"] = _sharpe([(ts, capital_base + v) for ts, v in total_series])
+        # APR: annualize the return-on-capital over the data's actual span. Needs real
+        # timestamps + >= ~half a day so the first hour doesn't annualize to nonsense.
+        ts0, ts1 = total_series[0][0], total_series[-1][0]
+        days = (ts1 - ts0).total_seconds() / 86400 if (ts0 and ts1) else 0.0
+        if days >= 0.5:
+            m["apr"] = (cur / capital_base) * (365.0 / days) * 100
+            m["apr_days"] = days
     return m
 
 

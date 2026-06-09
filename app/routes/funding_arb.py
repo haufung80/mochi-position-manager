@@ -591,6 +591,23 @@ def _arb_by_venue(report: dict) -> dict:
     return by
 
 
+def _arb_capital_base(report: dict) -> float:
+    """Capital denominator for the arb curve's return-% / APR. The configured
+    `arb_capital_base` if set (>0, a pinned denominator); otherwise AUTO = the notional
+    currently deployed across OPEN arbs — each arb's position notional ≈ a leg's
+    filled_qty × avg_fill (both legs are ~equal, so take the max, not the sum). 0 when
+    the book is flat AND unset → the curve falls back to $-only metrics."""
+    cfg = get_settings().arb_capital_base
+    if cfg and cfg > 0:
+        return float(cfg)
+    deployed = 0.0
+    for a in report["arbs"]:
+        if a["status"] in ("open", "opening", "closing") and a["legs"]:
+            deployed += max((lg["filled_qty"] or 0.0) * (lg["avg_fill"] or 0.0)
+                            for lg in a["legs"])
+    return deployed
+
+
 def _load_arb_snapshots(db) -> list[tuple]:
     """All `ArbEquitySnapshot` rows as (ts_utc, net, by_venue_dict), time-ordered."""
     out: list[tuple] = []
@@ -653,10 +670,12 @@ def arb_report_page(request: Request,
         series = _equity_series(snapshots, wdelta, report["totals"]["net"],
                                 _arb_by_venue(report))
         equity = _equity_svg(series)
-        metrics = _equity_metrics(series.get("Total", []))   # $-only (no arb capital base)
+        capital = _arb_capital_base(report)              # config, else deployed notional
+        metrics = _equity_metrics(series.get("Total", []), capital_base=capital)
     resp = templates.TemplateResponse("funding_arb.html", {
         "request": request, "report": report, "equity": equity, "metrics": metrics,
         "equity_windows": [w for w, _ in _EQUITY_WINDOWS], "equity_window": wsel,
+        "arb_capital_auto": not (get_settings().arb_capital_base > 0),
     })
     # Live trading data — never serve a stale arb report from a browser/proxy cache.
     resp.headers["Cache-Control"] = "no-store"
