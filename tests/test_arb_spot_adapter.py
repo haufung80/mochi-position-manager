@@ -202,6 +202,19 @@ def _bybit_with(client) -> BybitExchange:
     return ex
 
 
+def test_bybit_round_qty_dust_tolerant(monkeypatch):
+    """A managed-close abs(net) a hair below a step multiple (0.34 stored as
+    0.33999999999999997 by the RMW ledger) must snap to 0.34, not drop to 0.33 — that
+    under-closes and leaves a residual. A genuine sub-step (0.335) still floors."""
+    ex = BybitExchange(api_key="k", api_secret="s", dry_run=True)
+    monkeypatch.setattr(ex, "_instrument",
+                        lambda symbol: {"lotSizeFilter": {"qtyStep": "0.01", "minOrderQty": "0"}})
+    assert ex._round_qty("BNBUSDT", 0.34) == "0.34"
+    assert ex._round_qty("BNBUSDT", 0.33999999999999997) == "0.34"   # float dust -> snap up
+    assert ex._round_qty("BNBUSDT", 0.335) == "0.33"                 # genuine sub-step -> floor
+    assert ex._round_qty("BNBUSDT", 0.33) == "0.33"
+
+
 def test_bybit_spot_buy_marketunit_basecoin_and_rounding():
     c = _StubBybitClient()
     ex = _bybit_with(c)

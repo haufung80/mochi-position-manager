@@ -76,12 +76,15 @@ def _utcnow() -> datetime:
 # ---------------------------------------------------------------------------
 
 def _snap_down(qty: float, step: float) -> float:
-    """Largest multiple of `step` <= `qty` (exact, Decimal-floored)."""
+    """Largest multiple of `step` <= `qty` (Decimal-floored), FLOAT-DUST TOLERANT: a
+    value a hair below a step multiple (e.g. 0.339999999999 vs 0.34) snaps to it rather
+    than dropping a whole step — dropping one would under-size / leave a residual. A
+    genuine sub-step amount (e.g. 0.335) still floors down."""
     if qty <= 0 or step <= 0:
         return 0.0
     q = Decimal(str(qty))
     s = Decimal(str(step))
-    units = (q / s).to_integral_value(rounding=ROUND_DOWN)
+    units = (q / s + Decimal("1e-9")).to_integral_value(rounding=ROUND_DOWN)
     return float(units * s)
 
 

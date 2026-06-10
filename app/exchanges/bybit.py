@@ -59,14 +59,20 @@ class BybitExchange:
         return float(items[0]["lastPrice"])
 
     def _round_qty(self, symbol: str, qty: float) -> str:
-        """Snap a base-asset quantity down to the exchange's lot-size grid.
-        Protects against TradingView sending an unaligned size (which Bybit
-        would otherwise reject)."""
+        """Snap a base-asset quantity DOWN to the exchange's lot-size grid (protects
+        against an unaligned size Bybit would reject). FLOAT-DUST TOLERANT: a value a
+        hair below a step multiple — e.g. a managed-close `abs(net)` of 0.34 that the
+        RMW ledger stores as 0.33999999999999997 — snaps to that multiple instead of
+        dropping a whole step. Dropping one systematically under-closes a position and
+        leaves a residual (e.g. closed 0.33 of a 0.34 long → 0.01 stuck)."""
         inst = self._instrument(symbol)
         lot = inst.get("lotSizeFilter", {})
         step = Decimal(str(lot.get("qtyStep", "0.001")))
         min_qty = Decimal(str(lot.get("minOrderQty", "0")))
-        q = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
+        # +epsilon (in step-units; ~1e-9 of a step) absorbs float dust at the boundary
+        # without promoting a genuine sub-step quantity (e.g. 0.335 still floors to 0.33).
+        units = (Decimal(str(qty)) / step + Decimal("1e-9")).to_integral_value(rounding=ROUND_DOWN)
+        q = units * step
         if q < min_qty:
             raise RuntimeError(f"Bybit: quantity {q} below minOrderQty {min_qty} for {symbol}")
         return format(q.normalize(), "f")

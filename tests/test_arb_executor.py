@@ -145,6 +145,16 @@ def test_size_pair_min_clears_floor_with_margin(arb_registry, label, price, step
     assert qty * price >= 10.0 * 1.1, f"{label}: ${qty * price:.2f} too close to the $10 floor"
 
 
+def test_snap_down_dust_tolerant():
+    """_snap_down absorbs float dust at a step boundary (0.339999999999 -> 0.34) so it
+    never drops a whole step, but still floors a genuine sub-step (0.335 -> 0.33)."""
+    from app.arb_executor import _snap_down
+    assert _snap_down(0.34, 0.01) == pytest.approx(0.34)
+    assert _snap_down(0.33999999999999997, 0.01) == pytest.approx(0.34)   # dust -> snap up
+    assert _snap_down(0.335, 0.01) == pytest.approx(0.33)                  # genuine -> floor
+    assert _snap_down(1.0, 1.0) == pytest.approx(1.0)
+
+
 def test_size_pair_rejects_when_notional_below_a_leg_min(arb_registry):
     """If the sized qty can't clear ONE leg's min-notional, REJECT (don't shrink)."""
     arb_registry.state.prices["BTCUSDT"] = 50000.0
