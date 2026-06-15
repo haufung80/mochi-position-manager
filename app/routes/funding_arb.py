@@ -223,6 +223,40 @@ def _leg_view(leg: ArbLeg, funding: float | None = None) -> ArbLegView:
     )
 
 
+def _coarse_grid_step(legs: list[ArbLeg]) -> float:
+    """Largest base grid step across a pair's legs — the floor on how tightly the two
+    legs can be matched (you can't hedge finer than the coarser leg's grid). Resolved
+    best-effort from each leg's own ``(exchange, account)`` adapter (steps are cached
+    on the adapter, so this is cheap on the warm read path); returns 0.0 if no step is
+    available, which makes the caller fall back to a near-exact check. A flaky adapter
+    must never break a reporting read, so every lookup is guarded."""
+    reg = get_registry()
+    step = 0.0
+    for lg in legs:
+        try:
+            ex = reg.get(lg.exchange, lg.account)
+            s = (ex.get_spot_step_size(lg.symbol) if lg.product == "spot"
+                 else ex.get_step_size(lg.symbol))
+            step = max(step, float(s or 0.0))
+        except Exception:
+            continue
+    return step
+
+
+def _pair_neutral(legs: list[ArbLeg], skew: float, all_success: bool) -> bool:
+    """A pair is delta-neutral when both legs filled AND the leg imbalance is within
+    the grid resolution (``|skew| <= coarse_step/2`` — the tightest a NEAREST-snapped
+    hedge can achieve). Sub-grid dust between the spot fill and the coarser perp grid
+    is NOT a real directional position, so it must not read as "skewed"; a genuine
+    half-hedge (skew far above one step) still does. Falls back to a near-exact check
+    when no grid is resolvable."""
+    if not all_success:
+        return False
+    step = _coarse_grid_step(legs)
+    tol = (step / 2.0 + step * 1e-9) if step > 0 else 1e-9
+    return abs(skew) <= tol
+
+
 def _position_view(arb: ArbPosition, legs: list[ArbLeg], db=None) -> ArbPositionView:
     """Build the status payload with REAL per-arb PnL (A.6).
 
@@ -236,7 +270,7 @@ def _position_view(arb: ArbPosition, legs: list[ArbLeg], db=None) -> ArbPosition
     short_filled = sum(lg.filled_qty for lg in legs if lg.side == "sell")
     skew = long_filled - short_filled
     all_success = bool(legs) and all(lg.status == "success" for lg in legs)
-    neutral = all_success and abs(skew) <= 1e-9
+    neutral = _pair_neutral(legs, skew, all_success)
 
     if db is not None:
         inputs = _leg_pnl_inputs(db, arb, legs)
@@ -523,7 +557,7 @@ def _arb_performance(db) -> dict:
         short_filled = sum(lg.filled_qty for lg in legs if lg.side == "sell")
         skew = long_filled - short_filled
         all_success = bool(legs) and all(lg.status == "success" for lg in legs)
-        neutral = all_success and abs(skew) <= 1e-9
+        neutral = _pair_neutral(legs, skew, all_success)
         # Only an open-ish pair has a meaningful neutrality state; a closed/error arb
         # is flat (don't flag it as "skew").
         show_neutrality = arb.status in ("opening", "open", "closing")

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 
 from sqlalchemy.orm import Session
 
@@ -85,6 +85,19 @@ def _snap_down(qty: float, step: float) -> float:
     q = Decimal(str(qty))
     s = Decimal(str(step))
     units = (q / s + Decimal("1e-9")).to_integral_value(rounding=ROUND_DOWN)
+    return float(units * s)
+
+
+def _snap_nearest(qty: float, step: float) -> float:
+    """NEAREST multiple of `step` to `qty` (Decimal, round-half-up). Used to hedge a
+    leg-1 fill onto leg-2's grid with the SMALLEST possible residual (``|residual| <=
+    step/2``) — unlike `_snap_down`, which floors and so UNDER-hedges by up to a full
+    step (a persistent residual long worth ~5% of a min-size pair)."""
+    if qty <= 0 or step <= 0:
+        return 0.0
+    q = Decimal(str(qty))
+    s = Decimal(str(step))
+    units = (q / s).to_integral_value(rounding=ROUND_HALF_UP)
     return float(units * s)
 
 
@@ -393,14 +406,27 @@ def _open_order(legs: list[ArbLeg]) -> list[ArbLeg]:
 
 
 def _hedge_qty(first_fill: float, leg2: ArbLeg) -> float:
-    """Re-derive leg-2's hedge target from leg-1's ACTUAL net fill, snapped DOWN
-    to leg-2's OWN grid. Returns 0.0 if it can't be hedged within one step (the
-    snapped qty is 0), which the caller treats as an un-hedgeable partial fill."""
+    """Re-derive leg-2's hedge target from leg-1's ACTUAL net fill, snapped to the
+    NEAREST point on leg-2's OWN grid (so the residual is ``<= step/2``).
+
+    Snapping DOWN (the old behaviour) systematically UNDER-hedged by up to a full
+    step, leaving a persistent residual LONG — ~5% of a min-size pair, e.g. a BTC
+    spot fill of 0.00018987 hedged to 0.00018 (a 0.00001 perp grid) left +0.0000099.
+    NEAREST hedges that same fill to 0.00019 (residual −0.00000013).
+
+    Returns 0.0 when leg-1's fill is below one FULL step (un-hedgeable): a sub-step
+    dust fill must error rather than round UP into a ~50%-skewed pair (the caller
+    finalises the arb ``error`` + ``neutral=false``). The ``<1 step`` boundary is the
+    same dust-tolerant one `_snap_down` enforced, so a fill a hair under a step
+    multiple still hedges."""
     ex = get_registry().get(leg2.exchange, leg2.account)
     step = _leg_step(ex, leg2)
     if step <= 0:
         return 0.0
-    return _snap_down(first_fill, step)
+    units = Decimal(str(first_fill)) / Decimal(str(step))
+    if (units + Decimal("1e-9")).to_integral_value(rounding=ROUND_DOWN) < 1:
+        return 0.0          # sub-step fill -> un-hedgeable
+    return _snap_nearest(first_fill, step)
 
 
 def _finalize_open_status(arb_id: int) -> None:

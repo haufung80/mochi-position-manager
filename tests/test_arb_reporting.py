@@ -549,3 +549,29 @@ def test_arb_basis_slippage_and_closed_not_skew():
     assert c["slippage_known"] is False              # no ref / no fills
     assert report["totals"]["basis"] == pytest.approx(a["basis"])           # closed adds 0
     assert report["totals"]["slippage_known"] is True
+
+
+def test_subgrid_skew_reads_neutral_real_skew_does_not(arb_registry):
+    """Neutrality is judged against the GRID: a sub-grid imbalance (a spot fill landing
+    between perp grid points) reads NEUTRAL, while a skew far above one step does NOT —
+    so live grid dust isn't false-flagged as directional exposure, but a half-hedge is."""
+    arb_registry.state.step_sizes["BTC"] = 0.001            # perp grid (the coarser one)
+    arb_registry.state.spot_step_sizes["UBTC/USDC"] = 0.0001
+    tight = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+         "side": "buy", "filled": 0.0204, "avg_fill": 50000.0},     # +0.0004 -> within step/2
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+         "side": "sell", "filled": 0.0200, "avg_fill": 50000.0},
+    ], status="open")
+    wide = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+         "side": "buy", "filled": 0.0250, "avg_fill": 50000.0},     # +0.005 = 5 steps -> real skew
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+         "side": "sell", "filled": 0.0200, "avg_fill": 50000.0},
+    ], status="open")
+    with session_scope() as db:
+        report = _arb_performance(db)
+    t = next(x for x in report["arbs"] if x["arb_id"] == tight)
+    w = next(x for x in report["arbs"] if x["arb_id"] == wide)
+    assert t["neutral"] is True          # 0.0004 <= 0.001/2  -> sub-grid dust
+    assert w["neutral"] is False         # 0.005   >  0.001/2  -> genuine skew

@@ -155,6 +155,18 @@ def test_snap_down_dust_tolerant():
     assert _snap_down(1.0, 1.0) == pytest.approx(1.0)
 
 
+def test_snap_nearest_rounds_to_closest_grid_point():
+    """_snap_nearest picks the CLOSEST step multiple (residual <= step/2), so a hedge
+    of a between-grid fill doesn't systematically under-shoot the way _snap_down does."""
+    from app.arb_executor import _snap_nearest, _snap_down
+    # The real BTC case: 0.00018987 net spot fill on a 0.00001 perp grid.
+    assert _snap_nearest(0.0001898671, 0.00001) == pytest.approx(0.00019)   # up to nearest
+    assert _snap_down(0.0001898671, 0.00001) == pytest.approx(0.00018)      # floor under-hedges
+    assert _snap_nearest(0.0184, 0.001) == pytest.approx(0.018)             # rounds down when closer
+    assert _snap_nearest(0.0185, 0.001) == pytest.approx(0.019)             # half rounds up
+    assert _snap_nearest(0.0, 0.001) == 0.0
+
+
 def test_size_pair_rejects_when_notional_below_a_leg_min(arb_registry):
     """If the sized qty can't clear ONE leg's min-notional, REJECT (don't shrink)."""
     arb_registry.state.prices["BTCUSDT"] = 50000.0
@@ -262,6 +274,32 @@ def test_partial_fill_rehedges_leg2_to_leg1_actual_fill(arb_registry):
     assert legs["perp"].status == "success"
     with session_scope() as db:
         assert db.get(ArbPosition, arb_id).status == "open"
+
+
+def test_hedge_snaps_to_nearest_grid_point_not_down(arb_registry):
+    """A spot fill landing BETWEEN perp grid points hedges to the NEAREST point, not
+    floored down. Reproduces the live BTC skew: 0.0001898671 net spot on a 0.00001
+    perp grid -> short 0.00019 (residual −1.3e-7), NOT 0.00018 (residual +9.9e-6)."""
+    arb_registry.state.spot_result = OrderResult(
+        success=True, exchange_order_id="S", filled_qty_base=0.0001898671, avg_price=66292.0)
+    arb_registry.state.next_result = OrderResult(
+        success=True, exchange_order_id="P", filled_qty_base=0.00019, avg_price=66202.0)
+    arb_registry.state.step_sizes["BTC"] = 0.00001
+    arb_id = _mk_arb()
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.00019)
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.00019)
+
+    arb_executor._run_open(arb_id)
+
+    legs = _legs(arb_id)
+    assert legs["perp"].target_qty == pytest.approx(0.00019)   # nearest, not 0.00018
+    perp_calls = [c for c in arb_registry.state.calls if c[0] == "market"]
+    assert perp_calls[-1][3] == pytest.approx(0.00019)
+    # residual is now within half a perp step (was ~a full step under snap-down).
+    skew = legs["spot"].filled_qty - legs["perp"].filled_qty
+    assert abs(skew) <= 0.00001 / 2
 
 
 def test_unhedgeable_partial_fill_marks_error_not_open(arb_registry):
