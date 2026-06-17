@@ -143,15 +143,17 @@ def _close_mark(ex, leg: ArbLeg) -> float:
         return 0.0
 
 
-def _leg_realized(leg: ArbLeg, close_mark: float) -> float:
-    """Realized directional P&L of a leg flattened at ``close_mark`` =
-    ``signed_open_qty·(close_mark − avg_fill)`` (a long spot gains as price rose; a
-    short perp gains as it fell). 0 when no entry/fill/mark is known (can't attribute).
+def _leg_realized(leg: ArbLeg, close_mark: float, closed_qty: float) -> float:
+    """Realized directional P&L of flattening ``closed_qty`` of a leg at ``close_mark`` =
+    ``signed·(close_mark − avg_fill)`` (a long spot gains as price rose; a short perp
+    gains as it fell). ``closed_qty`` is the qty ACTUALLY flattened — for a spot leg
+    clamped to the live balance this is the sold qty, NOT ``filled_qty`` (else realized
+    is over-credited for base that was never sold). 0 when no entry/qty/mark is known.
     Mark-based (not the literal close fill) — the two differ only by close slippage,
     and uniformly across venues (Bybit/HL ``close_position`` don't return a fill)."""
-    if leg.avg_fill <= 0 or close_mark <= 0 or leg.filled_qty <= 0:
+    if leg.avg_fill <= 0 or close_mark <= 0 or closed_qty <= 0:
         return 0.0
-    signed = leg.filled_qty if leg.side == "buy" else -leg.filled_qty
+    signed = closed_qty if leg.side == "buy" else -closed_qty
     return signed * (close_mark - leg.avg_fill)
 
 
@@ -618,10 +620,19 @@ def _close_leg(db: Session, leg: ArbLeg, errors: list[str],
     On a successful flatten, book the leg's realized directional P&L at the close-time
     mark onto ``leg.realized_pnl`` (and accumulate into ``realized``) so a closed leg
     keeps the basis P&L it earned instead of its live MTM dropping to 0."""
+    # ALREADY closed (re-close of an `error`/half-closed arb): the leg is flat and its
+    # realized was booked on the first close — do NOT re-close (a close_position on a
+    # flat position succeeds and would re-mark realized to 0) and do NOT re-book; just
+    # carry the booked value into the sum.
+    if leg.status == "closed":
+        realized.append(leg.realized_pnl or 0.0)
+        return
+
     ex = get_registry().get(leg.exchange, leg.account)  # fail loud on mis-config
     mark = _close_mark(ex, leg)             # pre-close mark, for realized P&L
     if leg.product == "perp":
         result = ex.close_position(leg.symbol)
+        closed_qty = leg.filled_qty         # whole-coin close flattens the full position
     else:
         base_asset = _base_asset_of_leg(leg)
         free = ex.get_spot_balance(base_asset)
@@ -635,9 +646,10 @@ def _close_leg(db: Session, leg: ArbLeg, errors: list[str],
             leg.updated_at = _utcnow()
             return
         result = ex.spot_market_order(leg.symbol, "sell", qty)
+        closed_qty = qty                    # realized on what was ACTUALLY sold, not filled_qty
 
     if result.success:
-        r = _leg_realized(leg, mark)
+        r = _leg_realized(leg, mark, closed_qty)
         leg.realized_pnl = r
         realized.append(r)
         leg.status = "closed"

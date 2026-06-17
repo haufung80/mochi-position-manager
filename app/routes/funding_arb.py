@@ -309,11 +309,12 @@ def _position_view(arb: ArbPosition, legs: list[ArbLeg], db=None) -> ArbPosition
         }
         funding_total = sum(v for v in funding_by_leg.values())
         commission_total = sum(lg.commission for lg in legs)
+        realized = sum(lg.realized_pnl or 0.0 for lg in legs)
         pnl = ArbPnL(
             funding_total=funding_total, funding_by_leg=funding_by_leg,
             commission_total=commission_total, spot_unrealized=0.0,
             perp_unrealized=0.0, directional_net=0.0,
-            net=funding_total - commission_total,
+            net=funding_total - commission_total + realized,
         )
         leg_views = [_leg_view(lg) for lg in legs]
 
@@ -551,7 +552,7 @@ def _arb_performance(db) -> dict:
     (``_leg_pnl_inputs`` → ``compute_arb_pnl``), so the page and the API agree."""
     rows: list[dict] = []
     tot_funding = tot_commission = tot_net = 0.0
-    tot_spot_unreal = tot_perp_unreal = 0.0
+    tot_spot_unreal = tot_perp_unreal = tot_realized = 0.0
     tot_basis = tot_slippage = 0.0
     tot_slippage_known = False
     open_count = 0
@@ -617,6 +618,7 @@ def _arb_performance(db) -> dict:
             "spot_unrealized": result.spot_unrealized,
             "perp_unrealized": result.perp_unrealized,
             "directional_net": result.directional_net,
+            "realized": realized,
             "net": result.net,
             "legs": leg_rows,
         })
@@ -625,6 +627,7 @@ def _arb_performance(db) -> dict:
         tot_net += result.net
         tot_spot_unreal += result.spot_unrealized
         tot_perp_unreal += result.perp_unrealized
+        tot_realized += realized
         tot_basis += basis
         tot_slippage += slippage
         tot_slippage_known = tot_slippage_known or slippage_known
@@ -635,7 +638,7 @@ def _arb_performance(db) -> dict:
         "funding": tot_funding, "commission": tot_commission, "net": tot_net,
         "basis": tot_basis, "slippage": tot_slippage, "slippage_known": tot_slippage_known,
         "spot_unrealized": tot_spot_unreal, "perp_unrealized": tot_perp_unreal,
-        "directional_net": tot_spot_unreal + tot_perp_unreal,
+        "directional_net": tot_spot_unreal + tot_perp_unreal, "realized": tot_realized,
         "open_count": open_count, "total_count": len(arbs),
     }
     return {"arbs": rows, "totals": totals}

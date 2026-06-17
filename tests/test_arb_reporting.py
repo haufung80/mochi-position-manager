@@ -637,4 +637,10 @@ def test_closed_arb_retains_realized_directional_in_net(arb_registry):
     a = next(x for x in report["arbs"] if x["arb_id"] == aid)
     assert a["directional_net"] == pytest.approx(0.0)     # flat: no phantom MTM despite wild mark
     assert a["net"] == pytest.approx(-10.0)               # funding 0 − fee 0 + realized (10 − 20)
+    assert a["realized"] == pytest.approx(-10.0)
     assert by["hyperliquid"] == pytest.approx(-10.0)      # per-venue carries realized too
+    # totals expose realized AND the headline identity reconciles (F4: net includes it).
+    t = report["totals"]
+    assert t["realized"] == pytest.approx(-10.0)
+    assert t["net"] == pytest.approx(t["funding"] - t["commission"]
+                                     + t["directional_net"] + t["realized"])

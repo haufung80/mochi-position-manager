@@ -462,6 +462,35 @@ def test_close_books_realized_directional_pnl(arb_registry):
     _assert_no_directional_rows()
 
 
+def test_reclose_error_arb_preserves_already_closed_leg_realized(arb_registry):
+    """Re-closing a half-closed 'error' arb must NOT re-touch an already-closed leg:
+    its booked realized_pnl is preserved (a close on a now-flat position would otherwise
+    re-mark it to 0), while the still-failed leg is retried and books its own realized."""
+    arb_registry.state.spot_balances["BTC"] = 0.02
+    arb_registry.state.prices["UBTC/USDC"] = 50500.0          # spot closes +10 on retry
+    arb_id = _mk_arb(status="error")
+    # perp already closed on the FIRST close with realized booked (-20); spot failed.
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02, filled_qty=0.02, avg_fill=50000.0, status="closed")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.02, filled_qty=0.02, avg_fill=50000.0, status="error")
+    with session_scope() as db:
+        db.query(ArbLeg).filter_by(arb_id=arb_id, product="perp").one().realized_pnl = -20.0
+
+    arb_executor._run_close(arb_id)
+
+    with session_scope() as db:
+        arb = db.get(ArbPosition, arb_id)
+        legs = {lg.product: lg for lg in db.query(ArbLeg).filter_by(arb_id=arb_id).all()}
+        assert legs["perp"].realized_pnl == pytest.approx(-20.0)   # PRESERVED, not wiped to 0
+        assert legs["spot"].realized_pnl == pytest.approx(10.0)    # retried close books +10
+        assert legs["perp"].status == "closed" and legs["spot"].status == "closed"
+        assert arb.status == "closed"
+        assert arb.realized_pnl == pytest.approx(-10.0)            # -20 preserved + 10 new
+    # the already-closed perp leg was NOT re-closed.
+    assert not [c for c in arb_registry.state.calls if c[0] == "close" and c[1] == "BTC"]
+
+
 def test_run_close_spot_already_flat_is_noop(arb_registry):
     """If the live free balance is 0, the spot SELL is skipped and the leg is
     still marked closed (nothing to flatten)."""

@@ -87,7 +87,8 @@
   </div>
   <div class="muted" style="margin:2px 0 16px;font-size:12px;">
     Slippage {% if report.totals.slippage_known %}<b class="{{ 'neg' if report.totals.slippage > 0 else 'pos' }}">${{ report.totals.slippage|usd }}</b>{% else %}<span title="no reference mid recorded for these legs">—</span>{% endif %}
-    · Dir. net {{ money(report.totals.directional_net) }} <span style="font-size:10px">(in Net; ≈0 when neutral)</span>
+    · Dir. net {{ money(report.totals.directional_net) }} <span style="font-size:10px">(open MTM, in Net; ≈0 when neutral)</span>
+    · Realized {{ money(report.totals.realized) }} <span style="font-size:10px">(booked at close, in Net)</span>
     {% if metrics and metrics.get('sharpe') is not none %} · Sharpe (est.) <b>{{ metrics.sharpe|round(2) }}</b>{% endif %}
     {% if metrics and metrics.get('apr') is not none %} · APR (est.) <b>{{ metrics.apr|round(1) }}%</b>{% endif %}
     · {{ report.totals.open_count }} open / {{ report.totals.total_count }} total
@@ -245,9 +246,10 @@
         </tr>
       </tbody>
     </table>
-    <div class="muted"><b>Net = funding − commission + Dir. net</b> (total economic value). A
-      closed leg books its realized directional P&L at the close mark, so Net keeps it — the
-      live MTM is suppressed once flat, never double-counted. <b>Basis</b> = the spread captured
+    <div class="muted"><b>Net = funding − commission + Dir. net + Realized</b> (total economic
+      value). A closed leg books its realized directional P&L at the close mark into
+      <b>Realized</b>, so Net keeps it — the live MTM (Dir. net) is suppressed once flat, never
+      double-counted. <b>Basis</b> = the spread captured
       at entry (perp short avg − spot long avg, realizes as the basis converges) — shown for
       reference, NOT double-booked into Net. Funding accrues on the PERP leg only (spot shows 0).
       Spot/perp unrealized are cost-basis marks; <b>Dir. net</b> (their sum) sits ≈0 on a balanced
