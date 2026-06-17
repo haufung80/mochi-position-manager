@@ -129,13 +129,15 @@ def test_arb_funding_event_arb_id_nullable():
 # --- regression: Order schema is UNCHANGED -----------------------------------
 
 def test_orders_table_schema_unchanged():
-    """The directional `orders` table must be byte-for-byte the same as before
-    the arb work — no new columns, no dropped NOT NULL. Pins the exact set."""
+    """The arb work must not touch the directional `orders` table — arb fills write
+    `ArbOrder`, never `Order`. Pins the exact column set. (`realized_pnl` is a
+    DIRECTIONAL feature column — per-fill realized PnL for the Recent-orders view — not
+    an arb column; the arb isolation invariant is unaffected.)"""
     cols = {c["name"] for c in inspect(engine).get_columns("orders")}
     expected = {
         "id", "alert_id", "exchange", "symbol", "side", "qty_usd", "qty_base",
         "reduce_only", "leverage", "signal_price", "fill_price", "commission",
-        "commission_asset", "status", "attempts", "exchange_order_id",
+        "commission_asset", "realized_pnl", "status", "attempts", "exchange_order_id",
         "error_message", "next_retry_at", "created_at", "updated_at",
     }
     assert cols == expected

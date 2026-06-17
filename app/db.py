@@ -50,6 +50,7 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("fill_price", "FLOAT"),
         ("commission", "FLOAT NOT NULL DEFAULT 0.0"),
         ("commission_asset", "VARCHAR(16) NOT NULL DEFAULT ''"),
+        ("realized_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
     ],
     "strategy_positions": [
         ("avg_entry_price", "FLOAT NOT NULL DEFAULT 0.0"),

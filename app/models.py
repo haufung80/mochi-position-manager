@@ -58,6 +58,11 @@ class Order(Base):
     fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    # Realized PnL this fill produced (the portion of the position it CLOSED), USDT,
+    # gross of fees — the per-fill `realized_delta` from `_fill_math`, the same number
+    # the per-strategy `realized_pnl` accumulates. 0.0 for an open/increase (nothing
+    # closed) and for rejected/paper orders (never filled).
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
 
     # pending -> success | failed | retrying | dead
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)

@@ -90,11 +90,14 @@ def _bump_position(db: Session, model, keys: dict,
 
 
 def _apply_fill_to_position(db: Session, strategy_id: str, exchange: str, symbol: str,
-                            side: str, qty_base: float, price: float) -> None:
+                            side: str, qty_base: float, price: float) -> float:
     """Update BOTH ledgers on a fill, serialized by `_LEDGER_LOCK`:
       * Position (aggregate per exchange/symbol): atomic in-SQL UPSERT.
       * StrategyPosition (per strategy): read-modify-write (avg-entry + realized
         PnL need the PRIOR avg, so it can't be a single additive UPSERT).
+
+    Returns the realized PnL this fill produced (the portion of the position it
+    CLOSED) so the caller can stamp it on the Order — 0.0 for an open/increase.
 
     The lock and the FIRST commit are load-bearing: committing refreshes this
     session's read snapshot so the StrategyPosition SELECT sees the latest
@@ -107,13 +110,17 @@ def _apply_fill_to_position(db: Session, strategy_id: str, exchange: str, symbol
     with _LEDGER_LOCK:
         db.commit()   # persist caller's pending changes + start a fresh snapshot
         _bump_position(db, Position, {"exchange": exchange, "symbol": symbol}, signed, price)
-        _apply_strategy_fill(db, strategy_id, exchange, symbol, signed, qty_base, price)
+        realized_delta = _apply_strategy_fill(
+            db, strategy_id, exchange, symbol, signed, qty_base, price)
         db.commit()
+    return realized_delta
 
 
 def _apply_strategy_fill(db: Session, strategy_id: str, exchange: str, symbol: str,
-                         signed: float, qty: float, price: float) -> None:
+                         signed: float, qty: float, price: float) -> float:
     """Apply one fill to the per-strategy ledger with avg-entry + realized PnL.
+    Returns the realized PnL DELTA this fill produced (0.0 when opening from flat
+    or increasing — nothing closed).
 
     Handles increase (weighted-avg entry), partial close, full close, and
     cross-zero reversal (close the old leg, open the remainder at the fill price).
@@ -131,7 +138,7 @@ def _apply_strategy_fill(db: Session, strategy_id: str, exchange: str, symbol: s
             strategy_id=strategy_id, exchange=exchange, symbol=symbol,
             net_qty_base=signed, net_qty_usd=signed * price, last_price=price,
             avg_entry_price=price, realized_pnl=0.0, updated_at=now))
-        return
+        return 0.0                                   # opened from flat -> nothing closed
 
     new_net, new_avg, realized_delta = _fill_math(
         row.net_qty_base, row.avg_entry_price, signed, qty, price)
@@ -141,6 +148,7 @@ def _apply_strategy_fill(db: Session, strategy_id: str, exchange: str, symbol: s
     row.net_qty_usd = new_net * price
     row.last_price = price
     row.updated_at = now
+    return realized_delta
 
 
 def _fill_math(old_net: float, old_avg: float, signed: float, qty: float,
@@ -227,7 +235,7 @@ def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
     order.error_message = ""
     order.next_retry_at = None
     if result.avg_price > 0 and filled_qty > 0:
-        _apply_fill_to_position(
+        order.realized_pnl = _apply_fill_to_position(
             db, alert.strategy_id, venue.exchange, venue.symbol,
             side, filled_qty, result.avg_price,
         )

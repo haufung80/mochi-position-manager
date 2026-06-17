@@ -73,6 +73,18 @@ def test_short_side_realized_sign():
     assert pnl == pytest.approx(10.0)                   # short: (entry-exit) = 100-90
 
 
+def test_apply_fill_returns_per_fill_realized_delta():
+    """_apply_fill_to_position RETURNS the realized PnL this fill produced (the value
+    that gets stamped on Order.realized_pnl for the Recent-orders view): 0 on an
+    open/increase, the closed-portion PnL on a reduce/close."""
+    with session_scope() as db:                         # open from flat -> nothing closed
+        assert _apply_fill_to_position(db, "R", "bybit", "BTCUSDT", "buy", 2.0, 100.0) == pytest.approx(0.0)
+    with session_scope() as db:                         # increase -> still nothing closed
+        assert _apply_fill_to_position(db, "R", "bybit", "BTCUSDT", "buy", 2.0, 200.0) == pytest.approx(0.0)
+    with session_scope() as db:                         # partial close 1 of 4 @ avg 150 -> +30
+        assert _apply_fill_to_position(db, "R", "bybit", "BTCUSDT", "sell", 1.0, 180.0) == pytest.approx(30.0)
+
+
 def test_concurrent_fills_no_lost_update():
     """Regression: concurrent fills on the SAME (strategy, exchange, symbol) must
     not lose updates. The per-strategy ledger is read-modify-write, serialized by

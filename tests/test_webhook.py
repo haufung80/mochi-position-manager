@@ -3,6 +3,7 @@
 These all stub the exchange adapter so no real orders fire; they exercise
 the dedup / fan-out / failure logic of the middleware itself."""
 from __future__ import annotations
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -87,6 +88,24 @@ def test_sell_against_long_closes_it(strategies_yaml, stub_exchange, silent_noti
     with session_scope() as db:
         pos = db.query(Position).one()
         assert pos.net_qty_base == 0.0
+
+
+def test_closing_order_records_per_fill_realized_pnl(strategies_yaml, stub_exchange, silent_notifier):
+    """Recent-orders feature: each fill stamps the realized PnL it booked on its Order —
+    0 on the open, the closed-portion PnL on the close (the per-fill realized_delta that
+    also sums into the per-strategy Realized column)."""
+    c = _client(strategies_yaml)
+    # open long @ 50000 (stub default), fills 0.001
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="buy", alert_id="b1"))
+    # close @ 60000 -> realized = (60000 - 50000) * 0.001 = +10
+    stub_exchange.next_result = OrderResult(
+        success=True, exchange_order_id="FAKE_2", filled_qty_base=0.001, avg_price=60000.0)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", action="sell", alert_id="s1"))
+    with session_scope() as db:
+        orders = db.query(Order).order_by(Order.id).all()
+        assert len(orders) == 2
+        assert orders[0].side == "buy" and orders[0].realized_pnl == pytest.approx(0.0)    # open -> 0
+        assert orders[1].side == "sell" and orders[1].realized_pnl == pytest.approx(10.0)  # close -> +10
 
 
 def test_happy_path_single_venue(strategies_yaml, stub_exchange, silent_notifier):
