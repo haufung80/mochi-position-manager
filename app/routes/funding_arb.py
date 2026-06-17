@@ -204,7 +204,14 @@ def _leg_pnl_inputs(db, arb: ArbPosition, legs: list[ArbLeg]) -> list[LegPnLInpu
     inputs: list[LegPnLInput] = []
     for lg in legs:
         funding = _leg_funding(db, arb, lg)
-        mark = _perp_mark(lg) if lg.product == "perp" else _spot_mark(lg)
+        # A CLOSED arb is flat -> no unrealized MTM. Feed mark = avg_fill so
+        # directional_unrealized is 0 (its net is just realized funding − fees); a live
+        # mark on a closed position would drift forever after close. Live arbs mark to
+        # the real price so net carries their directional MTM.
+        if arb.status == "closed":
+            mark = lg.avg_fill
+        else:
+            mark = _perp_mark(lg) if lg.product == "perp" else _spot_mark(lg)
         inputs.append(LegPnLInput(
             exchange=lg.exchange, account=lg.account, product=lg.product,
             symbol=lg.symbol, side=lg.side, filled=lg.filled_qty,
@@ -634,15 +641,17 @@ _ARB_EQ_CACHE_TTL = 30.0
 
 
 def _arb_by_venue(report: dict) -> dict:
-    """{exchange: net} = Σ(funding − commission) per leg exchange, from an
-    `_arb_performance` report. The per-venue equity values for the curve's live tip;
-    the snapshot writer stores the SAME map, so history and the live edge can't drift.
-    Single-venue HL today → {"hyperliquid": net}."""
+    """{exchange: net} = Σ(funding − commission + directional MTM) per leg exchange,
+    from an `_arb_performance` report — the SAME definition as the headline net, so the
+    per-venue values sum to it. The curve's per-venue live tip; the snapshot writer
+    stores the SAME map, so history and the live edge can't drift. Single-venue HL
+    today → {"hyperliquid": net}."""
     by: dict[str, float] = {}
     for a in report["arbs"]:
         for lg in a["legs"]:
             by[lg["exchange"]] = (by.get(lg["exchange"], 0.0)
-                                  + (lg["funding"] or 0.0) - (lg["commission"] or 0.0))
+                                  + (lg["funding"] or 0.0) - (lg["commission"] or 0.0)
+                                  + (lg["directional_net"] or 0.0))
     return by
 
 

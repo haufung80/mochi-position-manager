@@ -19,9 +19,14 @@ The split (plan §5 + §6):
   spot rises with the mark).
 - ``perp_unrealized`` = Σ perp-leg venue unrealized (from ``get_position_detail`` /
   ``filled·(mark − avg_fill)`` with the leg's signed direction).
-- ``directional_net`` = ``spot_unrealized + perp_unrealized`` — the ≈0 neutrality
-  check (a long spot + a short perp move opposite, cancelling).
-- ``net`` = ``funding_total − commission_total`` (+ basis). The arb's bottom line.
+- ``directional_net`` = ``spot_unrealized + perp_unrealized`` — the legs' live MTM.
+  ≈0 while delta-neutral (a long spot + a short perp move opposite, cancelling), so
+  it is BOTH a neutrality health check AND a real economic term: a non-zero value is
+  genuine directional exposure (e.g. a grid-dust skew or an un-converged basis).
+- ``net`` = ``funding_total − commission_total + directional_net`` (+ basis) — the arb's
+  total economic value (realized carry + the legs' unrealized MTM). The caller feeds a
+  flat MTM (mark = avg_fill) for a CLOSED arb, so a closed pair's net is just its
+  realized funding − fees (no phantom mark on a position that no longer exists).
 
 The account-wide-settlement double-count is prevented UPSTREAM by the A.5 open-time
 symbol exclusivity (one ``(exchange, account, symbol)`` is held by at most one
@@ -91,9 +96,11 @@ class ArbPnLResult:
 def compute_arb_pnl(legs: list[LegPnLInput], *, basis: float = 0.0) -> ArbPnLResult:
     """Pure PnL roll-up for one arb from its legs' already-fetched inputs.
 
-    ``basis`` is an optional extra carry term (default 0) folded into ``net`` so the
-    contract matches ``funding_total − commission_total (+ basis)``; the dashboard
-    leaves it 0 (basis ≈ 0 on a matched-qty pair).
+    ``net = funding_total − commission_total + directional_net + basis``. The
+    ``directional_net`` (the legs' MTM from their ``mark``/``avg_fill``) is always in
+    net — pass ``mark = avg_fill`` for a closed/flat leg so it contributes 0. ``basis``
+    is an optional extra carry term (default 0); the dashboard leaves it 0 (basis is
+    shown as its own informational line, not double-booked into net).
     """
     funding_by_leg: dict[str, float] = {}
     funding_total = 0.0
@@ -114,7 +121,7 @@ def compute_arb_pnl(legs: list[LegPnLInput], *, basis: float = 0.0) -> ArbPnLRes
             perp_unrealized += lg.directional_unrealized
 
     directional_net = spot_unrealized + perp_unrealized
-    net = funding_total - commission_total + basis
+    net = funding_total - commission_total + directional_net + basis
     return ArbPnLResult(
         funding_total=funding_total,
         funding_by_leg=funding_by_leg,

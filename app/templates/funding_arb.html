@@ -63,18 +63,20 @@
   </div>
   <h1>Funding Arbitrage</h1>
   <div class="sub">
-    Delta-neutral cash-and-carry (long spot + short perp). Headline =
-    <b>funding harvested − fees</b>. Directional net (spot + perp) is a ≈0
-    neutrality health check — it is NOT a profit source. Arb funding/fills are a
-    separate book; they never touch the directional /performance numbers.
+    Delta-neutral cash-and-carry (long spot + short perp). Headline Net =
+    <b>funding − fees + directional MTM</b> (total economic value). Directional MTM
+    (spot + perp) is ≈0 while neutral — so Net ≈ funding − fees — but a non-zero value
+    is real exposure (a grid-dust skew or an un-converged basis). Arb funding/fills are
+    a separate book; they never touch the directional /performance numbers.
   </div>
 
   {% macro money(v) %}<span class="{{ 'pos' if (v or 0) >= 0 else 'neg' }}">${{ v|usd }}</span>{% endmacro %}
 
   <!-- ===== headline ===== -->
   <div class="cards">
-    <div class="card stat"><div class="label">Net (funding − fees)</div>
-      <div class="big {{ 'pos' if report.totals.net >= 0 else 'neg' }}">${{ report.totals.net|usd }}</div></div>
+    <div class="card stat"><div class="label">Net (incl. MTM)</div>
+      <div class="big {{ 'pos' if report.totals.net >= 0 else 'neg' }}">${{ report.totals.net|usd }}</div>
+      <div class="muted" style="font-size:10px">funding − fees + directional MTM</div></div>
     <div class="card stat"><div class="label">Funding harvested</div>
       <div class="big {{ 'pos' if report.totals.funding >= 0 else 'neg' }}">${{ report.totals.funding|usd }}</div></div>
     <div class="card stat"><div class="label">Basis (entry spread)</div>
@@ -85,7 +87,7 @@
   </div>
   <div class="muted" style="margin:2px 0 16px;font-size:12px;">
     Slippage {% if report.totals.slippage_known %}<b class="{{ 'neg' if report.totals.slippage > 0 else 'pos' }}">${{ report.totals.slippage|usd }}</b>{% else %}<span title="no reference mid recorded for these legs">—</span>{% endif %}
-    · Dir. net {{ money(report.totals.directional_net) }} <span style="font-size:10px">(≈0 neutrality)</span>
+    · Dir. net {{ money(report.totals.directional_net) }} <span style="font-size:10px">(in Net; ≈0 when neutral)</span>
     {% if metrics and metrics.get('sharpe') is not none %} · Sharpe (est.) <b>{{ metrics.sharpe|round(2) }}</b>{% endif %}
     {% if metrics and metrics.get('apr') is not none %} · APR (est.) <b>{{ metrics.apr|round(1) }}%</b>{% endif %}
     · {{ report.totals.open_count }} open / {{ report.totals.total_count }} total
@@ -105,7 +107,7 @@
     </div>
     {% if metrics %}
     <div class="cards" style="margin-bottom:12px;">
-      <div class="card stat"><div class="label">Net (funding − fees)</div>
+      <div class="card stat"><div class="label">Net (incl. MTM)</div>
         <div class="big {{ 'pos' if metrics.current >= 0 else 'neg' }}">${{ metrics.current|usd }}</div>
         {% if metrics.get('return_pct') is not none %}<div class="muted" style="font-size:10px">{{ metrics.return_pct|round(2) }}% on ${{ metrics.capital_base|usd }}{% if metrics.get('apr') is not none %} · APR (est.) {{ metrics.apr|round(1) }}%{% endif %}</div>{% endif %}</div>
       <div class="card stat"><div class="label">{{ equity_window }} change</div>
@@ -153,8 +155,8 @@
       {% endfor %}
     </div>
     <div class="muted" style="margin-top:6px;">{{ equity.start_label }} → {{ equity.end_label }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }} · hover or drag across to scrub</div>
-    {% if equity.y_ticks_right %}<div class="muted" style="font-size:10px;">left axis: net (funding − fees) · right axis: capital + net</div>{% endif %}
-    <div class="muted">Arb net (funding − commission) captured hourly, per venue + aggregate; right edge anchored to the live headline. Builds forward from the first arb. Fully isolated from the directional /performance curve.</div>
+    {% if equity.y_ticks_right %}<div class="muted" style="font-size:10px;">left axis: net (funding − fees + MTM) · right axis: capital + net</div>{% endif %}
+    <div class="muted">Arb net (funding − commission + directional MTM) captured hourly, per venue + aggregate; right edge anchored to the live headline. Builds forward from the first arb (points pre-dating the MTM change are funding − fees only; directional ≈0 on a neutral book). Fully isolated from the directional /performance curve.</div>
     <script>
     (function(){
       var cols = {{ equity.columns | tojson }};
@@ -243,12 +245,13 @@
         </tr>
       </tbody>
     </table>
-    <div class="muted"><b>Net = funding − commission</b> (realized). <b>Basis</b> = the spread
-      captured at entry (perp short avg − spot long avg, realizes as the basis converges).
-      Funding accrues on the PERP leg only (spot shows 0). Spot/perp unrealized are cost-basis
-      marks; <b>Dir. net</b> (their sum) sits ≈0 on a balanced pair — a large value (or the
-      <b>skew</b> badge) flags broken neutrality. Fully isolated from the directional
-      /performance page.</div>
+    <div class="muted"><b>Net = funding − commission + Dir. net</b> (total economic value; a
+      closed arb is flat so its Net is just realized funding − fees). <b>Basis</b> = the spread
+      captured at entry (perp short avg − spot long avg, realizes as the basis converges) —
+      shown for reference, NOT double-booked into Net. Funding accrues on the PERP leg only
+      (spot shows 0). Spot/perp unrealized are cost-basis marks; <b>Dir. net</b> (their sum) sits
+      ≈0 on a balanced pair — a large value (or the <b>skew</b> badge) flags broken neutrality.
+      Fully isolated from the directional /performance page.</div>
     {% else %}<p class="muted">No funding-arb positions yet.</p>{% endif %}
   </div>
 </body>

@@ -119,6 +119,17 @@ def test_pure_helper_basis_term_folds_into_net():
     assert compute_arb_pnl(legs, basis=0.25).net == pytest.approx(1.0 - 0.1 + 0.25)
 
 
+def test_pure_helper_directional_mtm_folds_into_net():
+    """net is total economic value: a perp marked away from entry moves net by the
+    unrealized MTM (net = funding − fee + directional_net)."""
+    legs = [LegPnLInput(exchange="bybit", account="arb", product="perp",
+                        symbol="BTCUSDT", side="sell", filled=0.02, avg_fill=50000.0,
+                        mark=51000.0, funding=1.0, commission=0.1)]
+    r = compute_arb_pnl(legs)
+    assert r.directional_net == pytest.approx(-0.02 * 1000)        # short loses as mark rises
+    assert r.net == pytest.approx(1.0 - 0.1 - 20.0)               # funding − fee + MTM
+
+
 # ===========================================================================
 # Route-level attribution over real ArbFundingEvent rows
 # ===========================================================================
@@ -575,3 +586,30 @@ def test_subgrid_skew_reads_neutral_real_skew_does_not(arb_registry):
     w = next(x for x in report["arbs"] if x["arb_id"] == wide)
     assert t["neutral"] is True          # 0.0004 <= 0.001/2  -> sub-grid dust
     assert w["neutral"] is False         # 0.005   >  0.001/2  -> genuine skew
+
+
+def test_net_includes_directional_mtm_open_but_not_closed(arb_registry):
+    """net = funding − fees + directional MTM for an OPEN arb (the legs' live mark), but
+    a CLOSED arb is flat -> its directional MTM is suppressed (no phantom mark on a
+    gone position), so its net is just realized funding − fees. Per-venue sums to net."""
+    from app.routes.funding_arb import _arb_by_venue
+    arb_registry.state.positions["BTC"] = (0.0, 51000.0)     # _perp_mark -> 51000 (short down $20)
+    arb_registry.state.prices["UBTC/USDC"] = 50000.0         # _spot_mark == entry -> 0 MTM
+    legs = [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC",
+         "side": "buy", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.0},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC",
+         "side": "sell", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.0},
+    ]
+    op = _make_arb("BTC", legs, status="open")
+    cl = _make_arb("BTC", legs, status="closed")
+    with session_scope() as db:
+        report = _arb_performance(db)
+        by = _arb_by_venue(report)
+    o = next(x for x in report["arbs"] if x["arb_id"] == op)
+    c = next(x for x in report["arbs"] if x["arb_id"] == cl)
+    assert o["directional_net"] == pytest.approx(-20.0)      # marked: short down $20
+    assert o["net"] == pytest.approx(-20.0)                  # funding 0 − fee 0 + MTM
+    assert c["directional_net"] == pytest.approx(0.0)        # closed -> flat, suppressed
+    assert c["net"] == pytest.approx(0.0)                    # realized carry only, no phantom MTM
+    assert by["hyperliquid"] == pytest.approx(o["net"] + c["net"])   # per-venue sums to total net

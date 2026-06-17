@@ -176,12 +176,14 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
 
 
 def write_arb_equity_snapshot(captured_at=None) -> bool:
-    """Capture the funding-arb book's current NET (funding − commission) as one
-    `ArbEquitySnapshot` row — the /funding-arb equity curve's points. Reuses the SAME
-    `_arb_performance` roll-up as the report page, so the snapshot equals the page
-    headline. Writes ONLY when arb positions exist (the curve builds forward from the
-    first arb) and ONLY to the arb table — never `equity_snapshots` (the isolation
-    invariant). `captured_at` pins the timestamp (HH:00 from the loop). Best-effort."""
+    """Capture the funding-arb book's current NET (funding − commission + directional
+    MTM) as one `ArbEquitySnapshot` row — the /funding-arb equity curve's points.
+    Reuses the SAME `_arb_performance` roll-up as the report page, so the snapshot
+    equals the page headline (the live MTM is marked at capture time; historical points
+    pre-dating this can't be re-marked, but directional ≈0 on a neutral book). Writes
+    ONLY when arb positions exist (the curve builds forward from the first arb) and ONLY
+    to the arb table — never `equity_snapshots` (the isolation invariant). `captured_at`
+    pins the timestamp (HH:00 from the loop). Best-effort."""
     from .routes.funding_arb import (_arb_performance, _arb_by_venue,
                                      _clear_arb_equity_cache)
     try:
