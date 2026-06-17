@@ -131,6 +131,30 @@ def _leg_ref_price(ex, leg: ArbLeg) -> float:
     return ex.get_price(leg.symbol)
 
 
+def _close_mark(ex, leg: ArbLeg) -> float:
+    """The leg's live mark just BEFORE flattening (perp: position mark; spot: venue
+    price), used to book realized directional P&L at the close-time price. Best-effort:
+    0.0 on any failure -> realized contribution 0 (it must NEVER block the close)."""
+    try:
+        if leg.product == "perp":
+            return float(ex.get_position_detail(leg.symbol).get("mark") or 0.0)
+        return float(ex.get_price(leg.symbol) or 0.0)
+    except Exception:                       # noqa: BLE001 — display/accounting only
+        return 0.0
+
+
+def _leg_realized(leg: ArbLeg, close_mark: float) -> float:
+    """Realized directional P&L of a leg flattened at ``close_mark`` =
+    ``signed_open_qty·(close_mark − avg_fill)`` (a long spot gains as price rose; a
+    short perp gains as it fell). 0 when no entry/fill/mark is known (can't attribute).
+    Mark-based (not the literal close fill) — the two differ only by close slippage,
+    and uniformly across venues (Bybit/HL ``close_position`` don't return a fill)."""
+    if leg.avg_fill <= 0 or close_mark <= 0 or leg.filled_qty <= 0:
+        return 0.0
+    signed = leg.filled_qty if leg.side == "buy" else -leg.filled_qty
+    return signed * (close_mark - leg.avg_fill)
+
+
 # ---------------------------------------------------------------------------
 # Position-level Telegram alerts (best-effort: NEVER raise into the executor's
 # session_scope — a flaky notifier must not roll back a recorded fill/close).
@@ -549,11 +573,12 @@ def _run_close(arb_id: int) -> None:
                    db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()]
 
     errors: list[str] = []
+    realized: list[float] = []          # per-leg realized directional P&L (at close mark)
     for leg_id in leg_ids:
         try:
             with session_scope() as db:
                 leg = db.get(ArbLeg, leg_id)
-                _close_leg(db, leg, errors)
+                _close_leg(db, leg, errors, realized)
         except Exception as e:  # one leg's failure can't abort the other
             log.exception("arb_executor: close leg %s failed", leg_id)
             errors.append(f"leg {leg_id}: {type(e).__name__}: {e}")
@@ -575,6 +600,7 @@ def _run_close(arb_id: int) -> None:
             arb.status = "closed"
             arb.closed_at = _utcnow()
             arb.error_message = ""
+            arb.realized_pnl = sum(realized)     # realized directional P&L booked at close
             asset = arb.asset
             # Readily-available realized net = Σ leg funding − Σ leg commissions
             # (already recorded on the legs); None if no leg carries either.
@@ -584,10 +610,16 @@ def _run_close(arb_id: int) -> None:
         arb.updated_at = _utcnow()
 
 
-def _close_leg(db: Session, leg: ArbLeg, errors: list[str]) -> None:
+def _close_leg(db: Session, leg: ArbLeg, errors: list[str],
+               realized: list[float]) -> None:
     """Flatten ONE leg. Perp -> whole-coin ``close_position``; spot ->
-    ``spot_market_order`` SELL of the held qty clamped to the live free balance."""
+    ``spot_market_order`` SELL of the held qty clamped to the live free balance.
+
+    On a successful flatten, book the leg's realized directional P&L at the close-time
+    mark onto ``leg.realized_pnl`` (and accumulate into ``realized``) so a closed leg
+    keeps the basis P&L it earned instead of its live MTM dropping to 0."""
     ex = get_registry().get(leg.exchange, leg.account)  # fail loud on mis-config
+    mark = _close_mark(ex, leg)             # pre-close mark, for realized P&L
     if leg.product == "perp":
         result = ex.close_position(leg.symbol)
     else:
@@ -598,11 +630,16 @@ def _close_leg(db: Session, leg: ArbLeg, errors: list[str]) -> None:
         qty = _snap_down(min(leg.filled_qty, free), _leg_step(ex, leg))
         if qty <= _QTY_EPS:
             leg.status = "closed"
+            leg.realized_pnl = 0.0          # already flat -> nothing realized now
+            realized.append(0.0)
             leg.updated_at = _utcnow()
             return
         result = ex.spot_market_order(leg.symbol, "sell", qty)
 
     if result.success:
+        r = _leg_realized(leg, mark)
+        leg.realized_pnl = r
+        realized.append(r)
         leg.status = "closed"
         leg.error_message = ""
     else:

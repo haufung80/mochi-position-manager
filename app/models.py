@@ -203,6 +203,11 @@ class ArbLeg(Base):
     commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Realized directional P&L captured at CLOSE = signed_open_qty·(close mark − avg_fill).
+    # Lets a closed leg KEEP the basis P&L it earned, instead of its live MTM dropping to
+    # 0 at close (0 while the leg is still open). Per-leg so by-venue + half-closed
+    # ("error") arbs attribute exactly.
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     # pending -> success | retrying | dead | error
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
     error_message: Mapped[str] = mapped_column(Text, default="")

@@ -245,13 +245,14 @@
         </tr>
       </tbody>
     </table>
-    <div class="muted"><b>Net = funding − commission + Dir. net</b> (total economic value; a
-      closed arb is flat so its Net is just realized funding − fees). <b>Basis</b> = the spread
-      captured at entry (perp short avg − spot long avg, realizes as the basis converges) —
-      shown for reference, NOT double-booked into Net. Funding accrues on the PERP leg only
-      (spot shows 0). Spot/perp unrealized are cost-basis marks; <b>Dir. net</b> (their sum) sits
-      ≈0 on a balanced pair — a large value (or the <b>skew</b> badge) flags broken neutrality.
-      Fully isolated from the directional /performance page.</div>
+    <div class="muted"><b>Net = funding − commission + Dir. net</b> (total economic value). A
+      closed leg books its realized directional P&L at the close mark, so Net keeps it — the
+      live MTM is suppressed once flat, never double-counted. <b>Basis</b> = the spread captured
+      at entry (perp short avg − spot long avg, realizes as the basis converges) — shown for
+      reference, NOT double-booked into Net. Funding accrues on the PERP leg only (spot shows 0).
+      Spot/perp unrealized are cost-basis marks; <b>Dir. net</b> (their sum) sits ≈0 on a balanced
+      pair — a large value (or the <b>skew</b> badge) flags broken neutrality. Fully isolated
+      from the directional /performance page.</div>
     {% else %}<p class="muted">No funding-arb positions yet.</p>{% endif %}
   </div>
 </body>

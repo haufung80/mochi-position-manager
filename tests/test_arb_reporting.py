@@ -602,7 +602,7 @@ def test_net_includes_directional_mtm_open_but_not_closed(arb_registry):
          "side": "sell", "filled": 0.02, "avg_fill": 50000.0, "commission": 0.0},
     ]
     op = _make_arb("BTC", legs, status="open")
-    cl = _make_arb("BTC", legs, status="closed")
+    cl = _make_arb("BTC", [{**lg, "status": "closed"} for lg in legs], status="closed")
     with session_scope() as db:
         report = _arb_performance(db)
         by = _arb_by_venue(report)
@@ -610,6 +610,31 @@ def test_net_includes_directional_mtm_open_but_not_closed(arb_registry):
     c = next(x for x in report["arbs"] if x["arb_id"] == cl)
     assert o["directional_net"] == pytest.approx(-20.0)      # marked: short down $20
     assert o["net"] == pytest.approx(-20.0)                  # funding 0 − fee 0 + MTM
-    assert c["directional_net"] == pytest.approx(0.0)        # closed -> flat, suppressed
-    assert c["net"] == pytest.approx(0.0)                    # realized carry only, no phantom MTM
+    assert c["directional_net"] == pytest.approx(0.0)        # closed legs -> flat, suppressed
+    assert c["net"] == pytest.approx(0.0)                    # no realized booked here -> 0
     assert by["hyperliquid"] == pytest.approx(o["net"] + c["net"])   # per-venue sums to total net
+
+
+def test_closed_arb_retains_realized_directional_in_net(arb_registry):
+    """A closed arb keeps the realized directional P&L booked at close (ArbLeg.realized_pnl)
+    in its net — net = funding − fees + realized — even though its live MTM is suppressed
+    (flat). Per-venue still sums to net."""
+    from app.routes.funding_arb import _arb_by_venue
+    arb_registry.state.prices["UBTC/USDC"] = 99999.0     # a wild live mark...
+    arb_registry.state.positions["BTC"] = (0.0, 99999.0) # ...is IGNORED (legs closed -> flat)
+    aid = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy",
+         "filled": 0.02, "avg_fill": 50000.0, "status": "closed"},
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell",
+         "filled": 0.02, "avg_fill": 50000.0, "status": "closed"},
+    ], status="closed")
+    with session_scope() as db:                          # book realized at close (spot +10, perp −20)
+        for lg in db.query(ArbLeg).filter(ArbLeg.arb_id == aid):
+            lg.realized_pnl = 10.0 if lg.product == "spot" else -20.0
+    with session_scope() as db:
+        report = _arb_performance(db)
+        by = _arb_by_venue(report)
+    a = next(x for x in report["arbs"] if x["arb_id"] == aid)
+    assert a["directional_net"] == pytest.approx(0.0)     # flat: no phantom MTM despite wild mark
+    assert a["net"] == pytest.approx(-10.0)               # funding 0 − fee 0 + realized (10 − 20)
+    assert by["hyperliquid"] == pytest.approx(-10.0)      # per-venue carries realized too

@@ -204,11 +204,13 @@ def _leg_pnl_inputs(db, arb: ArbPosition, legs: list[ArbLeg]) -> list[LegPnLInpu
     inputs: list[LegPnLInput] = []
     for lg in legs:
         funding = _leg_funding(db, arb, lg)
-        # A CLOSED arb is flat -> no unrealized MTM. Feed mark = avg_fill so
-        # directional_unrealized is 0 (its net is just realized funding − fees); a live
-        # mark on a closed position would drift forever after close. Live arbs mark to
-        # the real price so net carries their directional MTM.
-        if arb.status == "closed":
+        # A CLOSED leg is flat -> no unrealized MTM. Feed mark = avg_fill so
+        # directional_unrealized is 0 (its directional P&L was BOOKED into
+        # `realized_pnl` at close); a live mark on a gone position would drift forever.
+        # Per-LEG (not per-arb) so a half-closed "error" arb marks its still-open leg
+        # live while the flattened leg shows its realized. Open legs mark to the real
+        # price so net carries their directional MTM.
+        if lg.status == "closed":
             mark = lg.avg_fill
         else:
             mark = _perp_mark(lg) if lg.product == "perp" else _spot_mark(lg)
@@ -270,8 +272,8 @@ def _position_view(arb: ArbPosition, legs: list[ArbLeg], db=None) -> ArbPosition
     ``funding_total`` sums each perp leg's attributed ``ArbFundingEvent`` rows over
     the arb's window; spot legs are 0. ``commission_total`` = Σ leg commissions.
     ``spot_unrealized`` / ``perp_unrealized`` are cost-basis marks; ``net =
-    funding_total − commission_total`` (+ basis). The math lives in the pure
-    ``compute_arb_pnl`` helper (tested without live exchanges). When ``db`` is
+    funding_total − commission_total + directional_net + realized``. The math lives in
+    the pure ``compute_arb_pnl`` helper (tested without live exchanges). When ``db`` is
     None (no session), funding/marks fall back to the stored per-leg values."""
     long_filled = sum(lg.filled_qty for lg in legs if lg.side == "buy")
     short_filled = sum(lg.filled_qty for lg in legs if lg.side == "sell")
@@ -281,7 +283,8 @@ def _position_view(arb: ArbPosition, legs: list[ArbLeg], db=None) -> ArbPosition
 
     if db is not None:
         inputs = _leg_pnl_inputs(db, arb, legs)
-        result = compute_arb_pnl(inputs)
+        realized = sum(lg.realized_pnl or 0.0 for lg in legs)
+        result = compute_arb_pnl(inputs, realized=realized)
         per_leg_funding = {
             (i.exchange, i.account, i.symbol): i.funding for i in inputs
         }
@@ -557,7 +560,10 @@ def _arb_performance(db) -> dict:
     for arb in arbs:
         legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb.id).all()
         inputs = _leg_pnl_inputs(db, arb, legs)
-        result = compute_arb_pnl(inputs)
+        # Realized directional P&L booked at close (0 on still-open legs); folded into
+        # net alongside the open legs' unrealized MTM (never both for one leg).
+        realized = sum(lg.realized_pnl or 0.0 for lg in legs)
+        result = compute_arb_pnl(inputs, realized=realized)
         by_input = {(i.exchange, i.account, i.symbol): i for i in inputs}
 
         long_filled = sum(lg.filled_qty for lg in legs if lg.side == "buy")
@@ -595,6 +601,7 @@ def _arb_performance(db) -> dict:
                 "spot_unrealized": leg_unreal if lg.product == "spot" else 0.0,
                 "perp_unrealized": leg_unreal if lg.product == "perp" else 0.0,
                 "directional_net": leg_unreal,
+                "realized_pnl": lg.realized_pnl or 0.0,
                 "status": lg.status,
             })
 
@@ -641,17 +648,18 @@ _ARB_EQ_CACHE_TTL = 30.0
 
 
 def _arb_by_venue(report: dict) -> dict:
-    """{exchange: net} = Σ(funding − commission + directional MTM) per leg exchange,
-    from an `_arb_performance` report — the SAME definition as the headline net, so the
-    per-venue values sum to it. The curve's per-venue live tip; the snapshot writer
-    stores the SAME map, so history and the live edge can't drift. Single-venue HL
-    today → {"hyperliquid": net}."""
+    """{exchange: net} = Σ(funding − commission + directional MTM + realized) per leg
+    exchange, from an `_arb_performance` report — the SAME definition as the headline net
+    (open legs carry MTM, closed legs carry realized), so the per-venue values sum to it.
+    The curve's per-venue live tip; the snapshot writer stores the SAME map, so history
+    and the live edge can't drift. Single-venue HL today → {"hyperliquid": net}."""
     by: dict[str, float] = {}
     for a in report["arbs"]:
         for lg in a["legs"]:
             by[lg["exchange"]] = (by.get(lg["exchange"], 0.0)
                                   + (lg["funding"] or 0.0) - (lg["commission"] or 0.0)
-                                  + (lg["directional_net"] or 0.0))
+                                  + (lg["directional_net"] or 0.0)
+                                  + (lg["realized_pnl"] or 0.0))
     return by
 
 

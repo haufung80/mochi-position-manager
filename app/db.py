@@ -59,8 +59,9 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("by_exchange", "TEXT NOT NULL DEFAULT '{}'"),
         ("source", "VARCHAR(16) NOT NULL DEFAULT 'live'"),
     ],
-    # Arb-only column (does not touch directional tables; isolation preserved).
-    "arb_legs": [("ref_price", "FLOAT NOT NULL DEFAULT 0.0")],
+    # Arb-only columns (do not touch directional tables; isolation preserved).
+    "arb_legs": [("ref_price", "FLOAT NOT NULL DEFAULT 0.0"),
+                 ("realized_pnl", "FLOAT NOT NULL DEFAULT 0.0")],
 }
 
 

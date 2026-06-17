@@ -37,11 +37,12 @@ def _mk_arb(asset="BTC", status="opening", notional=1000.0):
 
 
 def _add_leg(arb_id, *, exchange, account="arb", product, symbol, side,
-             target_qty, filled_qty=0.0, status="pending"):
+             target_qty, filled_qty=0.0, avg_fill=0.0, status="pending"):
     with session_scope() as db:
         leg = ArbLeg(arb_id=arb_id, exchange=exchange, account=account,
                      product=product, symbol=symbol, side=side,
-                     target_qty=target_qty, filled_qty=filled_qty, status=status)
+                     target_qty=target_qty, filled_qty=filled_qty,
+                     avg_fill=avg_fill, status=status)
         db.add(leg)
         db.flush()
         return leg.id
@@ -433,6 +434,32 @@ def test_run_close_perp_failure_marks_arb_error(arb_registry, silent_notifier):
     with session_scope() as db:
         arb = db.get(ArbPosition, arb_id)
         assert arb.status == "error" and "exchange down" in arb.error_message
+
+
+def test_close_books_realized_directional_pnl(arb_registry):
+    """On close, each leg books its realized directional P&L at the close-time mark onto
+    ArbLeg.realized_pnl, and the arb sums them — so the closed pair keeps the basis P&L
+    it earned (instead of its live MTM dropping to 0)."""
+    arb_registry.state.spot_balances["BTC"] = 0.02
+    arb_registry.state.positions["BTC"] = (-0.02, 51000.0)   # perp mark 51000 (short down $20)
+    arb_registry.state.prices["UBTC/USDC"] = 50500.0         # spot mark 50500 (long up $10)
+    arb_id = _mk_arb(status="closing")
+    _add_leg(arb_id, exchange="hyperliquid", product="spot", symbol="UBTC/USDC",
+             side="buy", target_qty=0.02, filled_qty=0.02, avg_fill=50000.0, status="success")
+    _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
+             side="sell", target_qty=0.02, filled_qty=0.02, avg_fill=50000.0, status="success")
+
+    arb_executor._run_close(arb_id)
+
+    with session_scope() as db:
+        arb = db.get(ArbPosition, arb_id)
+        legs = {lg.product: lg for lg in
+                db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()}
+        assert arb.status == "closed"
+        assert legs["spot"].realized_pnl == pytest.approx(0.02 * (50500 - 50000))    # +10
+        assert legs["perp"].realized_pnl == pytest.approx(-0.02 * (51000 - 50000))   # -20
+        assert arb.realized_pnl == pytest.approx(10.0 - 20.0)                        # -10 summed
+    _assert_no_directional_rows()
 
 
 def test_run_close_spot_already_flat_is_noop(arb_registry):

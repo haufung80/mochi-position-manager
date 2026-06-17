@@ -93,14 +93,18 @@ class ArbPnLResult:
     net: float = 0.0
 
 
-def compute_arb_pnl(legs: list[LegPnLInput], *, basis: float = 0.0) -> ArbPnLResult:
+def compute_arb_pnl(legs: list[LegPnLInput], *, basis: float = 0.0,
+                    realized: float = 0.0) -> ArbPnLResult:
     """Pure PnL roll-up for one arb from its legs' already-fetched inputs.
 
-    ``net = funding_total − commission_total + directional_net + basis``. The
-    ``directional_net`` (the legs' MTM from their ``mark``/``avg_fill``) is always in
-    net — pass ``mark = avg_fill`` for a closed/flat leg so it contributes 0. ``basis``
-    is an optional extra carry term (default 0); the dashboard leaves it 0 (basis is
-    shown as its own informational line, not double-booked into net).
+    ``net = funding_total − commission_total + directional_net + realized + basis``.
+    ``directional_net`` (the legs' UNREALIZED MTM from their ``mark``/``avg_fill``) is
+    always in net — pass ``mark = avg_fill`` for a closed/flat leg so it contributes 0.
+    ``realized`` is the directional P&L already BOOKED at close (``ArbLeg.realized_pnl``);
+    a leg is never both (its MTM is suppressed once closed), so the two never double-count
+    — open legs carry MTM, closed legs carry realized. ``basis`` is an optional extra
+    carry term (default 0); the dashboard leaves it 0 (basis is its own informational
+    line, not double-booked into net).
     """
     funding_by_leg: dict[str, float] = {}
     funding_total = 0.0
@@ -121,7 +125,7 @@ def compute_arb_pnl(legs: list[LegPnLInput], *, basis: float = 0.0) -> ArbPnLRes
             perp_unrealized += lg.directional_unrealized
 
     directional_net = spot_unrealized + perp_unrealized
-    net = funding_total - commission_total + directional_net + basis
+    net = funding_total - commission_total + directional_net + realized + basis
     return ArbPnLResult(
         funding_total=funding_total,
         funding_by_leg=funding_by_leg,
