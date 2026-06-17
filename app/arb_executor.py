@@ -405,11 +405,14 @@ def execute_leg(db: Session, leg: ArbLeg,
     db.flush()
 
     ref = _leg_ref_price(ex, leg)               # mid at order time, recorded for slippage
+    step = _leg_step(ex, leg)                    # open-time grid, recorded for neutrality tol
     result = _place_leg_order(ex, leg)
     if result.success:
         _on_leg_success(leg, order, result)
         if ref > 0:
             leg.ref_price = ref
+        if step > 0:
+            leg.grid_step = step
     else:
         _on_leg_failure(leg, order, result)
     return order

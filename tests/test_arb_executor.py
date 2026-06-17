@@ -215,10 +215,13 @@ def test_run_open_fills_both_legs_no_directional_rows(arb_registry):
 
 
 def test_run_open_records_ref_price_for_slippage(arb_registry):
-    """Each filled leg records the mid at order time (ref_price), so execution slippage
-    (avg_fill vs ref) is reportable on the arb page."""
+    """Each filled leg records the mid at order time (ref_price) AND the open-time base
+    grid (grid_step), so execution slippage (avg_fill vs ref) and the neutrality
+    tolerance (coarse_step/2) are reportable WITHOUT a read-path exchange call."""
     arb_registry.state.prices["UBTC/USDC"] = 49990.0
     arb_registry.state.prices["BTC"] = 50000.0
+    arb_registry.state.spot_step_sizes["UBTC/USDC"] = 0.0001    # finer spot grid
+    arb_registry.state.step_sizes["BTC"] = 0.001                # coarser perp grid
     arb_registry.state.spot_result = OrderResult(
         success=True, exchange_order_id="S1", filled_qty_base=0.02, avg_price=49995.0)
     arb_registry.state.next_result = OrderResult(
@@ -229,10 +232,12 @@ def test_run_open_records_ref_price_for_slippage(arb_registry):
     _add_leg(arb_id, exchange="hyperliquid", product="perp", symbol="BTC",
              side="sell", target_qty=0.02)
     arb_executor._run_open(arb_id)
-    with session_scope() as db:                      # read ref_price off the persisted legs
+    with session_scope() as db:                      # read ref_price/grid_step off the legs
         legs = {lg.product: lg for lg in db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id)}
         assert legs["spot"].status == "success" and legs["spot"].ref_price == pytest.approx(49990.0)
         assert legs["perp"].status == "success" and legs["perp"].ref_price == pytest.approx(50000.0)
+        assert legs["spot"].grid_step == pytest.approx(0.0001)  # open-time grid persisted
+        assert legs["perp"].grid_step == pytest.approx(0.001)
 
 
 def test_run_open_fires_spot_before_perp(arb_registry):

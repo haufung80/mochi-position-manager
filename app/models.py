@@ -205,6 +205,11 @@ class ArbLeg(Base):
     # Reference mid at order time (the leg's own venue), captured so execution
     # slippage = avg_fill vs ref can be reported. 0 = not captured (legacy legs).
     ref_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    # Base grid step in force when the leg was placed, captured so the neutrality
+    # tolerance (|skew| <= coarse_step/2) is judged against the OPEN-time grid with NO
+    # read-path exchange call (and is stable across an adapter being down / re-tiered).
+    # 0 = not captured (legacy legs) -> reporting falls back to a live lookup.
+    grid_step: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     funding: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

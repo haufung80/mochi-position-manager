@@ -588,6 +588,29 @@ def test_subgrid_skew_reads_neutral_real_skew_does_not(arb_registry):
     assert w["neutral"] is False         # 0.005   >  0.001/2  -> genuine skew
 
 
+def test_neutrality_uses_persisted_grid_step_no_live_call(arb_registry):
+    """When legs carry the open-time grid (ArbLeg.grid_step), neutrality is judged from
+    it with NO read-path exchange call (and stays stable if the adapter is down/re-tiered)
+    — the F6 fix. A live get_step_size lookup must NOT happen."""
+    aid = _make_arb("BTC", [
+        {"exchange": "hyperliquid", "product": "spot", "symbol": "UBTC/USDC", "side": "buy",
+         "filled": 0.0204, "avg_fill": 50000.0},     # +0.0004 -> within stored step/2
+        {"exchange": "hyperliquid", "product": "perp", "symbol": "BTC", "side": "sell",
+         "filled": 0.0200, "avg_fill": 50000.0},
+    ], status="open")
+    with session_scope() as db:                       # persist the open-time grid on the legs
+        for lg in db.query(ArbLeg).filter_by(arb_id=aid):
+            lg.grid_step = 0.001
+    arb_registry.state.calls.clear()
+    with session_scope() as db:
+        report = _arb_performance(db)
+    a = next(x for x in report["arbs"] if x["arb_id"] == aid)
+    assert a["neutral"] is True                       # 0.0004 <= 0.001/2, via the STORED step
+    step_calls = [c for c in arb_registry.state.calls
+                  if c[0] in ("get_step_size", "get_spot_step_size")]
+    assert step_calls == [], f"neutrality made a live step lookup: {step_calls}"
+
+
 def test_net_includes_directional_mtm_open_but_not_closed(arb_registry):
     """net = funding − fees + directional MTM for an OPEN arb (the legs' live mark), but
     a CLOSED arb is flat -> its directional MTM is suppressed (no phantom mark on a

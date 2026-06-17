@@ -62,7 +62,8 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     # Arb-only columns (do not touch directional tables; isolation preserved).
     "arb_legs": [("ref_price", "FLOAT NOT NULL DEFAULT 0.0"),
-                 ("realized_pnl", "FLOAT NOT NULL DEFAULT 0.0")],
+                 ("realized_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
+                 ("grid_step", "FLOAT NOT NULL DEFAULT 0.0")],
 }
 
 

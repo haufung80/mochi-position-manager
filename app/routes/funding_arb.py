@@ -234,12 +234,18 @@ def _leg_view(leg: ArbLeg, funding: float | None = None) -> ArbLegView:
 
 def _coarse_grid_step(legs: list[ArbLeg]) -> float:
     """Largest base grid step across a pair's legs — the floor on how tightly the two
-    legs can be matched (you can't hedge finer than the coarser leg's grid). Resolved
-    best-effort from each leg's own ``(exchange, account)`` adapter (steps are cached
-    on the adapter, so this is cheap on the warm read path); returns 0.0 if no step is
-    available, which makes the caller fall back to a near-exact check. A flaky adapter
-    must never break a reporting read, so every lookup is guarded."""
-    reg = get_registry()
+    legs can be matched (you can't hedge finer than the coarser leg's grid).
+
+    Prefers the step PERSISTED on each leg at open (``ArbLeg.grid_step``): that is the
+    open-time grid the hedge was actually snapped to, it needs NO read-path exchange
+    call, and it can't flip with a live adapter being down / re-tiered. Only legacy legs
+    that predate that column (``grid_step == 0``) fall back to a best-effort live lookup
+    (guarded — a flaky adapter must never break a reporting read); 0.0 if even that is
+    unavailable, which makes the caller use a near-exact tolerance."""
+    stored = max((lg.grid_step or 0.0) for lg in legs) if legs else 0.0
+    if stored > 0:
+        return stored
+    reg = get_registry()                         # legacy legs only: live fallback
     step = 0.0
     for lg in legs:
         try:
