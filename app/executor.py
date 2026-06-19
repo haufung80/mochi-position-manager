@@ -233,8 +233,8 @@ def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
     order.commission = result.commission or 0.0
     order.commission_asset = result.commission_asset or ""
     # Fidelity flag: an adapter that didn't declare a source means the fee wasn't
-    # confirmed from the venue -> "unavailable" (commission is a 0 placeholder, the
-    # backfill's work-list), never silently a real zero.
+    # confirmed from the venue -> "unavailable" (commission is a 0 placeholder),
+    # never silently a real zero.
     order.fee_source = result.fee_source or "unavailable"
     order.error_message = ""
     order.next_retry_at = None

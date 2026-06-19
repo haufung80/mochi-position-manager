@@ -18,7 +18,7 @@ from .config import get_settings
 from .db import session_scope
 from .exchanges.registry import get_registry
 from .models import (AppMeta, ArbEquitySnapshot, ArbFundingEvent, ArbLeg, ArbPosition,
-                     EquitySnapshot, FundingEvent, Order)
+                     EquitySnapshot, FundingEvent)
 
 log = logging.getLogger(__name__)
 
@@ -82,54 +82,6 @@ def poll_once(router) -> int:
                 )
                 inserted += res.rowcount or 0
     return inserted
-
-
-def backfill_commissions(limit: int = 25) -> int:
-    """Recover REAL commissions for filled orders whose fee wasn't captured at fill
-    time (fee_source="unavailable" — commission is a 0 PLACEHOLDER that understates
-    fees / net PnL). Re-fetches each order's execution from its OWN venue by
-    exchange_order_id and writes the real fee, flipping fee_source to "backfill" (the
-    venue confirming a genuine 0 also resolves it — it leaves the work-list). Bounded
-    per call; the backlog drains over successive hours. Resilient per order. Touches
-    ONLY `Order.commission`/`commission_asset`/`fee_source` — never the ledger,
-    fill_price, Position/StrategyPosition, or any arb row. Returns rows updated."""
-    registry = get_registry()
-    with session_scope() as db:
-        candidates = (
-            db.query(Order.id, Order.exchange, Order.symbol, Order.qty_base,
-                     Order.exchange_order_id)
-            .filter(Order.status == "success",
-                    Order.commission == 0.0,           # only placeholders, never a real fee
-                    Order.fee_source == "unavailable",
-                    Order.exchange_order_id != "",
-                    Order.exchange_order_id != "DRY_RUN")
-            .order_by(Order.id.desc())
-            .limit(limit)
-            .all()
-        )
-    updated = 0
-    for oid, exchange, symbol, qty_base, ex_order_id in candidates:
-        try:
-            res = registry.get(exchange).fetch_fill(symbol, ex_order_id, qty_base or 0.0)
-        except Exception:
-            log.exception("commission backfill failed for order %s (%s/%s)",
-                          oid, exchange, symbol)
-            continue
-        if res is None:                                # venue has no record -> leave flagged, retry later
-            continue
-        with session_scope() as db:
-            o = db.get(Order, oid)
-            if o is None or o.commission != 0.0:       # changed under us -> don't clobber
-                continue
-            o.commission = res.commission or 0.0
-            o.commission_asset = res.commission_asset or o.commission_asset
-            o.fee_source = "backfill"
-            updated += 1
-    if updated:
-        log.info("commission backfill: recovered %d fee(s)", updated)
-        from .routes.dashboard import _clear_equity_cache   # recovered fees move the headline/curve
-        _clear_equity_cache()
-    return updated
 
 
 def _arb_perp_legs() -> list[tuple[str, str, str]]:
@@ -382,15 +334,6 @@ async def funding_loop(router, *, poll_interval_sec: float = _POLL_INTERVAL_SEC,
                     log.info("funding_worker: stored %d new ARB funding events", n)
             except Exception:
                 log.exception("funding_worker arb loop error")
-            # Recover fees the fill-time enrichment missed (fee_source "unavailable")
-            # BEFORE the snapshot, so the hourly point reflects the corrected fees.
-            # Bounded, own session_scope; touches only Order (never the ledger/arb).
-            try:
-                n = await asyncio.to_thread(backfill_commissions)
-                if n:
-                    log.info("funding_worker: backfilled %d commission(s)", n)
-            except Exception:
-                log.exception("funding_worker commission backfill error")
             # One true total-PnL point for the equity curve, stamped on the hour (HH:00)
             # so the curve is evenly spaced. (AFTER funding is recorded.)
             try:

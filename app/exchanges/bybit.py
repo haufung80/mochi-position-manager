@@ -19,12 +19,13 @@ SPOT_CATEGORY = "spot"    # USDT spot (the cash-and-carry spot leg)
 class BybitExchange:
     name = "bybit"
 
-    # A just-placed market order's executions can lag the place_order ack by a
-    # beat. Poll briefly to capture the real fill price + fee. This runs in the
-    # background fan-out (after TradingView already got its response), so the
-    # extra ~sub-second is not on any user-facing path.
-    FILL_POLL_ATTEMPTS = 6
-    FILL_POLL_DELAY = 0.25
+    # A just-placed market order's executions can lag the place_order ack. Poll to
+    # capture the real fill price + fee (early-exits once the full fill surfaces).
+    # Runs in the background fan-out (after TradingView already got its response), so
+    # the wait is not on any user-facing path — a generous window here is what makes
+    # the fee actually captured at fill time (recorded by fee_source), no backfill.
+    FILL_POLL_ATTEMPTS = 10
+    FILL_POLL_DELAY = 0.5
 
     def __init__(self, api_key: str, api_secret: str, testnet: bool = False, dry_run: bool = False):
         self.dry_run = dry_run
@@ -195,25 +196,6 @@ class BybitExchange:
         except Exception as e:
             log.exception("Bybit market_order failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
-
-    def fetch_fill(self, symbol: str, order_id: str,
-                   want_qty: float = 0.0) -> OrderResult | None:
-        """Re-fetch a past order's real fill by id, for the commission backfill.
-        Reuses the same execution poll as market_order; None if no execution
-        surfaced for this id (e.g. too old / outside Bybit's window)."""
-        if self.dry_run or not order_id or order_id == "DRY_RUN":
-            return None
-        try:
-            det = self._fill_details(symbol, order_id, want_qty or 0.0)
-        except Exception as e:
-            log.warning("Bybit fetch_fill failed (continuing): %s", e)
-            return None
-        if not det:
-            return None
-        vwap, fee, ccy, qty = det
-        return OrderResult(success=True, exchange_order_id=order_id,
-                           filled_qty_base=qty, avg_price=vwap,
-                           commission=fee, commission_asset=ccy, fee_source="backfill")
 
     def close_position(self, symbol: str) -> OrderResult:
         try:

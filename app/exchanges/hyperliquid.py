@@ -62,10 +62,12 @@ class HyperliquidExchange:
     name = "hyperliquid"
 
     # The order response carries the fill price (avgPx) but not the fee — that
-    # surfaces via user_fills, which can lag the order ack slightly. Poll briefly.
-    # Runs in the background fan-out, so the latency is not user-facing.
-    FILL_POLL_ATTEMPTS = 6
-    FILL_POLL_DELAY = 0.25
+    # surfaces via user_fills, which can lag the order ack. Poll to capture it (returns
+    # as soon as the fill matches). Runs in the background fan-out, so the wait is not
+    # user-facing — a generous window is what makes the fee captured at fill time
+    # (recorded by fee_source), no backfill.
+    FILL_POLL_ATTEMPTS = 10
+    FILL_POLL_DELAY = 0.5
 
     def __init__(
         self,
@@ -239,24 +241,6 @@ class HyperliquidExchange:
         except Exception as e:
             log.exception("Hyperliquid market_order failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
-
-    def fetch_fill(self, symbol: str, order_id: str,
-                   want_qty: float = 0.0) -> OrderResult | None:
-        """Re-fetch a past order's real fee by oid (user_fills), for the commission
-        backfill. Only the fee is recovered (HL's avg_px was already real at fill).
-        None if no fill for this oid is in the returned window (user_fills is
-        recent-bounded, so old orders may be unrecoverable)."""
-        if self.dry_run or not order_id or order_id == "DRY_RUN":
-            return None
-        try:
-            fee, token, found = self._fill_fee_detail(order_id)
-        except Exception as e:
-            log.warning("HL fetch_fill failed (continuing): %s", e)
-            return None
-        if not found:
-            return None
-        return OrderResult(success=True, exchange_order_id=order_id,
-                           commission=fee, commission_asset=token, fee_source="backfill")
 
     def close_position(self, symbol: str) -> OrderResult:
         try:

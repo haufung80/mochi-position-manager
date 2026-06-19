@@ -102,7 +102,6 @@ class _SharedState:
         self.spot_step_sizes = {}      # symbol -> spot step (default 0.001)
         self.spot_min_notionals = {}   # symbol -> spot min value (default 10.0)
         self.spot_base_fee = 0.0       # base-coin fee deducted on a spot BUY
-        self.backfill_result = None    # if set, returned by fetch_fill (else None)
 
 
 # The mutable test knobs that are SHARED across every (name, account) fake built
@@ -144,10 +143,6 @@ class FakeExchange:
     def close_position(self, symbol):
         self._s.calls.append(("close", symbol, self.name, self.account))
         return OrderResult(success=True, exchange_order_id="CLOSED")
-
-    def fetch_fill(self, symbol, order_id, want_qty=0.0):
-        self._s.calls.append(("fetch_fill", symbol, order_id, self.name, self.account))
-        return self._s.backfill_result        # None unless a test sets a recovered fill
 
     def get_position(self, symbol):
         self._s.calls.append(("get_position", symbol))
