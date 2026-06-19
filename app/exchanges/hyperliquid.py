@@ -117,9 +117,18 @@ class HyperliquidExchange:
     def _fill_fee(self, oid: str) -> tuple[float, str]:
         """Sum the fees for fills belonging to `oid` from user_fills.
         Returns (total_fee, fee_token). Best-effort: returns (0.0, 'USDC') if
-        nothing matches in the poll window. Never raises into the order path."""
+        nothing matches in the poll window. Never raises into the order path.
+        (The spot path + tests rely on this 2-tuple; the perp fill path uses
+        `_fill_fee_detail` for the found flag.)"""
+        fee, token, _ = self._fill_fee_detail(oid)
+        return fee, token
+
+    def _fill_fee_detail(self, oid: str) -> tuple[float, str, bool]:
+        """As `_fill_fee` plus a `found` flag — False when no fill matched in the
+        poll window, so the caller marks commission a 0 PLACEHOLDER (fee_source
+        'unavailable') rather than a real zero."""
         if not self._account_address or not oid:
-            return 0.0, "USDC"
+            return 0.0, "USDC", False
         for _ in range(self.FILL_POLL_ATTEMPTS):
             try:
                 fills = self._info.user_fills(self._account_address) or []
@@ -130,9 +139,9 @@ class HyperliquidExchange:
             if matched:
                 fee = sum(float(f.get("fee", 0) or 0) for f in matched)
                 token = matched[0].get("feeToken") or "USDC"
-                return fee, token
+                return fee, token, True
             time.sleep(self.FILL_POLL_DELAY)
-        return 0.0, "USDC"
+        return 0.0, "USDC", False
 
     def _round_size(self, symbol: str, qty: float) -> float:
         """Snap a base-asset quantity to HL's per-asset szDecimals grid."""
@@ -171,7 +180,8 @@ class HyperliquidExchange:
                 log.info("[DRY_RUN] hyperliquid market %s %s qty=%s",
                          side, symbol, qty_base)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
-                                   filled_qty_base=qty_base, avg_price=price)
+                                   filled_qty_base=qty_base, avg_price=price,
+                                   fee_source="dry_run")
 
             if leverage and leverage > 0:
                 try:
@@ -209,9 +219,9 @@ class HyperliquidExchange:
 
             # avgPx above is the real fill; fees aren't in the order response, so
             # look them up. Best-effort — the order already filled regardless.
-            commission, commission_asset = 0.0, ""
+            commission, commission_asset, fee_found = 0.0, "", False
             try:
-                commission, commission_asset = self._fill_fee(oid)
+                commission, commission_asset, fee_found = self._fill_fee_detail(oid)
             except Exception as e:
                 log.warning("HL fee enrichment failed (continuing): %s", e)
 
@@ -222,6 +232,8 @@ class HyperliquidExchange:
                 avg_price=avg_px,
                 commission=commission,
                 commission_asset=commission_asset,
+                # avg_px is always the real fill; only the fee is best-effort here.
+                fee_source="exchange" if fee_found else "unavailable",
                 raw=resp,
             )
         except Exception as e:

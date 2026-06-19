@@ -87,7 +87,8 @@ class _SharedState:
     def __init__(self):
         self.calls = []                # aggregated across venues/accounts
         self.next_result = OrderResult(success=True, exchange_order_id="FAKE_1",
-                                       filled_qty_base=0.001, avg_price=50000.0)
+                                       filled_qty_base=0.001, avg_price=50000.0,
+                                       fee_source="exchange")  # fills are "enriched" by default
         self.spot_result = None        # if set, returned by spot_market_order
         self.positions = {}            # symbol -> (signed_qty, mark_price)
         self.entries = {}              # symbol -> exchange avg entry

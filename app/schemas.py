@@ -67,12 +67,17 @@ class OrderResult(BaseModel):
     the real fee charged for this fill, in `commission_asset` units (USDT on
     Bybit linear, USDC on Hyperliquid). Both are best-effort: adapters fetch them
     after the order fills, and fall back to 0 / mark price if the lookup fails —
-    the order itself is never blocked on enrichment."""
+    the order itself is never blocked on enrichment.
+
+    `fee_source` records that fidelity so a 0 fee is unambiguous: "exchange" = real
+    fee fetched from the venue, "unavailable" = enrichment failed (commission is a 0
+    placeholder), "dry_run" = simulated. The executor persists it onto Order."""
     success: bool
     exchange_order_id: str = ""
     filled_qty_base: float = 0.0
     avg_price: float = 0.0
     commission: float = 0.0
     commission_asset: str = ""
+    fee_source: str = ""
     error_message: str = ""
     raw: dict | None = None

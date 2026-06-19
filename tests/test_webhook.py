@@ -559,6 +559,11 @@ def test_hyperliquid_fill_fee_matches_oid(monkeypatch):
     assert abs(fee - 0.03) < 1e-9
     assert token == "USDC"
     assert ex._fill_fee("123") == (0.0, "USDC")  # no match -> zero
+    # _fill_fee_detail adds a `found` flag so a real 0 fee is distinguishable from
+    # "not captured" (which the perp path flags fee_source="unavailable").
+    fee2, token2, found2 = ex._fill_fee_detail("111")
+    assert abs(fee2 - 0.03) < 1e-9 and token2 == "USDC" and found2 is True
+    assert ex._fill_fee_detail("123") == (0.0, "USDC", False)   # no match -> not found
 
 
 def test_order_records_signal_price_fill_and_commission(strategies_yaml, stub_exchange,
@@ -567,7 +572,8 @@ def test_order_records_signal_price_fill_and_commission(strategies_yaml, stub_ex
     the order; the alert keeps the signal price too."""
     stub_exchange.next_result = OrderResult(
         success=True, exchange_order_id="X1", filled_qty_base=0.001,
-        avg_price=50123.0, commission=0.05, commission_asset="USDT")
+        avg_price=50123.0, commission=0.05, commission_asset="USDT",
+        fee_source="exchange")
     c = _client(strategies_yaml)
     body = _payload("TEST_BTC", quantity=0.05)
     body["price"] = 50000.0  # signal price ({{close}})
@@ -579,7 +585,25 @@ def test_order_records_signal_price_fill_and_commission(strategies_yaml, stub_ex
         assert o.fill_price == 50123.0
         assert abs(o.commission - 0.05) < 1e-12
         assert o.commission_asset == "USDT"
+        assert o.fee_source == "exchange"        # real fee fetched from the venue
         assert db.query(Alert).one().signal_price == 50000.0
+
+
+def test_order_fee_source_unavailable_when_enrichment_missing(strategies_yaml, stub_exchange,
+                                                              silent_notifier):
+    """An adapter that returns no fee_source (post-fill enrichment failed) leaves the
+    order flagged "unavailable": commission=0 is a PLACEHOLDER, not a real zero, so the
+    backfill can find it and evaluation isn't silently misled by a missing fee."""
+    stub_exchange.next_result = OrderResult(
+        success=True, exchange_order_id="X1", filled_qty_base=0.001,
+        avg_price=50000.0)                       # no commission, no fee_source declared
+    c = _client(strategies_yaml)
+    body = _payload("TEST_BTC", quantity=0.05)
+    assert c.post("/webhook/tradingview", json=body).status_code == 200
+    with session_scope() as db:
+        o = db.query(Order).filter(Order.status == "success").one()
+        assert o.commission == 0.0
+        assert o.fee_source == "unavailable"     # placeholder, not a confirmed zero
 
 
 def test_orders_json_includes_execution_fields(strategies_yaml, stub_exchange, silent_notifier):

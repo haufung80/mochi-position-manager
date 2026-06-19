@@ -725,6 +725,7 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
         "symbol": o.symbol, "side": o.side, "qty_base": o.qty_base,
         "fill_price": o.fill_price, "status": o.status, "commission": o.commission,
         "commission_asset": o.commission_asset,
+        "fee_source": o.fee_source,            # "unavailable" -> commission is a 0 placeholder
         "realized_pnl": o.realized_pnl,        # realized this fill produced (closed portion)
         "slippage_bps": _slip_bps(o.fill_price, o.signal_price, o.side),
         "error": o.error_message,

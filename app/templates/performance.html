@@ -268,7 +268,7 @@
           <td>{{ o.qty_base|qty }}</td>
           <td>{% if o.fill_price %}${{ o.fill_price|usd }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>{% if o.slippage_bps is not none %}{{ "%.0f"|format(o.slippage_bps) }}{% else %}<span class="muted">—</span>{% endif %}</td>
-          <td class="muted">{% if o.commission %}{{ o.commission|fee }} {{ o.commission_asset }}{% else %}—{% endif %}</td>
+          <td class="muted">{% if o.fee_source == 'unavailable' %}<span class="warn" title="fee not captured at fill — counted as 0, pending backfill">⚠</span>{% elif o.commission %}{{ o.commission|fee }} {{ o.commission_asset }}{% else %}—{% endif %}</td>
           <td>{% if o.realized_pnl %}{{ money(o.realized_pnl) }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="l"><span class="pill s-{{ o.status }}">{{ o.status }}</span>
             {% if o.status == 'rejected' and o.error %}<span class="muted" title="{{ o.error }}"> ⓘ</span>{% endif %}</td>

@@ -150,7 +150,8 @@ class BybitExchange:
                 log.info("[DRY_RUN] bybit market %s %s qty=%s lev=%s",
                          side, symbol, qty_str, leverage)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
-                                   filled_qty_base=float(qty_str), avg_price=price)
+                                   filled_qty_base=float(qty_str), avg_price=price,
+                                   fee_source="dry_run")
 
             resp = self._client.place_order(
                 category=CATEGORY,
@@ -172,6 +173,7 @@ class BybitExchange:
             # leaves the mark-price estimate and a zero fee.
             fill_price, commission, commission_asset = price, 0.0, ""
             filled_qty = float(qty_str)
+            det = None
             try:
                 det = self._fill_details(symbol, order_id, float(qty_str))
                 if det:
@@ -186,6 +188,8 @@ class BybitExchange:
                 avg_price=fill_price,
                 commission=commission,
                 commission_asset=commission_asset,
+                # det present => real fill price + fee; absent => mark estimate + 0 fee.
+                fee_source="exchange" if det else "unavailable",
                 raw=resp,
             )
         except Exception as e:

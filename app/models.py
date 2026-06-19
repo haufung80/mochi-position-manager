@@ -58,6 +58,13 @@ class Order(Base):
     fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     commission: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     commission_asset: Mapped[str] = mapped_column(String(16), default="", nullable=False)
+    # Fidelity of `commission` (and `fill_price`): "exchange" = real fee fetched from
+    # the venue at fill time; "backfill" = recovered later from trade history;
+    # "unavailable" = the post-fill enrichment fetch failed, so commission is a 0
+    # PLACEHOLDER (and on Bybit fill_price is a mark estimate); "dry_run" = simulated.
+    # Makes a 0 fee unambiguous (real zero vs. not-yet-captured) and is the backfill's
+    # work-list. Empty "" = legacy row written before this column (treat as unknown).
+    fee_source: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     # Realized PnL this fill produced (the portion of the position it CLOSED), USDT,
     # gross of fees — the per-fill `realized_delta` from `_fill_math`, the same number
     # the per-strategy `realized_pnl` accumulates. 0.0 for an open/increase (nothing
