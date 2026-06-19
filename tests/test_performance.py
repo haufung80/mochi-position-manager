@@ -76,6 +76,24 @@ def test_performance_renders_with_data(client):
     assert "bybit/BTCUSDT" in r.text            # order row venue
 
 
+def test_performance_renders_per_strategy_chart(client):
+    """The page renders the SECOND 'by strategy' equity chart (fed from by_strategy
+    snapshots) alongside the existing overall+by-exchange one."""
+    _seed_round_trip()
+    with session_scope() as db:                 # a populated per-strategy snapshot point
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, 2, tzinfo=timezone.utc),
+                              total_pnl=20.0, realized=20.0,
+                              by_exchange=json.dumps({"bybit": 20.0}),
+                              by_strategy=json.dumps({"S1": 20.0})))
+    r = client.get("/performance?equity_window=All")
+    assert r.status_code == 200
+    assert "by strategy" in r.text                       # the NEW chart heading
+    assert "Σ strategies" in r.text                      # the strategy-chart net label
+    assert "excludes exchange-level funding" in r.text   # the funding note
+    assert 'id="eqwrapstrat"' in r.text                  # second chart's suffixed element
+    assert "per exchange + aggregate" in r.text          # existing chart still present
+
+
 def test_performance_numbers(client):
     _seed_round_trip()
     with session_scope() as db:

@@ -326,6 +326,12 @@ class EquitySnapshot(Base):
     # so the curve can draw one line per venue plus the aggregate. JSON keeps it
     # flexible as venues come and go without a schema change.
     by_exchange: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    # Per-strategy total PnL at capture time as a JSON object {strategy_id: total},
+    # where total = realized + unrealized (live MTM) − commission (funding is
+    # exchange-level, never per-strategy). Powers the per-strategy equity curve. Only
+    # populated by the live worker (forward-looking) — backfilled rows leave it "{}"
+    # since per-strategy history isn't on the exchange to reconstruct.
+    by_strategy: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     # "live" = captured by the worker; "backfill" = imported from the exchanges'
     # own history. Lets a re-run replace only the backfilled rows, never live ones.
     source: Mapped[str] = mapped_column(String(16), default="live", nullable=False)

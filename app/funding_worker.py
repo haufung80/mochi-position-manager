@@ -157,17 +157,18 @@ def write_equity_snapshot(router, captured_at=None) -> bool:
     `captured_at` pins the timestamp — the loop passes the top of the hour so points
     land on HH:00; defaults to now. Best-effort — True when a row was written."""
     from .routes.dashboard import (_performance, _by_exchange_totals,   # local: avoid import cycle
-                                   _clear_equity_cache)
+                                   _by_strategy_totals, _clear_equity_cache)
     try:
         with session_scope() as db:
             perf = _performance(db, router)
             t = perf["totals"]
             by_ex = _by_exchange_totals(perf)
+            by_strat = _by_strategy_totals(perf)        # {strategy: realized+unrealized−commission}
             db.add(EquitySnapshot(
                 captured_at=captured_at or datetime.now(timezone.utc),
                 total_pnl=t["total"], realized=t["realized"], unrealized=t["unrealized"],
                 funding=t["funding"], commission=t["commission"],
-                by_exchange=json.dumps(by_ex)))
+                by_exchange=json.dumps(by_ex), by_strategy=json.dumps(by_strat)))
         _clear_equity_cache()           # a fresh point is persisted -> don't serve the stale dataset
         return True
     except Exception:

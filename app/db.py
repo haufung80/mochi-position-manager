@@ -58,6 +58,7 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     ],
     "equity_snapshots": [
         ("by_exchange", "TEXT NOT NULL DEFAULT '{}'"),
+        ("by_strategy", "TEXT NOT NULL DEFAULT '{}'"),
         ("source", "VARCHAR(16) NOT NULL DEFAULT 'live'"),
     ],
     # Arb-only columns (do not touch directional tables; isolation preserved).

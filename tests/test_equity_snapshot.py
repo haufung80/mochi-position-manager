@@ -12,8 +12,9 @@ from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.funding_worker import write_equity_snapshot
 from app.models import EquitySnapshot
-from app.routes.dashboard import (_equity_curve, _equity_dataset, _equity_metrics,
-                                   _equity_series, _equity_svg, _load_snapshots, _performance)
+from app.routes.dashboard import (_by_strategy_totals, _equity_curve, _equity_dataset,
+                                   _equity_metrics, _equity_series, _equity_svg,
+                                   _load_snapshots, _load_strategy_snapshots, _performance)
 from app.routing import StrategyRouter
 
 
@@ -41,6 +42,76 @@ def test_write_equity_snapshot_equals_headline_and_captures_realized(tmp_path, s
     assert total_pnl == pytest.approx(headline)
     assert realized == pytest.approx(50.0)
     assert by_ex.get("bybit") == pytest.approx(50.0)   # per-exchange total captured
+
+
+def test_write_equity_snapshot_captures_by_strategy(tmp_path, stub_exchange):
+    """The snapshot ALSO stores a per-strategy breakdown (mirrors by_exchange); the
+    per-strategy values sum to the directional (ex-funding) total."""
+    router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n"
+                              "  S2:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    with session_scope() as db:
+        _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 1.0, 100.0)
+        _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "sell", 1.0, 150.0)   # +50
+        _apply_fill_to_position(db, "S2", "bybit", "BTCUSDT", "buy", 1.0, 100.0)
+        _apply_fill_to_position(db, "S2", "bybit", "BTCUSDT", "sell", 1.0, 110.0)   # +10
+    assert write_equity_snapshot(router) is True
+    with session_scope() as db:
+        by_strat = json.loads(db.query(EquitySnapshot).one().by_strategy)
+        per_strat_sum = sum(r["total"] for r in _performance(db, router)["per_strategy"])
+    assert by_strat == {"S1": pytest.approx(50.0), "S2": pytest.approx(10.0)}
+    assert sum(by_strat.values()) == pytest.approx(per_strat_sum)   # Σ == directional total
+
+
+def test_write_equity_snapshot_by_strategy_includes_unrealized(tmp_path, stub_exchange):
+    """The captured by_strategy value INCLUDES live unrealized MTM (the user's core
+    requirement): a strategy left with an OPEN position whose mark != entry has
+    by_strategy[sid] = realized + unrealized − commission, i.e. it moves with the mark."""
+    router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
+    with session_scope() as db:                       # open +2 @ 100, no close -> unrealized only
+        _apply_fill_to_position(db, "S1", "bybit", "BTCUSDT", "buy", 2.0, 100.0)
+    stub_exchange.positions["BTCUSDT"] = (2.0, 110.0)  # exchange mark 110 -> +20 unrealized
+    assert write_equity_snapshot(router) is True
+    with session_scope() as db:
+        by_strat = json.loads(db.query(EquitySnapshot).one().by_strategy)
+    assert by_strat["S1"] == pytest.approx(20.0)       # 2 * (110 - 100); realized 0, commission 0
+
+
+def test_load_strategy_snapshots_skips_empty_and_sums():
+    """_load_strategy_snapshots returns (ts, Σ_strategies, by_strategy) and SKIPS rows
+    with no per-strategy breakdown (backfilled / pre-feature) so the curve has no
+    flat-zero prefix."""
+    now = datetime.now(timezone.utc)
+    with session_scope() as db:
+        db.add(EquitySnapshot(captured_at=now - timedelta(hours=3), total_pnl=5.0,
+                              by_strategy="{}"))                       # empty -> skipped
+        db.add(EquitySnapshot(captured_at=now - timedelta(hours=1), total_pnl=30.0,
+                              by_strategy=json.dumps({"S1": 18.0, "S2": 12.0})))
+    with session_scope() as db:
+        rows = _load_strategy_snapshots(db)
+    assert len(rows) == 1                                # the empty-by_strategy row is skipped
+    _, agg, by = rows[0]
+    assert agg == pytest.approx(30.0) and by == {"S1": 18.0, "S2": 12.0}
+
+
+def test_equity_series_per_strategy_lines_and_live_tip():
+    """The per-strategy snapshots feed the SAME _equity_series: one line per strategy +
+    a Σ 'Total', each tipped to the live value."""
+    now = datetime.now(timezone.utc)
+    with session_scope() as db:
+        db.add(EquitySnapshot(captured_at=now - timedelta(hours=2), total_pnl=30.0,
+                              by_strategy=json.dumps({"S1": 18.0, "S2": 12.0})))
+    live = {"S1": 20.0, "S2": 13.0}
+    with session_scope() as db:
+        s = _equity_series(_load_strategy_snapshots(db), None, sum(live.values()), live)
+    assert set(s) == {"Total", "S1", "S2"}
+    assert s["Total"][-1][1] == pytest.approx(33.0)      # Σ live tip
+    assert s["S1"][-1][1] == pytest.approx(20.0)
+
+
+def test_equity_series_per_strategy_no_history_is_empty():
+    """With NO populated by_strategy snapshots the per-strategy curve is the genuine
+    empty state (forward-only) — the page shows the 'builds forward' message."""
+    assert _equity_series([], timedelta(hours=24), 5.0, {"S1": 5.0}) == {}
 
 
 def test_equity_curve_empty_without_snapshots():

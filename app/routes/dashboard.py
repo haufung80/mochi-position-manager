@@ -425,6 +425,16 @@ def _by_exchange_totals(perf: dict) -> dict:
     return {r["exchange"]: r["total"] for r in perf["per_exchange"]}
 
 
+def _by_strategy_totals(perf: dict) -> dict:
+    """{strategy_id: total_pnl} from a _performance() result, SORTED by id for stable
+    line colors. Each `total` = realized + unrealized (live MTM) − commission (funding is
+    exchange-level, never per-strategy). Used by BOTH the page's live tip and the snapshot
+    writer, so stored `by_strategy` history and the live right-edge key strategies
+    identically."""
+    return {r["strategy_id"]: r["total"]
+            for r in sorted(perf["per_strategy"], key=lambda r: r["strategy_id"])}
+
+
 def _equity_curve(db, end_total=None) -> list[tuple]:
     """Equity curve from periodic `EquitySnapshot` rows — each one is the TRUE total
     PnL (realized + unrealized + funding − commission) captured at that time by the
@@ -506,6 +516,25 @@ def _load_snapshots(db) -> list[tuple]:
         except (ValueError, TypeError):
             by = {}
         out.append((ts, float(s.total_pnl), by))
+    return out
+
+
+def _load_strategy_snapshots(db) -> list[tuple]:
+    """Per-strategy equity snapshots as (ts_utc, Σ_strategies, by_strategy_dict),
+    time-ordered — the SAME 3-tuple shape `_equity_series` consumes, so the per-strategy
+    curve reuses it unchanged. Σ_strategies = Σ of the per-strategy totals (realized +
+    unrealized − commission; excludes exchange-level funding). Rows with NO per-strategy
+    breakdown (backfilled / pre-feature) are skipped so the curve starts at the first
+    populated point (no flat-zero prefix)."""
+    out: list[tuple] = []
+    for s in db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at).all():
+        try:
+            by = json.loads(s.by_strategy or "{}")
+        except (ValueError, TypeError):
+            by = {}
+        if not by:                                       # no per-strategy data on this row
+            continue
+        out.append((_as_utc(s.captured_at), float(sum(by.values())), by))
     return out
 
 
@@ -741,9 +770,19 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         cap = get_settings().equity_capital_base
         equity = _equity_svg(series, capital_base=cap)      # right axis = account value
         metrics = _equity_metrics(series.get("Total", []), cap)
+        # Per-strategy curve: same window + render helpers, fed the by_strategy breakdown.
+        # Σ-strategies aggregate excludes exchange-level funding; no capital/right axis
+        # (capital isn't split per strategy).
+        strat_live = _by_strategy_totals(perf)
+        strat_series = _equity_series(
+            _load_strategy_snapshots(db), wdelta,
+            sum(strat_live.values()) if strat_live else None, strat_live)
+        strat_equity = _equity_svg(strat_series)
+        strat_metrics = _equity_metrics(strat_series.get("Total", []))
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,
+        "strat_equity": strat_equity, "strat_metrics": strat_metrics,
         "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
         "equity_window": wsel,
     })
