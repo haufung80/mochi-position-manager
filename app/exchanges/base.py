@@ -56,6 +56,14 @@ class Exchange(Protocol):
         so managed/paper orders aren't placed below it and rejected."""
         ...
 
+    def fetch_fill(self, symbol: str, order_id: str,
+                   want_qty: float = 0.0) -> OrderResult | None:
+        """Re-fetch a PAST order's real fill (commission [+ price]) by exchange
+        order id — for the commission backfill (orders whose fee wasn't captured at
+        fill time). `OrderResult.fee_source="backfill"` on success; None when the
+        venue has no execution record for it. Best-effort; never raises."""
+        ...
+
     # ---------- spot surface (funding-arb cash-and-carry legs) ----------
     # The arb spot leg (long spot vs short perp) needs a market-order + balance +
     # grid + min-notional surface SEPARATE from the perp methods above. Both

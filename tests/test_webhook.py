@@ -566,6 +566,42 @@ def test_hyperliquid_fill_fee_matches_oid(monkeypatch):
     assert ex._fill_fee_detail("123") == (0.0, "USDC", False)   # no match -> not found
 
 
+def test_hyperliquid_fetch_fill_backfill(monkeypatch):
+    """fetch_fill recovers a past order's fee by oid for the backfill: found -> an
+    OrderResult tagged fee_source='backfill'; not found -> None (never fabricated)."""
+    from app.exchanges.hyperliquid import HyperliquidExchange
+    monkeypatch.setattr(HyperliquidExchange, "FILL_POLL_DELAY", 0)
+    ex = HyperliquidExchange.__new__(HyperliquidExchange)   # skip __init__ (no network)
+    ex._account_address = "0xabc"
+    ex.dry_run = False
+
+    class FakeInfo:
+        def user_fills(self, addr):
+            return [{"oid": 111, "fee": "0.04", "feeToken": "USDC"}]
+    ex._info = FakeInfo()
+
+    r = ex.fetch_fill("BTC", "111")
+    assert r is not None and abs(r.commission - 0.04) < 1e-9
+    assert r.commission_asset == "USDC" and r.fee_source == "backfill"
+    assert ex.fetch_fill("BTC", "999") is None        # no fill for this oid -> None
+    assert ex.fetch_fill("BTC", "DRY_RUN") is None     # never backfill a sim/empty id
+
+
+def test_bybit_fetch_fill_backfill(monkeypatch):
+    """Bybit fetch_fill maps the execution poll into a backfill OrderResult (real fee
+    + price); no execution surfaced -> None."""
+    from app.exchanges.bybit import BybitExchange
+    ex = BybitExchange.__new__(BybitExchange)          # skip __init__ (no network)
+    ex.dry_run = False
+    monkeypatch.setattr(ex, "_fill_details",
+                        lambda symbol, oid, want: (50100.0, 0.06, "USDT", 0.001))
+    r = ex.fetch_fill("BTCUSDT", "OID1", 0.001)
+    assert r is not None and abs(r.commission - 0.06) < 1e-9
+    assert r.commission_asset == "USDT" and r.fee_source == "backfill" and r.avg_price == 50100.0
+    monkeypatch.setattr(ex, "_fill_details", lambda symbol, oid, want: None)
+    assert ex.fetch_fill("BTCUSDT", "OID1", 0.001) is None
+
+
 def test_order_records_signal_price_fill_and_commission(strategies_yaml, stub_exchange,
                                                         silent_notifier):
     """Signal price flows alert -> order; fill price + real commission land on
@@ -604,6 +640,48 @@ def test_order_fee_source_unavailable_when_enrichment_missing(strategies_yaml, s
         o = db.query(Order).filter(Order.status == "success").one()
         assert o.commission == 0.0
         assert o.fee_source == "unavailable"     # placeholder, not a confirmed zero
+
+
+def test_backfill_commissions_recovers_unavailable_fee(strategies_yaml, stub_exchange,
+                                                       silent_notifier):
+    """An order whose fee wasn't captured at fill (fee_source 'unavailable', commission
+    a 0 placeholder) gets its REAL fee recovered from the venue by exchange_order_id and
+    flipped to 'backfill' — fees / net PnL stop being understated. Recovers data; drops
+    nothing."""
+    from app.funding_worker import backfill_commissions
+    stub_exchange.next_result = OrderResult(            # enrichment failed at fill time
+        success=True, exchange_order_id="OID9", filled_qty_base=0.001, avg_price=50000.0)
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.05))
+    with session_scope() as db:
+        oid = db.query(Order).filter(Order.status == "success").one().id
+    # The venue now returns the real fill on a by-id refetch.
+    stub_exchange.backfill_result = OrderResult(
+        success=True, exchange_order_id="OID9", commission=0.08,
+        commission_asset="USDT", fee_source="backfill")
+    assert backfill_commissions(limit=10) == 1
+    with session_scope() as db:
+        o = db.get(Order, oid)
+        assert abs(o.commission - 0.08) < 1e-12
+        assert o.commission_asset == "USDT"
+        assert o.fee_source == "backfill"
+
+
+def test_backfill_commissions_leaves_unrecoverable_flagged(strategies_yaml, stub_exchange,
+                                                           silent_notifier):
+    """When the venue has no execution record (fetch_fill -> None), the order stays
+    flagged 'unavailable' (not silently marked done), so a later run can retry — we never
+    fabricate a fee."""
+    from app.funding_worker import backfill_commissions
+    stub_exchange.next_result = OrderResult(
+        success=True, exchange_order_id="OID9", filled_qty_base=0.001, avg_price=50000.0)
+    c = _client(strategies_yaml)
+    c.post("/webhook/tradingview", json=_payload("TEST_BTC", quantity=0.05))
+    stub_exchange.backfill_result = None               # venue can't find it
+    assert backfill_commissions(limit=10) == 0
+    with session_scope() as db:
+        o = db.query(Order).filter(Order.status == "success").one()
+        assert o.fee_source == "unavailable" and o.commission == 0.0
 
 
 def test_orders_json_includes_execution_fields(strategies_yaml, stub_exchange, silent_notifier):

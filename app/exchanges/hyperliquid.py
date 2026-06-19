@@ -240,6 +240,24 @@ class HyperliquidExchange:
             log.exception("Hyperliquid market_order failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
 
+    def fetch_fill(self, symbol: str, order_id: str,
+                   want_qty: float = 0.0) -> OrderResult | None:
+        """Re-fetch a past order's real fee by oid (user_fills), for the commission
+        backfill. Only the fee is recovered (HL's avg_px was already real at fill).
+        None if no fill for this oid is in the returned window (user_fills is
+        recent-bounded, so old orders may be unrecoverable)."""
+        if self.dry_run or not order_id or order_id == "DRY_RUN":
+            return None
+        try:
+            fee, token, found = self._fill_fee_detail(order_id)
+        except Exception as e:
+            log.warning("HL fetch_fill failed (continuing): %s", e)
+            return None
+        if not found:
+            return None
+        return OrderResult(success=True, exchange_order_id=order_id,
+                           commission=fee, commission_asset=token, fee_source="backfill")
+
     def close_position(self, symbol: str) -> OrderResult:
         try:
             if self._exchange is None:

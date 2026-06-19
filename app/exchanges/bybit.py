@@ -196,6 +196,25 @@ class BybitExchange:
             log.exception("Bybit market_order failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
 
+    def fetch_fill(self, symbol: str, order_id: str,
+                   want_qty: float = 0.0) -> OrderResult | None:
+        """Re-fetch a past order's real fill by id, for the commission backfill.
+        Reuses the same execution poll as market_order; None if no execution
+        surfaced for this id (e.g. too old / outside Bybit's window)."""
+        if self.dry_run or not order_id or order_id == "DRY_RUN":
+            return None
+        try:
+            det = self._fill_details(symbol, order_id, want_qty or 0.0)
+        except Exception as e:
+            log.warning("Bybit fetch_fill failed (continuing): %s", e)
+            return None
+        if not det:
+            return None
+        vwap, fee, ccy, qty = det
+        return OrderResult(success=True, exchange_order_id=order_id,
+                           filled_qty_base=qty, avg_price=vwap,
+                           commission=fee, commission_asset=ccy, fee_source="backfill")
+
     def close_position(self, symbol: str) -> OrderResult:
         try:
             resp = self._client.get_positions(category=CATEGORY, symbol=symbol)
