@@ -10,7 +10,7 @@ from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.main import app
 from app.models import Alert, EquitySnapshot, FundingEvent, Order
-from app.routes.dashboard import (_equity_curve, _equity_svg,
+from app.routes.dashboard import (_equity_chart_payload, _equity_curve,
                                    _execution_quality_by_strategy, _performance)
 from app.routing import StrategyRouter
 
@@ -80,7 +80,9 @@ def test_performance_renders_with_data(client):
     r = client.get("/performance?equity_window=All")   # All so the seed date stays in-window
     assert r.status_code == 200
     assert "S1" in r.text                       # per-strategy + per-exchange rows
-    assert r.text.count("<polyline") >= 2       # multi-line: aggregate Total + per-exchange
+    assert 'class="echart"' in r.text                          # ECharts canvas (replaced the SVG)
+    assert r.text.count('"is_total"') >= 2                     # multi-series payload: Total + per-exchange line
+    assert "echarts" in r.text and "/static/app.js" in r.text  # charting lib + initializer wired in
     assert "Max drawdown" in r.text             # equity metrics row
     assert "equity_window=" in r.text and "365D" in r.text   # window selector
     assert "Recent orders" in r.text
@@ -101,7 +103,7 @@ def test_performance_renders_per_strategy_chart(client):
     assert "by strategy" in r.text                       # the NEW chart heading
     assert "Σ strategies" in r.text                      # the strategy-chart net label
     assert "excludes exchange-level funding" in r.text   # the funding note
-    assert 'id="eqwrapstrat"' in r.text                  # second chart's suffixed element
+    assert 'id="eqstrat"' in r.text                      # second chart's suffixed ECharts canvas
     assert "per exchange + aggregate" in r.text          # existing chart still present
 
 
@@ -385,9 +387,9 @@ def test_equity_curve_plots_snapshots(client):
                                   realized=v, unrealized=0.0, funding=0.0, commission=0.0))
     with session_scope() as db:
         points = _equity_curve(db)
-        svg = _equity_svg(points)
+        payload = _equity_chart_payload({"Total": points})
     assert [round(v, 2) for _, v in points] == [10.0, 25.0, 40.0]   # rises with the snapshots
-    assert svg is not None and svg["lines"][0]["polyline"]
+    assert payload is not None and payload["series"][0]["data"]     # plotted as an ECharts series
 
 
 def test_equity_curve_anchors_tip_to_total(client):

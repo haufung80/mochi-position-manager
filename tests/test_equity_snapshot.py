@@ -12,8 +12,8 @@ from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.funding_worker import write_equity_snapshot
 from app.models import EquitySnapshot
-from app.routes.dashboard import (_by_strategy_totals, _equity_curve, _equity_dataset,
-                                   _equity_metrics, _equity_series, _equity_svg,
+from app.routes.dashboard import (_by_strategy_totals, _equity_chart_payload, _equity_curve,
+                                   _equity_dataset, _equity_metrics, _equity_series, _equity_svg,
                                    _load_snapshots, _load_strategy_snapshots, _performance)
 from app.routing import StrategyRouter
 
@@ -191,6 +191,24 @@ def test_equity_metrics_capital_base_percentages():
     assert m["max_drawdown_pct"] == pytest.approx(40.0 / (2000.0 + 100.0) * 100)  # vs peak equity
     assert m["sharpe"] is None                                           # < 8 points
     assert "return_pct" not in _equity_metrics(series)                   # no base -> no %
+
+
+def test_equity_chart_payload_shape():
+    """The ECharts payload (the /performance curve path) carries each series with Total
+    drawn LAST (on top, green/red by sign; venues branded) as [epoch_ms, value] points,
+    plus the capital base; nothing to plot -> None."""
+    t1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    p = _equity_chart_payload({"bybit": [(t1, 6.0), (t2, 18.0)],
+                               "Total": [(t1, 10.0), (t2, 30.0)]}, capital_base=2000.0)
+    assert [s["name"] for s in p["series"]][-1] == "Total"     # Total ordered last -> drawn on top
+    total = next(s for s in p["series"] if s["name"] == "Total")
+    assert total["is_total"] and total["color"] == "#4ade80"   # positive total -> green
+    assert total["last"] == pytest.approx(30.0)
+    assert total["data"][-1] == [int(t2.timestamp() * 1000), 30.0]   # [epoch_ms, value]
+    assert p["capital_base"] == pytest.approx(2000.0)
+    assert _equity_chart_payload({}) is None                   # nothing to plot
+    assert _equity_chart_payload({"Total": [(t1, -5.0)]})["series"][0]["color"] == "#f87171"  # neg -> red
 
 
 def test_equity_svg_has_axes_and_hover_columns():

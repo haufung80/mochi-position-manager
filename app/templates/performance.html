@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% from "macros.html" import money %}
 {% block title %}Performance — Mochi Position Manager{% endblock %}
+{% block scripts %}
+  {# Charting lib + the shared initializer; loaded at end-of-body (content already parsed).
+     app.js finds every .echart[data-chart] and renders it — no per-chart inline script. #}
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <script src="/static/app.js"></script>
+{% endblock %}
 {% block content %}
   <div style="font-size:13px;margin-bottom:6px;">
     <a href="/" class="back">← back to dashboard</a>
@@ -13,10 +19,10 @@
     diagnostic (execution vs signal price) — already reflected in fills, not re-deducted.
   </div>
 
-  {# One multi-series equity chart (window tabs + metric cards + SVG + legend + scrub).
-     Rendered once per breakdown (by-exchange, by-strategy); IDs are suffixed by eq_id so
-     each chart's hover/scrub is independent. The scrub JS is defined ONCE below as
-     initEquityChart() and only CALLED per instance here. #}
+  {# One multi-series equity chart (window tabs + metric cards + ECharts canvas + legend).
+     Rendered once per breakdown (by-exchange, by-strategy); the canvas id is suffixed by
+     eq_id. The chart payload is embedded as data-chart and drawn client-side by app.js
+     (ECharts owns hover/tooltip); the legend below shows each series' last value. #}
   {% macro equity_chart(eq_id, title, equity, metrics, note, windows, window,
                         show_window=True, net_label='Total PnL', empty_msg='No snapshots yet.') %}
   <h2>{{ title }}</h2>
@@ -51,40 +57,14 @@
     {% endif %}
     {% endif %}
     {% if equity %}
-    <div id="eqwrap{{ eq_id }}" style="position:relative;">
-    <svg viewBox="0 0 {{ equity.width }} {{ equity.height }}" width="100%" height="{{ equity.height }}"
-         preserveAspectRatio="none" role="img" aria-label="{{ title }}"
-         style="overflow:visible;touch-action:pan-y;cursor:crosshair;">
-      {% for t in equity.y_ticks %}
-      <line x1="{{ equity.plot_left }}" y1="{{ t.y }}" x2="{{ equity.plot_right }}" y2="{{ t.y }}" stroke="#1b1f27" stroke-width="1"/>
-      <text x="{{ equity.plot_left - 5 }}" y="{{ t.y + 3 }}" text-anchor="end" font-size="9" fill="#888">${{ t.v|usd }}</text>
-      {% endfor %}
-      {% for t in equity.y_ticks_right %}    {# right axis: account value = capital + PnL #}
-      <text x="{{ equity.plot_right + 6 }}" y="{{ t.y + 3 }}" text-anchor="start" font-size="9" fill="#7c8aa0">${{ t.v|usd }}</text>
-      {% endfor %}
-      <line x1="{{ equity.plot_left }}" y1="{{ equity.zero_y }}" x2="{{ equity.plot_right }}" y2="{{ equity.zero_y }}"
-            stroke="#2a2e38" stroke-width="1" stroke-dasharray="4 4"/>
-      {% for t in equity.x_ticks %}
-      <text x="{{ t.x }}" y="{{ equity.height - 6 }}" text-anchor="middle" font-size="9" fill="#888">{{ t.label }}</text>
-      {% endfor %}
-      {% for ln in equity.lines %}
-      <polyline points="{{ ln.polyline }}" fill="none" stroke="{{ ln.color }}"
-                stroke-width="{{ 2.4 if ln.is_total else 1.3 }}"{% if not ln.is_total %} opacity="0.8"{% endif %}
-                stroke-linejoin="round" stroke-linecap="round"/>
-      {% endfor %}
-      <line id="eqhover{{ eq_id }}" stroke="#9ca3af" stroke-width="1" stroke-dasharray="3 3" style="display:none;"/>
-    </svg>
-    <div id="eqtip{{ eq_id }}" style="position:absolute;display:none;pointer-events:none;background:#0f1115;border:1px solid #2a2e38;border-radius:6px;padding:6px 8px;font-size:11px;line-height:1.5;white-space:nowrap;z-index:5;"></div>
-    </div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:#9ca3af;">
-      {% for ln in equity.lines %}
-      <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:{{ ln.color }};margin-right:5px;vertical-align:middle;"></span>{{ ln.name }} {{ money(ln.last) }}</span>
+    <div class="echart" id="eq{{ eq_id }}" data-chart='{{ equity | tojson }}'
+         style="height:240px;" role="img" aria-label="{{ title }}"></div>
+    <div class="chart-legend">
+      {% for s in equity.series %}
+      <span><span class="swatch" style="background:{{ s.color }}"></span>{{ s.name }} {{ money(s.last) }}</span>
       {% endfor %}
     </div>
-    <div class="muted" style="margin-top:6px;">{{ equity.start_label }} → {{ equity.end_label }} · range ${{ equity.lo|usd }} … ${{ equity.hi|usd }} · hover or drag across to scrub</div>
-    {% if equity.y_ticks_right %}<div class="muted" style="font-size:10px;">left axis: PnL · right axis: account value (capital + PnL)</div>{% endif %}
     <div class="muted">{{ note }}</div>
-    <script>initEquityChart('{{ eq_id }}', {{ equity.columns | tojson }}, {{ equity.width }}, {{ equity.plot_top }}, {{ equity.plot_bottom }});</script>
     {% else %}
     <p class="muted">{{ empty_msg }}</p>
     {% endif %}
@@ -103,38 +83,6 @@
     <div class="card stat"><div class="label">Fees (comm − fund)</div>
       <div class="big">${{ (perf.totals.commission - perf.totals.funding)|usd }}</div></div>
   </div>
-
-  <!-- ===== equity curves: shared scrub JS defined ONCE, then one render per breakdown ===== -->
-  <script>
-  function initEquityChart(id, cols, VBW, PT, PB){
-    if(!cols || !cols.length) return;
-    var wrap=document.getElementById('eqwrap'+id); if(!wrap) return;
-    var svg=wrap.querySelector('svg'),
-        hov=document.getElementById('eqhover'+id), tip=document.getElementById('eqtip'+id);
-    function scrub(clientX, isTouch){
-      var r=svg.getBoundingClientRect(); if(!r.width) return;
-      var vx=(clientX-r.left)/r.width*VBW, best=cols[0], bd=1e9, i;
-      for(i=0;i<cols.length;i++){ var d=Math.abs(cols[i].x-vx); if(d<bd){bd=d; best=cols[i];} }
-      hov.setAttribute('x1',best.x); hov.setAttribute('x2',best.x);
-      hov.setAttribute('y1',PT); hov.setAttribute('y2',PB); hov.style.display='';
-      var html='<div style="color:#888;margin-bottom:2px;">'+best.t+'</div>';
-      for(i=0;i<best.items.length;i++){ var it=best.items[i]; if(it.val==null) continue;
-        html+='<div><span style="color:'+it.color+'">■</span> '+it.name+' $'+it.val.toFixed(2)+'</div>'; }
-      tip.innerHTML=html; tip.style.display='block'; tip.style.top='2px';
-      if(isTouch){   // pin to the top, on the side AWAY from the finger so the thumb never covers the readout
-        tip.style.left=((clientX-r.left) < r.width/2 ? (r.width - tip.offsetWidth - 6) : 6)+'px';
-      } else {
-        var lx=clientX-r.left+14; if(lx>r.width-130) lx=clientX-r.left-118;
-        tip.style.left=Math.max(0,lx)+'px';
-      }
-    }
-    // Pointer events unify desktop hover + touch drag; touch-action:pan-y (on the svg)
-    // lets a vertical swipe still scroll the page while a horizontal drag scrubs.
-    svg.addEventListener('pointermove', function(e){ scrub(e.clientX, e.pointerType!=='mouse'); });
-    svg.addEventListener('pointerdown', function(e){ scrub(e.clientX, e.pointerType!=='mouse'); });
-    svg.addEventListener('pointerleave', function(e){ if(e.pointerType==='mouse'){ hov.style.display='none'; tip.style.display='none'; } });
-  }
-  </script>
 
   <!-- ===== equity curve: overall + by exchange ===== -->
   {{ equity_chart('', 'Equity curve (USDT, total PnL — per exchange + aggregate)', equity, metrics,

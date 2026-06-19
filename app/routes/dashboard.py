@@ -789,6 +789,32 @@ def _equity_svg(series, width: int = 920, height: int = 220,
             "end_label": _fmt_when(series[span_key][-1][0], "%m-%d %H:%M")}
 
 
+def _equity_chart_payload(series, capital_base: float = 0.0) -> dict | None:
+    """Convert an `_equity_series` dict ({name: [(ts, value)]}) into an ECharts-ready
+    payload (rendered client-side by renderEChart in app.js) — the charting-library
+    replacement for `_equity_svg`'s hand-built SVG. Same series ordering + colors (Total
+    last, green/red by sign; venues branded; others cycle the palette); `data` points are
+    [epoch_ms, value] for ECharts' time axis. `capital_base` is carried through as the
+    account-value basis (reserved for the right-axis follow-up). None when nothing to plot."""
+    if not series:
+        return None
+    order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])
+    palette = iter(_SERIES_PALETTE)
+    out = []
+    for name in order:
+        pts = series.get(name) or []
+        color = (("#4ade80" if pts[-1][1] >= 0 else "#f87171") if name == "Total"
+                 else (_SERIES_COLORS.get(name) or next(palette, "#9ca3af")))
+        data = [[int(e * 1000), round(float(v), 4)]
+                for ts, v in pts if (e := _epoch_ts(ts)) is not None]
+        if data:
+            out.append({"name": name, "color": color,
+                        "is_total": name == "Total", "last": pts[-1][1], "data": data})
+    if not out:
+        return None
+    return {"series": out, "capital_base": float(capital_base or 0.0)}
+
+
 def _recent_orders(db, limit: int = 50) -> list[dict]:
     """Recent orders (newest first), incl. rejected/paper, with strategy + slippage."""
     rows = (db.query(Order, Alert.strategy_id)
@@ -818,7 +844,7 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         live_by_ex = _by_exchange_totals(perf)
         series = _equity_series(snapshots, wdelta, perf["totals"]["total"], live_by_ex)
         cap = get_settings().equity_capital_base
-        equity = _equity_svg(series, capital_base=cap)      # right axis = account value
+        equity = _equity_chart_payload(series, capital_base=cap)   # ECharts payload (app.js draws it)
         metrics = _equity_metrics(series.get("Total", []), cap)
         # Per-strategy curve: same window + render helpers, fed the by_strategy breakdown.
         # Σ-strategies aggregate excludes exchange-level funding; no capital/right axis
@@ -827,7 +853,7 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         strat_series = _equity_series(
             strat_snapshots, wdelta,
             sum(strat_live.values()) if strat_live else None, strat_live)
-        strat_equity = _equity_svg(strat_series)
+        strat_equity = _equity_chart_payload(strat_series)
         strat_metrics = _equity_metrics(strat_series.get("Total", []))
         # Execution-quality row order: the by-strategy P&L order (perf.per_strategy) FIRST,
         # then any strategy that has orders but no fill/position (all rejected/dead) — else
