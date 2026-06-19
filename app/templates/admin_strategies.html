@@ -1,93 +1,6 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Strategies — Mochi Position Manager</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px;
-           -webkit-text-size-adjust: 100%; }
-    h1 { margin: 0 0 6px 0; font-size: 22px; }
-    h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em;
-         color: #888; margin: 28px 0 10px 0; }
-    .sub { color: #888; font-size: 13px; margin-bottom: 18px; line-height: 1.6; }
-    .back { color: #60a5fa; text-decoration: none; font-size: 13px; }
-    .card { background: #1a1d24; border: 1px solid #2a2e38;
-            border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #2a2e38;
-             vertical-align: middle; }
-    th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
-    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
-    label { display: block; color: #aaa; font-size: 11px; text-transform: uppercase;
-            letter-spacing: 0.03em; margin-bottom: 4px; }
-    input[type=text], input[type=password], select {
-      width: 100%; padding: 8px 10px; background: #0f1115;
-      border: 1px solid #2a2e38; border-radius: 4px; color: #e6e6e6;
-      box-sizing: border-box; font-size: 14px; font-family: inherit;
-    }
-    select { appearance: none; background-image:
-      linear-gradient(45deg, transparent 50%, #888 50%),
-      linear-gradient(135deg, #888 50%, transparent 50%);
-      background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%;
-      background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
-      padding-right: 32px; }
-    input:focus, select:focus { outline: 1px solid #60a5fa; border-color: #60a5fa; }
-    /* Visible feedback when a required field is empty after submit attempt */
-    form.was-validated input:invalid,
-    form.was-validated select:invalid { border-color: #ef4444;
-                                          box-shadow: 0 0 0 1px #ef4444; }
-    .form-error { display: none; background: #7f1d1d; color: #fecaca;
-                  padding: 8px 12px; border-radius: 4px; margin-bottom: 12px;
-                  font-size: 13px; }
-    .form-error.show { display: block; }
-    .venues-block { background: #161922; padding: 10px 12px; border-radius: 6px;
-                    border: 1px solid #2a2e38; }
-    .venue-row { display: flex; align-items: center; gap: 10px; padding: 4px 0;
-                 font-size: 13px; }
-    .venue-row input[type=checkbox] { width: 18px; height: 18px; cursor: pointer; }
-    .venue-row .sym-hint { color: #666; font-size: 11px;
-                           font-family: "SF Mono", Menlo, monospace; }
-    .secret-row { background: #2d2308; border: 1px solid #facc15; border-radius: 6px;
-                  padding: 12px; margin-top: 16px; }
-    .secret-row label { color: #facc15; }
-    .secret-row input { background: #1a1500; border-color: #92400e; }
-    button { padding: 10px 18px; background: #2563eb; color: white; border: none;
-             border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 14px; }
-    button:hover { opacity: 0.9; }
-    button.danger { background: #7f1d1d; padding: 6px 10px; font-size: 11px;
-                    font-weight: 500; }
-    .delete-form { display: flex; gap: 6px; align-items: center; }
-    .delete-form input { width: 110px; padding: 5px 8px; font-size: 12px; }
-    .toggle-form { display: inline-flex; gap: 4px; align-items: center; }
-    .toggle-form input { width: 90px; padding: 4px 6px; font-size: 11px;
-                         background: #0f1115; border: 1px solid #2a2e38;
-                         border-radius: 3px; color: #e6e6e6; }
-    .muted { color: #666; }
-    code { font-family: "SF Mono", Menlo, monospace; font-size: 12px;
-           background: #0f1115; padding: 2px 6px; border-radius: 3px; }
-    .venue-pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
-                  font-size: 11px; font-weight: 600; margin-right: 4px;
-                  background: #2a2e38; color: #666; border: none; cursor: pointer; }
-    .venue-pill.on { background: #14532d; color: #4ade80; }
-    /* Wide tables scroll inside their card instead of breaking the phone layout. */
-    .card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    @media (max-width: 640px) {
-      body { padding: 12px;
-             padding-left: max(12px, env(safe-area-inset-left));
-             padding-right: max(12px, env(safe-area-inset-right));
-             padding-bottom: max(12px, env(safe-area-inset-bottom)); }
-      h1 { font-size: 19px; }
-      .grid { grid-template-columns: 1fr; }   /* form fields stack on phones */
-      table { font-size: 12px; }
-      th, td { padding: 6px 8px; white-space: nowrap; }
-    }
-  </style>
-</head>
-<body>
+{% extends "base.html" %}
+{% block title %}Strategies — Mochi Position Manager{% endblock %}
+{% block content %}
   <a href="/" class="back">← back to dashboard</a>
   <h1>Strategy Configuration</h1>
   <div class="sub">
@@ -106,7 +19,7 @@
   <div class="card">
     <form method="POST" action="/admin/strategies" id="strategy-form">
       <div class="form-error" id="form-error"></div>
-      <div class="grid">
+      <div class="form-grid">
         <div>
           <label>Strategy ID</label>
           <input type="text" name="strategy_id" required pattern="[A-Za-z0-9_\-]+"
@@ -354,5 +267,4 @@
     If your pine script sizes in dollars, convert in pine before sending:
     <code>qty = cash_size / close</code>.
   </div>
-</body>
-</html>
+{% endblock %}
