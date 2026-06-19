@@ -524,21 +524,6 @@ def _downsample(pts: list, cap: int = 600) -> list:
     return out
 
 
-def _value_at(pts: list, epoch):
-    """Carry-forward value of the last point at-or-before `epoch` (None before the
-    series' first point). Lets a venue's value be read at the Total line's sampled
-    timestamps even though each series is downsampled independently — an exact-key
-    lookup otherwise drops the venue on points whose timestamps don't coincide."""
-    val = None
-    for ts, v in pts:
-        e = _epoch_ts(ts)
-        if e is None or e <= epoch:
-            val = v
-        else:
-            break
-    return val
-
-
 # --- equity dataset cache: switching timeframes / rapid reloads reuse this instead
 # --- of re-fetching the exchanges and re-reading snapshots on every render. ---
 _EQ_CACHE: dict = {"at": 0.0, "snapshots": None, "perf": None,
@@ -704,98 +689,13 @@ def _equity_metrics(total_series: list, capital_base: float = 0.0):
     return m
 
 
-def _equity_svg(series, width: int = 920, height: int = 220,
-                ml: int = 52, mr: int = 12, mt: int = 12, mb: int = 22,
-                capital_base: float = 0.0):
-    """Multi-series equity SVG with value (Y) + time (X) axes and per-point hover
-    columns. `series` = {name: [(ts, v)]} (or a bare point list = the Total line).
-    ml/mr/mt/mb are margins for axis labels. None when there's nothing to plot.
-    'Total' is drawn last (on top) and thicker; venue lines are dimmer.
-
-    With `capital_base` > 0, a RIGHT y-axis re-labels the SAME gridlines in account-
-    value terms (capital_base + PnL) — the line stays PnL-from-0, the left axis reads
-    PnL, the right reads the capital amount (the zero-PnL line == the capital base)."""
-    if isinstance(series, list):
-        series = {"Total": series} if series else {}
-    series = {k: v for k, v in series.items() if v}
-    if not series:
-        return None
-    all_vals = [v for pts in series.values() for _, v in pts] + [0.0]
-    lo, hi = min(all_vals), max(all_vals)
-    span = (hi - lo) or 1.0
-    all_ts = [_epoch_ts(ts) for pts in series.values() for ts, _ in pts]
-    valid = [t for t in all_ts if t is not None]
-    t0 = min(valid) if valid else 0.0
-    tspan = (max(valid) - t0) if valid else 0.0
-    # Reserve room on the right for the capital-axis labels when shown.
-    mr_eff = max(mr, 54) if capital_base and capital_base > 0 else mr
-    px_l, px_r, px_t, px_b = ml, width - mr_eff, mt, height - mb
-
-    def fy(v):
-        return px_t + (px_b - px_t) * (1 - (v - lo) / span)
-
-    def fx(t, i=0, n=1):
-        if tspan and t is not None:
-            return px_l + (px_r - px_l) * ((t - t0) / tspan)
-        return px_l + (px_r - px_l) * (i / (n - 1) if n > 1 else 0.0)
-
-    order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])
-    palette = iter(_SERIES_PALETTE)
-    color_of: dict[str, str] = {}
-    lines = []
-    for name in order:
-        pts = series[name]
-        n = len(pts)
-        if name == "Total":
-            color = "#4ade80" if pts[-1][1] >= 0 else "#f87171"
-        else:
-            color = _SERIES_COLORS.get(name) or next(palette, "#9ca3af")
-        color_of[name] = color
-        poly = " ".join(f"{fx(_epoch_ts(ts), i, n):.1f},{fy(v):.1f}"
-                        for i, (ts, v) in enumerate(pts))
-        lines.append({"name": name, "polyline": poly, "color": color,
-                      "last": pts[-1][1], "is_total": name == "Total"})
-
-    y_ticks = [{"v": lo + span * k / 4, "y": round(fy(lo + span * k / 4), 1)} for k in range(5)]
-    # Right axis: the SAME gridlines re-labelled as account value (capital + PnL).
-    y_ticks_right = ([{"v": t["v"] + capital_base, "y": t["y"]} for t in y_ticks]
-                     if capital_base and capital_base > 0 else [])
-    x_ticks = []
-    if tspan:
-        for k in range(4):
-            t = t0 + tspan * k / 3
-            x_ticks.append({"label": _fmt_when(datetime.fromtimestamp(t, tz=timezone.utc), "%m-%d"),
-                            "x": round(px_l + (px_r - px_l) * k / 3, 1)})
-
-    columns = []                                  # aligned hover points (date + each series value)
-    if "Total" in series:
-        ex_series = {name: pts for name, pts in series.items() if name != "Total"}
-        for ts, tv in _downsample(series["Total"], 160):
-            te = _epoch_ts(ts)
-            items = []
-            for name in order:
-                val = tv if name == "Total" else _value_at(ex_series[name], te)
-                items.append({"name": name, "color": color_of[name],
-                              "val": round(val, 2) if val is not None else None})
-            columns.append({"x": round(fx(te), 1),
-                            "t": _fmt_when(ts, "%m-%d %H:%M"), "items": items})
-
-    span_key = "Total" if "Total" in series else order[0]
-    return {"lines": lines, "zero_y": round(fy(0.0), 1), "width": width, "height": height,
-            "plot_left": px_l, "plot_right": px_r, "plot_top": px_t, "plot_bottom": round(px_b, 1),
-            "lo": lo, "hi": hi, "y_ticks": y_ticks, "y_ticks_right": y_ticks_right,
-            "x_ticks": x_ticks, "columns": columns,
-            "start_label": _fmt_when(series[span_key][0][0], "%m-%d %H:%M"),
-            "end_label": _fmt_when(series[span_key][-1][0], "%m-%d %H:%M")}
-
-
 def _equity_chart_payload(series, capital_base: float = 0.0) -> dict | None:
     """Convert an `_equity_series` dict ({name: [(ts, value)]}) into an ECharts-ready
-    payload (rendered client-side by renderEChart in app.js) — the charting-library
-    replacement for `_equity_svg`'s hand-built SVG. Same series ordering + colors (Total
-    last, green/red by sign; venues branded; others cycle the palette); `data` points are
-    [epoch_ms, value] for ECharts' time axis. `capital_base` is carried through as the
-    account-value basis (reserved for the right-axis follow-up). None when nothing to plot."""
+    payload, rendered client-side by renderEChart in app.js (used by both /performance
+    and /funding-arb). Series ordering + colors: Total last (drawn on top), green/red by
+    sign; venues branded; others cycle the palette. `data` points are [epoch_ms, value]
+    for ECharts' time axis. `capital_base` is carried through as the account-value basis
+    (reserved for the right-axis follow-up). None when there's nothing to plot."""
     if not series:
         return None
     order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])

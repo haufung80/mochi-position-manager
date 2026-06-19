@@ -458,8 +458,8 @@ def test_arb_equity_curve_isolated_from_directional():
 
 
 def test_arb_report_page_renders_equity_curve(client_set):
-    """/funding-arb renders the equity-curve section (window chips + scrub + venue
-    legend) once arb snapshots exist."""
+    """/funding-arb renders the equity-curve section (window chips + ECharts chart +
+    venue legend) once arb snapshots exist."""
     from app.models import ArbEquitySnapshot
     with session_scope() as db:
         db.add(ArbEquitySnapshot(captured_at=datetime(2026, 6, 1, 12, tzinfo=timezone.utc),
@@ -470,7 +470,8 @@ def test_arb_report_page_renders_equity_curve(client_set):
     assert r.status_code == 200, r.text
     assert "Equity curve" in r.text
     assert "hyperliquid" in r.text                 # venue line in the legend
-    assert "drag across to scrub" in r.text        # hover/scrub affordance
+    assert 'class="echart"' in r.text              # ECharts canvas (replaced the SVG/scrub)
+    assert "echarts" in r.text and "/static/app.js" in r.text   # charting lib + initializer wired in
 
 
 # ===========================================================================

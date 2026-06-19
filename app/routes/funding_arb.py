@@ -69,7 +69,7 @@ from .dashboard import (  # noqa: E402
     _fmt_fee, _fmt_qty, _fmt_usd, _fmt_when,
     # Pure equity-curve render helpers (operate on passed-in data — they never read
     # the directional `equity_snapshots`, so reusing them keeps the isolation intact).
-    _equity_series, _equity_svg, _equity_metrics, _resolve_window,
+    _equity_series, _equity_chart_payload, _equity_metrics, _resolve_window,
     _EQUITY_WINDOWS, _EQUITY_DEFAULT_WINDOW)
 templates.env.filters["usd"] = _fmt_usd
 templates.env.filters["qty"] = _fmt_qty
@@ -751,7 +751,7 @@ def arb_report_page(request: Request,
         series = _equity_series(snapshots, wdelta, report["totals"]["net"],
                                 _arb_by_venue(report))
         capital = _arb_capital_base(report)              # config, else deployed notional
-        equity = _equity_svg(series, capital_base=capital)   # right axis = capital + net
+        equity = _equity_chart_payload(series, capital_base=capital)   # ECharts payload (app.js draws it)
         metrics = _equity_metrics(series.get("Total", []), capital_base=capital)
     resp = templates.TemplateResponse("funding_arb.html", {
         "request": request, "report": report, "equity": equity, "metrics": metrics,

@@ -13,7 +13,7 @@ from app.executor import _apply_fill_to_position
 from app.funding_worker import write_equity_snapshot
 from app.models import EquitySnapshot
 from app.routes.dashboard import (_by_strategy_totals, _equity_chart_payload, _equity_curve,
-                                   _equity_dataset, _equity_metrics, _equity_series, _equity_svg,
+                                   _equity_dataset, _equity_metrics, _equity_series,
                                    _load_snapshots, _load_strategy_snapshots, _performance)
 from app.routing import StrategyRouter
 
@@ -211,33 +211,6 @@ def test_equity_chart_payload_shape():
     assert _equity_chart_payload({"Total": [(t1, -5.0)]})["series"][0]["color"] == "#f87171"  # neg -> red
 
 
-def test_equity_svg_has_axes_and_hover_columns():
-    """The SVG carries value (Y) + time (X) axis ticks and aligned per-point hover
-    columns (date + each series value)."""
-    t1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    t2 = datetime(2026, 6, 2, tzinfo=timezone.utc)
-    svg = _equity_svg({"Total": [(t1, 10.0), (t2, 30.0)], "bybit": [(t1, 6.0), (t2, 18.0)]})
-    assert len(svg["y_ticks"]) == 5 and len(svg["x_ticks"]) == 4        # value + time axes
-    assert svg["columns"] and svg["columns"][-1]["t"]                   # hover data with a date label
-    named = {it["name"] for it in svg["columns"][-1]["items"] if it["val"] is not None}
-    assert {"Total", "bybit"} <= named                                 # both series in the tooltip
-
-
-def test_equity_svg_right_axis_is_account_value():
-    """With a capital base, the SVG adds a RIGHT y-axis re-labelling the SAME gridlines
-    as account value (capital + PnL) — same y positions, value offset by the base; the
-    zero-PnL tick reads as the capital base. No base → no right axis."""
-    t1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    t2 = datetime(2026, 6, 2, tzinfo=timezone.utc)
-    series = {"Total": [(t1, 0.0), (t2, 100.0)]}
-    svg = _equity_svg(series, capital_base=2000.0)
-    assert len(svg["y_ticks_right"]) == len(svg["y_ticks"]) == 5
-    for left, right in zip(svg["y_ticks"], svg["y_ticks_right"]):
-        assert right["v"] == pytest.approx(left["v"] + 2000.0)         # re-labelled as capital + PnL
-        assert right["y"] == left["y"]                                 # same gridline
-    assert _equity_svg(series)["y_ticks_right"] == []                  # no base -> no right axis
-
-
 def test_equity_metrics_sharpe_with_enough_points():
     """Sharpe (est.) is computed from >= 8 DAILY returns (one equity point per day)."""
     base = datetime(2026, 5, 18, tzinfo=timezone.utc)
@@ -296,24 +269,9 @@ def test_equity_series_empty_window_keeps_live_tip():
     assert s["Total"][-1][1] == pytest.approx(33.0)                  # live tip kept, not dropped
     assert s["bybit"][-1][1] == pytest.approx(20.0)
     assert s["hyperliquid"][-1][1] == pytest.approx(13.0)
-    assert _equity_svg(s) is not None                                # renders a chart...
+    assert _equity_chart_payload(s) is not None                      # renders a chart...
     assert _equity_metrics(s["Total"])["current"] == pytest.approx(33.0)   # ...and metrics
     assert _equity_series(snaps, timedelta(hours=24)) == {}          # but no live value -> empty
-
-
-def test_equity_svg_hover_carries_sparse_venue():
-    """Hover columns read each venue by carry-forward, so a venue whose points don't
-    coincide with every Total timestamp (independent downsampling / a venue added later)
-    keeps a value instead of dropping out — and is correctly absent before its first point."""
-    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    total = [(base + timedelta(hours=i), float(i)) for i in range(10)]
-    hyper = [(base + timedelta(hours=i), 100.0 + i) for i in (2, 5, 9)]    # gaps at hours 3,4,6,7,8
-    svg = _equity_svg({"Total": total, "hyperliquid": hyper})
-    def hl(col):
-        return next(it["val"] for it in col["items"] if it["name"] == "hyperliquid")
-    assert hl(svg["columns"][0]) is None                  # before hyperliquid's first point
-    assert hl(svg["columns"][3]) == pytest.approx(102.0)  # carry-forward from hour 2 (was dropped before)
-    assert hl(svg["columns"][9]) == pytest.approx(109.0)  # exact at hour 9
 
 
 def test_write_equity_snapshot_clears_dataset_cache(tmp_path, stub_exchange):
