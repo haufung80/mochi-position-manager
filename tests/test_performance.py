@@ -144,6 +144,23 @@ def test_performance_renders_execution_quality_table(client):
     assert "S1" in r.text
 
 
+def test_execution_quality_table_shows_fail_only_strategy(client):
+    """A strategy with ONLY rejected/dead orders (no fill -> no StrategyPosition, so absent
+    from per_strategy) STILL appears in the Execution-quality table — surfacing the
+    dead/reject count is the table's whole point. (Regression: it iterates exec_order, the
+    union of per_strategy + exec_quality keys, not just per_strategy.)"""
+    _seed_round_trip()                                   # S1 has fills -> in per_strategy
+    _add_exec_order("DEADONLY", "dead", "d1")            # fail-only: never filled
+    _add_exec_order("DEADONLY", "rejected", "r1")
+    r = client.get("/performance?equity_window=All")
+    assert r.status_code == 200
+    # Isolate the Execution-quality card (between its <h2> and the next <h2>) so this can't
+    # pass merely because Recent orders also lists DEADONLY's orders.
+    start = r.text.index("Execution quality — by strategy")
+    section = r.text[start:r.text.index("<h2>", start + 1)]
+    assert "DEADONLY" in section
+
+
 def test_performance_numbers(client):
     _seed_round_trip()
     with session_scope() as db:

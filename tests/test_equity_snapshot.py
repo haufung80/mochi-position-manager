@@ -93,6 +93,20 @@ def test_load_strategy_snapshots_skips_empty_and_sums():
     assert agg == pytest.approx(30.0) and by == {"S1": 18.0, "S2": 12.0}
 
 
+def test_load_strategy_snapshots_tolerates_malformed_value():
+    """A non-numeric/None value in by_strategy must NOT TypeError out of sum() and 500 the
+    page — the bad row is dropped (coerced like _load_snapshots), good rows still load."""
+    now = datetime.now(timezone.utc)
+    with session_scope() as db:
+        db.add(EquitySnapshot(captured_at=now - timedelta(hours=2), total_pnl=1.0,
+                              by_strategy='{"S1": null}'))               # malformed -> dropped
+        db.add(EquitySnapshot(captured_at=now - timedelta(hours=1), total_pnl=9.0,
+                              by_strategy=json.dumps({"S1": 9.0})))
+    with session_scope() as db:
+        rows = _load_strategy_snapshots(db)                              # must not raise
+    assert len(rows) == 1 and rows[0][1] == pytest.approx(9.0)
+
+
 def test_equity_series_per_strategy_lines_and_live_tip():
     """The per-strategy snapshots feed the SAME _equity_series: one line per strategy +
     a Σ 'Total', each tipped to the live value."""
@@ -229,24 +243,28 @@ def test_equity_metrics_apr():
 
 
 def test_equity_dataset_caches_within_ttl(tmp_path, stub_exchange, monkeypatch):
-    """The dataset (snapshots + perf) is cached: a 2nd call within the TTL re-runs
-    neither _performance nor the snapshot query; force=True rebuilds it."""
+    """The dataset (snapshots + perf + per-strategy snapshots + exec-quality) is cached:
+    a 2nd call within the TTL re-runs nothing (incl. the full orders scan); force=True
+    rebuilds it. So a window switch / reload re-fetches none of the per-strategy work."""
     from app.routes import dashboard
     router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
     with session_scope() as db:
         db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, tzinfo=timezone.utc), total_pnl=5.0))
-    calls = {"n": 0}
-    real = dashboard._performance
+    calls = {"perf": 0, "exec": 0}
+    real_perf, real_exec = dashboard._performance, dashboard._execution_quality_by_strategy
     monkeypatch.setattr(dashboard, "_performance",
-                        lambda db, r: calls.__setitem__("n", calls["n"] + 1) or real(db, r))
+                        lambda db, r: calls.__setitem__("perf", calls["perf"] + 1) or real_perf(db, r))
+    monkeypatch.setattr(dashboard, "_execution_quality_by_strategy",
+                        lambda db: calls.__setitem__("exec", calls["exec"] + 1) or real_exec(db))
     dashboard._clear_equity_cache()
     with session_scope() as db:
-        s1, p1 = dashboard._equity_dataset(db, router)
-        s2, p2 = dashboard._equity_dataset(db, router)      # cached
-    assert calls["n"] == 1 and s1 is s2 and p1 is p2        # built once, reused
+        s1, p1, ss1, eq1 = dashboard._equity_dataset(db, router)
+        s2, p2, ss2, eq2 = dashboard._equity_dataset(db, router)      # cached
+    assert calls["perf"] == 1 and calls["exec"] == 1                 # exec scan runs ONCE, not per call
+    assert s1 is s2 and p1 is p2 and ss1 is ss2 and eq1 is eq2        # all four reused
     with session_scope() as db:
-        dashboard._equity_dataset(db, router, force=True)   # ?refresh -> rebuild
-    assert calls["n"] == 2
+        dashboard._equity_dataset(db, router, force=True)            # ?refresh -> rebuild
+    assert calls["perf"] == 2 and calls["exec"] == 2
 
 
 def test_equity_series_empty_window_keeps_live_tip():
@@ -288,11 +306,11 @@ def test_write_equity_snapshot_clears_dataset_cache(tmp_path, stub_exchange):
     router = _router(tmp_path, "strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n")
     dashboard._clear_equity_cache()
     with session_scope() as db:
-        snaps1, _ = dashboard._equity_dataset(db, router)     # warm the cache (0 snapshots)
+        snaps1, *_ = dashboard._equity_dataset(db, router)    # warm the cache (0 snapshots)
     assert snaps1 == []
     write_equity_snapshot(router)                             # persists a point AND clears the cache
     with session_scope() as db:
-        snaps2, _ = dashboard._equity_dataset(db, router)     # cache cleared -> rebuilt with the new row
+        snaps2, *_ = dashboard._equity_dataset(db, router)    # cache cleared -> rebuilt with the new row
     assert len(snaps2) == 1
 
 

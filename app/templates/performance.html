@@ -271,20 +271,21 @@
   <!-- ===== execution quality by strategy ===== -->
   <h2>Execution quality — by strategy</h2>
   <div class="card">
-    {% if perf.per_strategy %}
+    {% if exec_order %}
     <table>
       <thead><tr><th class="l">Strategy</th><th>Slippage (bps)</th><th>Fees</th>
         <th>Filled</th><th>Dead</th><th>Rejected</th></tr></thead>
       <tbody>
-        {% for r in perf.per_strategy %}
-        {% set eq = exec_quality.get(r.strategy_id, {}) %}
+        {% for sid in exec_order %}
+        {% set eq = exec_quality.get(sid, {}) %}
         {% set sb = eq.get('slippage_bps') %}
+        {% set dead = eq.get('dead') or 0 %}
         <tr>
-          <td class="l mono">{{ r.strategy_id }}</td>
+          <td class="l mono">{{ sid }}</td>
           <td>{% if sb is not none %}<span class="{{ 'neg' if sb > 0.5 else ('pos' if sb < -0.5 else '') }}">{{ "%+.1f"|format(sb) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
           <td class="muted">${{ (eq.get('fees') or 0.0)|usd }}</td>
           <td>{{ eq.get('filled') or 0 }}</td>
-          <td>{% if eq.get('dead') %}<span class="neg">{{ eq.get('dead') }}</span>{% else %}0{% endif %}</td>
+          <td>{% if dead %}<span class="neg">{{ dead }}</span>{% else %}0{% endif %}</td>
           <td class="muted">{{ eq.get('rejected') or 0 }}</td>
         </tr>
         {% endfor %}

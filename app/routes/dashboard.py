@@ -245,19 +245,23 @@ def _execution_quality_by_strategy(db) -> dict:
     ~1:1). ``rejected`` is a portfolio sizing decision (no order sent), ``dead`` is an
     order that exhausted retries — the real execution-failure signal."""
     out: dict[str, dict] = {}
-    for o, sid in (db.query(Order, Alert.strategy_id)
-                     .join(Alert, Order.alert_id == Alert.id).all()):
+    # Column-select (not whole Order entities) — only 5 scalars are needed, and this scans
+    # ALL orders; hydrating full ORM rows would grow costly as order history accumulates.
+    rows = (db.query(Alert.strategy_id, Order.status, Order.commission,
+                     Order.fill_price, Order.signal_price, Order.side)
+              .join(Alert, Order.alert_id == Alert.id).all())
+    for sid, status, commission, fill_price, signal_price, side in rows:
         s = out.setdefault(sid, {"slips": [], "fees": 0.0,
                                  "filled": 0, "rejected": 0, "dead": 0})
-        if o.status == "success":
+        if status == "success":
             s["filled"] += 1
-            s["fees"] += o.commission or 0.0
-            bps = _slip_bps(o.fill_price, o.signal_price, o.side)
+            s["fees"] += commission or 0.0
+            bps = _slip_bps(fill_price, signal_price, side)
             if bps is not None:
                 s["slips"].append(bps)
-        elif o.status == "rejected":
+        elif status == "rejected":
             s["rejected"] += 1
-        elif o.status == "dead":
+        elif status == "dead":
             s["dead"] += 1
     return {sid: {
         "slippage_bps": (sum(v["slips"]) / len(v["slips"])) if v["slips"] else None,
@@ -537,7 +541,8 @@ def _value_at(pts: list, epoch):
 
 # --- equity dataset cache: switching timeframes / rapid reloads reuse this instead
 # --- of re-fetching the exchanges and re-reading snapshots on every render. ---
-_EQ_CACHE: dict = {"at": 0.0, "snapshots": None, "perf": None}
+_EQ_CACHE: dict = {"at": 0.0, "snapshots": None, "perf": None,
+                   "strat_snapshots": None, "exec_quality": None}
 _EQ_CACHE_TTL = 30.0
 
 
@@ -565,7 +570,10 @@ def _load_strategy_snapshots(db) -> list[tuple]:
     for s in db.query(EquitySnapshot).order_by(EquitySnapshot.captured_at).all():
         try:
             by = json.loads(s.by_strategy or "{}")
-        except (ValueError, TypeError):
+            # Coerce per-value (like _load_snapshots) so a malformed/None value in one row
+            # can't TypeError out of sum() and 500 the whole page — drop the bad row instead.
+            by = {k: float(v) for k, v in by.items()}
+        except (ValueError, TypeError, AttributeError):
             by = {}
         if not by:                                       # no per-strategy data on this row
             continue
@@ -574,22 +582,27 @@ def _load_strategy_snapshots(db) -> list[tuple]:
 
 
 def _equity_dataset(db, router, force: bool = False):
-    """(all_snapshots, perf) cached for _EQ_CACHE_TTL seconds. The whole equity curve
-    (every timeframe) and the page headline are built from this, so switching windows
-    or reloading within the TTL re-fetches nothing — not the exchanges (perf), not the
-    snapshot rows. The funding worker calls _performance directly (uncached) for fresh
-    snapshots; ?refresh=true forces a rebuild here."""
+    """(snapshots, perf, strat_snapshots, exec_quality) cached for _EQ_CACHE_TTL seconds —
+    EVERYTHING the /performance render needs (both equity curves' rows, the headline, and
+    the per-strategy execution table), so switching windows or reloading within the TTL
+    re-fetches nothing: not the exchanges (perf), not the snapshot rows (by_exchange AND
+    by_strategy), not the full orders scan (exec_quality). The funding worker calls
+    _performance directly (uncached) for fresh snapshots; ?refresh=true forces a rebuild."""
     now = time.time()
     if force or _EQ_CACHE["snapshots"] is None or now - _EQ_CACHE["at"] > _EQ_CACHE_TTL:
         _EQ_CACHE["snapshots"] = _load_snapshots(db)
         _EQ_CACHE["perf"] = _performance(db, router)
+        _EQ_CACHE["strat_snapshots"] = _load_strategy_snapshots(db)
+        _EQ_CACHE["exec_quality"] = _execution_quality_by_strategy(db)
         _EQ_CACHE["at"] = now
-    return _EQ_CACHE["snapshots"], _EQ_CACHE["perf"]
+    return (_EQ_CACHE["snapshots"], _EQ_CACHE["perf"],
+            _EQ_CACHE["strat_snapshots"], _EQ_CACHE["exec_quality"])
 
 
 def _clear_equity_cache() -> None:
     """Drop the cached dataset (test isolation / forced refresh)."""
-    _EQ_CACHE.update(at=0.0, snapshots=None, perf=None)
+    _EQ_CACHE.update(at=0.0, snapshots=None, perf=None,
+                     strat_snapshots=None, exec_quality=None)
 
 
 def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None) -> dict:
@@ -797,9 +810,11 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
                 refresh: bool = Query(False)):
     wsel, wdelta = _resolve_window(equity_window)
     with session_scope() as db:
-        # Cached dataset: snapshots + live perf, reused across timeframe switches so
-        # changing the window re-fetches nothing within the TTL. ?refresh=true forces it.
-        snapshots, perf = _equity_dataset(db, request.app.state.strategy_router, force=refresh)
+        # Cached dataset: snapshots + perf + per-strategy snapshots + exec-quality, reused
+        # across timeframe switches so changing the window re-fetches nothing within the
+        # TTL (one orders scan, not one per render). ?refresh=true forces it.
+        snapshots, perf, strat_snapshots, exec_quality = _equity_dataset(
+            db, request.app.state.strategy_router, force=refresh)
         live_by_ex = _by_exchange_totals(perf)
         series = _equity_series(snapshots, wdelta, perf["totals"]["total"], live_by_ex)
         cap = get_settings().equity_capital_base
@@ -810,16 +825,21 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         # (capital isn't split per strategy).
         strat_live = _by_strategy_totals(perf)
         strat_series = _equity_series(
-            _load_strategy_snapshots(db), wdelta,
+            strat_snapshots, wdelta,
             sum(strat_live.values()) if strat_live else None, strat_live)
         strat_equity = _equity_svg(strat_series)
         strat_metrics = _equity_metrics(strat_series.get("Total", []))
-        exec_quality = _execution_quality_by_strategy(db)   # per-strategy slippage/fees/fills
+        # Execution-quality row order: the by-strategy P&L order (perf.per_strategy) FIRST,
+        # then any strategy that has orders but no fill/position (all rejected/dead) — else
+        # a fail-only strategy, the table's whole point, would never render.
+        seen = {r["strategy_id"] for r in perf["per_strategy"]}
+        exec_order = ([r["strategy_id"] for r in perf["per_strategy"]]
+                      + sorted(s for s in exec_quality if s not in seen))
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,
         "strat_equity": strat_equity, "strat_metrics": strat_metrics,
-        "exec_quality": exec_quality,
+        "exec_quality": exec_quality, "exec_order": exec_order,
         "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
         "equity_window": wsel,
     })
