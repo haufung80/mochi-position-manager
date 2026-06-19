@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .db import init_db
@@ -71,6 +72,8 @@ app = FastAPI(
     description="Webhook ingress for TradingView alerts; routes to Bybit / Hyperliquid.",
     lifespan=lifespan,
 )
+
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
 app.include_router(webhook_router)
 app.include_router(dashboard_router)

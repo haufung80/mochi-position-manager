@@ -62,7 +62,17 @@ def test_performance_empty_state_renders(client):
     assert "no-store" in r.headers.get("cache-control", "")
     assert "Live Performance" in r.text
     assert "No snapshots yet" in r.text
-    assert "viewport-fit=cover" in r.text          # mobile/Safari responsive
+    assert "viewport-fit=cover" in r.text          # mobile/Safari responsive (now from base.html)
+    assert '/static/app.css' in r.text             # shared stylesheet linked via base.html
+
+
+def test_static_stylesheet_served(client):
+    """The shared dark-theme stylesheet (base.html links it; pages extend base) is served
+    by the StaticFiles mount — the single source of look-and-feel."""
+    r = client.get("/static/app.css")
+    assert r.status_code == 200
+    assert "text/css" in r.headers.get("content-type", "")
+    assert ".card" in r.text and "table.numeric" in r.text   # canonical components present
 
 
 def test_performance_renders_with_data(client):

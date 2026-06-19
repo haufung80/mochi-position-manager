@@ -1,63 +1,7 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Funding Arbitrage — Mochi Position Manager</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <style>
-    /* Dark theme reused from performance.html (single source of look-and-feel). */
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px;
-           -webkit-text-size-adjust: 100%; }
-    h1 { margin: 0 0 6px 0; font-size: 22px; }
-    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;
-         color: #888; margin: 26px 0 10px 0; }
-    a.back { color: #60a5fa; text-decoration: none; font-size: 13px; }
-    .nav a { color: #60a5fa; text-decoration: none; }
-    .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
-    .card { background: #1a1d24; border: 1px solid #2a2e38; border-radius: 8px;
-            padding: 14px 16px; margin-bottom: 16px; }
-    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
-    .stat .label { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-    .stat .big { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid #2a2e38;
-             vertical-align: middle; font-variant-numeric: tabular-nums; }
-    th:first-child, td:first-child, th.l, td.l { text-align: left; }
-    th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
-    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
-    .muted { color: #666; font-size: 12px; }
-    .pos { color: #4ade80; }
-    .neg { color: #f87171; }
-    .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px;
-            font-weight: 600; }
-    .s-open { background: #14532d; color: #4ade80; }
-    .s-opening, .s-closing { background: #0c2a3a; color: #60a5fa; }
-    .s-closed { background: #2a2e38; color: #9ca3af; }
-    .s-error { background: #4a1414; color: #f87171; }
-    .s-success { background: #14532d; color: #4ade80; }
-    .s-pending { background: #0c2a3a; color: #60a5fa; }
-    .s-retrying { background: #3a2a08; color: #facc15; }
-    .s-dead { background: #4a1414; color: #f87171; }
-    .leg-row td { border-bottom: 1px dashed #23262e; color: #cbd5e1; }
-    .leg-row td.l { padding-left: 22px; }
-    .arb-head td { border-top: 2px solid #3a3f4b; }
-    code { font-family: "SF Mono", Menlo, monospace; background: #0f1115; padding: 1px 5px; border-radius: 3px; }
-    .card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    @media (max-width: 640px) {
-      body { padding: 12px;
-             padding-left: max(12px, env(safe-area-inset-left));
-             padding-right: max(12px, env(safe-area-inset-right));
-             padding-bottom: max(12px, env(safe-area-inset-bottom)); }
-      h1 { font-size: 19px; }
-      .cards { grid-template-columns: 1fr 1fr; }
-      table { font-size: 12px; }
-      th, td { padding: 6px 8px; white-space: nowrap; }
-    }
-  </style>
-</head>
-<body>
+{% extends "base.html" %}
+{% from "macros.html" import money %}
+{% block title %}Funding Arbitrage — Mochi Position Manager{% endblock %}
+{% block content %}
   <div class="nav" style="font-size:13px;margin-bottom:6px;">
     <a href="/">← dashboard</a> · <a href="/performance">live performance</a>
   </div>
@@ -69,8 +13,6 @@
     is real exposure (a grid-dust skew or an un-converged basis). Arb funding/fills are
     a separate book; they never touch the directional /performance numbers.
   </div>
-
-  {% macro money(v) %}<span class="{{ 'pos' if (v or 0) >= 0 else 'neg' }}">${{ v|usd }}</span>{% endmacro %}
 
   <!-- ===== headline ===== -->
   <div class="cards">
@@ -197,7 +139,7 @@
   <h2>Positions</h2>
   <div class="card">
     {% if report.arbs %}
-    <table>
+    <table class="numeric">
       <thead><tr>
         <th class="l">Arb / Leg</th><th class="l">Status</th><th>Funding</th>
         <th>Basis</th><th>Commission</th><th>Spot unreal.</th><th>Perp unreal.</th>
@@ -257,5 +199,4 @@
       from the directional /performance page.</div>
     {% else %}<p class="muted">No funding-arb positions yet.</p>{% endif %}
   </div>
-</body>
-</html>
+{% endblock %}

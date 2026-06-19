@@ -1,0 +1,2 @@
+{# Shared Jinja macros. Import with {% from "macros.html" import money %}. #}
+{% macro money(v) %}<span class="{{ 'pos' if (v or 0) >= 0 else 'neg' }}">${{ v|usd }}</span>{% endmacro %}

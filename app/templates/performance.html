@@ -1,56 +1,7 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Performance — Mochi Position Manager</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-           background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; max-width: 1100px;
-           -webkit-text-size-adjust: 100%; }
-    h1 { margin: 0 0 6px 0; font-size: 22px; }
-    h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em;
-         color: #888; margin: 26px 0 10px 0; }
-    a.back { color: #60a5fa; text-decoration: none; font-size: 13px; }
-    .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
-    .card { background: #1a1d24; border: 1px solid #2a2e38; border-radius: 8px;
-            padding: 14px 16px; margin-bottom: 16px; }
-    .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 4px; }
-    .stat .label { color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
-    .stat .big { font-size: 22px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid #2a2e38;
-             vertical-align: middle; font-variant-numeric: tabular-nums; }
-    th:first-child, td:first-child, th.l, td.l { text-align: left; }
-    th { color: #888; font-weight: 500; font-size: 11px; text-transform: uppercase; }
-    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
-    .muted { color: #666; font-size: 12px; }
-    .pos { color: #4ade80; }
-    .neg { color: #f87171; }
-    .pill { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px;
-            font-weight: 600; }
-    .s-success { background: #14532d; color: #4ade80; }
-    .s-rejected { background: #3a2a08; color: #facc15; }
-    .s-paper { background: #0c2a3a; color: #60a5fa; }
-    .s-retrying { background: #3a2a08; color: #facc15; }
-    .s-dead, .s-failed { background: #4a1414; color: #f87171; }
-    code { font-family: "SF Mono", Menlo, monospace; background: #0f1115; padding: 1px 5px; border-radius: 3px; }
-    /* Wide tables scroll inside their card instead of breaking the phone layout. */
-    .card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    @media (max-width: 640px) {
-      body { padding: 12px;
-             padding-left: max(12px, env(safe-area-inset-left));
-             padding-right: max(12px, env(safe-area-inset-right));
-             padding-bottom: max(12px, env(safe-area-inset-bottom)); }
-      h1 { font-size: 19px; }
-      .cards { grid-template-columns: 1fr 1fr; }   /* 4 stat cards -> 2 per row */
-      table { font-size: 12px; }
-      th, td { padding: 6px 8px; white-space: nowrap; }
-    }
-  </style>
-</head>
-<body>
+{% extends "base.html" %}
+{% from "macros.html" import money %}
+{% block title %}Performance — Mochi Position Manager{% endblock %}
+{% block content %}
   <div style="font-size:13px;margin-bottom:6px;">
     <a href="/" class="back">← back to dashboard</a>
     <span style="color:#888;"> · </span>
@@ -61,8 +12,6 @@
     Total PnL = realized + unrealized + funding − commission. Slippage is a
     diagnostic (execution vs signal price) — already reflected in fills, not re-deducted.
   </div>
-
-  {% macro money(v) %}<span class="{{ 'pos' if (v or 0) >= 0 else 'neg' }}">${{ v|usd }}</span>{% endmacro %}
 
   {# One multi-series equity chart (window tabs + metric cards + SVG + legend + scrub).
      Rendered once per breakdown (by-exchange, by-strategy); IDs are suffixed by eq_id so
@@ -203,7 +152,7 @@
   <h2>By exchange</h2>
   <div class="card">
     {% if perf.per_exchange %}
-    <table>
+    <table class="numeric">
       <thead><tr><th class="l">Exchange</th><th>Realized</th><th>Unrealized</th>
         <th>Funding</th><th>Commission</th><th>Total</th></tr></thead>
       <tbody>
@@ -233,7 +182,7 @@
   <h2>By strategy</h2>
   <div class="card">
     {% if perf.per_strategy %}
-    <table>
+    <table class="numeric">
       <thead><tr><th class="l">Strategy</th><th>Realized</th><th>Unrealized</th>
         <th>Commission</th><th>Total</th></tr></thead>
       <tbody>
@@ -272,7 +221,7 @@
   <h2>Execution quality — by strategy</h2>
   <div class="card">
     {% if exec_order %}
-    <table>
+    <table class="numeric">
       <thead><tr><th class="l">Strategy</th><th>Slippage (bps)</th><th>Fees</th>
         <th>Filled</th><th>Dead</th><th>Rejected</th></tr></thead>
       <tbody>
@@ -303,7 +252,7 @@
   <h2>Exchange positions (actual, per symbol)</h2>
   <div class="card">
     {% if perf.exchange_positions %}
-    <table>
+    <table class="numeric">
       <thead><tr><th class="l">Venue</th><th>Net qty</th><th>Mark</th><th>Unrealized</th></tr></thead>
       <tbody>
         {% for p in perf.exchange_positions %}
@@ -330,7 +279,7 @@
   <h2>Open positions by strategy (intent)</h2>
   <div class="card">
     {% if perf.open_positions %}
-    <table>
+    <table class="numeric">
       <thead><tr><th class="l">Strategy</th><th class="l">Venue</th><th>Net qty</th>
         <th>Avg entry</th><th>Mark</th><th>Unrealized</th></tr></thead>
       <tbody>
@@ -357,7 +306,7 @@
   <h2>Recent orders</h2>
   <div class="card">
     {% if orders %}
-    <table>
+    <table class="numeric">
       <thead><tr><th class="l">When</th><th class="l">Strategy</th><th class="l">Venue</th>
         <th class="l">Side</th><th>Qty</th><th>Fill</th><th>Slip (bps)</th><th>Fee</th>
         <th>Realized</th><th class="l">Status</th></tr></thead>
@@ -382,5 +331,4 @@
     <div class="muted">Realized = the PnL this fill booked by CLOSING/reducing the position (USDT, gross of fees) — opens/increases show —. Sums per strategy to the <b>Realized</b> column above.</div>
     {% else %}<p class="muted">No orders yet.</p>{% endif %}
   </div>
-</body>
-</html>
+{% endblock %}
