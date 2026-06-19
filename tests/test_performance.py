@@ -10,7 +10,8 @@ from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.main import app
 from app.models import Alert, EquitySnapshot, FundingEvent, Order
-from app.routes.dashboard import _equity_curve, _equity_svg, _performance
+from app.routes.dashboard import (_equity_curve, _equity_svg,
+                                   _execution_quality_by_strategy, _performance)
 from app.routing import StrategyRouter
 
 
@@ -92,6 +93,55 @@ def test_performance_renders_per_strategy_chart(client):
     assert "excludes exchange-level funding" in r.text   # the funding note
     assert 'id="eqwrapstrat"' in r.text                  # second chart's suffixed element
     assert "per exchange + aggregate" in r.text          # existing chart still present
+
+
+def _add_exec_order(sid, status, key, *, signal=None, fill=None, commission=0.0):
+    """Seed one Alert + Order for a strategy with a given execution status."""
+    with session_scope() as db:
+        a = Alert(idempotency_key=key, strategy_id=sid, action="buy", raw_payload="{}")
+        db.add(a); db.flush()
+        db.add(Order(alert_id=a.id, exchange="bybit", symbol="BTCUSDT", side="buy",
+                     qty_usd=100.0, qty_base=1.0, status=status,
+                     signal_price=signal, fill_price=fill,
+                     commission=commission, commission_asset="USDT"))
+
+
+def test_execution_quality_by_strategy_computes_slippage_fees_counts():
+    """Per-strategy execution roll-up: avg slippage (bps, via _slip_bps), fee drag, and
+    filled/rejected/dead order counts, grouped by strategy via the Order->Alert join."""
+    _add_exec_order("S1", "success", "a1", signal=100.0, fill=101.0, commission=0.10)  # +100 bps
+    _add_exec_order("S1", "rejected", "a2")                                            # portfolio reject
+    _add_exec_order("S1", "dead", "a3")                                                # retries exhausted
+    _add_exec_order("S2", "success", "a4", signal=100.0, fill=100.0)                   # 0 bps, no fee
+    with session_scope() as db:
+        eq = _execution_quality_by_strategy(db)
+    assert eq["S1"]["slippage_bps"] == pytest.approx(100.0)   # buy filled 1% above signal
+    assert eq["S1"]["fees"] == pytest.approx(0.10)
+    assert eq["S1"]["filled"] == 1 and eq["S1"]["rejected"] == 1 and eq["S1"]["dead"] == 1
+    assert eq["S2"]["slippage_bps"] == pytest.approx(0.0)
+    assert eq["S2"]["filled"] == 1 and eq["S2"]["rejected"] == 0 and eq["S2"]["dead"] == 0
+
+
+def test_execution_quality_by_strategy_slippage_none_without_signal():
+    """A filled order with no signal price contributes no slippage sample -> None (the
+    table shows —), but its fill + fee still count."""
+    _add_exec_order("S1", "success", "ns1", signal=None, fill=101.0, commission=0.05)
+    with session_scope() as db:
+        eq = _execution_quality_by_strategy(db)
+    assert eq["S1"]["slippage_bps"] is None
+    assert eq["S1"]["filled"] == 1 and eq["S1"]["fees"] == pytest.approx(0.05)
+
+
+def test_performance_renders_execution_quality_table(client):
+    """The page renders the per-strategy Execution-quality table with its columns."""
+    _seed_round_trip()                                   # S1 with priced fills + commission
+    _add_exec_order("S1", "rejected", "rej1")
+    _add_exec_order("S1", "dead", "dead1")
+    r = client.get("/performance?equity_window=All")
+    assert r.status_code == 200
+    assert "Execution quality — by strategy" in r.text
+    assert "Slippage (bps)" in r.text and "Dead" in r.text
+    assert "S1" in r.text
 
 
 def test_performance_numbers(client):

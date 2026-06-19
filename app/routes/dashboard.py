@@ -231,6 +231,41 @@ def _execution_quality(db) -> dict:
     }
 
 
+def _execution_quality_by_strategy(db) -> dict:
+    """Per-strategy execution quality keyed by ``strategy_id`` — avg slippage (bps), fee
+    drag, and filled/rejected/dead order counts. The EXECUTION analogue of the
+    per-strategy P&L: it answers "is this strategy expensive / unreliable to TRADE",
+    independent of whether its signal wins. Mirrors the portfolio-level
+    ``_execution_quality`` but groups by strategy via the same ``Order -> Alert`` join
+    ``_recent_orders`` uses (a rejected order carries an ``alert_id``, so it joins too).
+    Reuses ``_slip_bps`` — no new slippage math.
+
+    ``slippage_bps`` is the mean over SUCCESS fills that recorded both a signal and a fill
+    price (None when none did). ``fees`` sums ``commission`` on success fills (USDT/USDC,
+    ~1:1). ``rejected`` is a portfolio sizing decision (no order sent), ``dead`` is an
+    order that exhausted retries — the real execution-failure signal."""
+    out: dict[str, dict] = {}
+    for o, sid in (db.query(Order, Alert.strategy_id)
+                     .join(Alert, Order.alert_id == Alert.id).all()):
+        s = out.setdefault(sid, {"slips": [], "fees": 0.0,
+                                 "filled": 0, "rejected": 0, "dead": 0})
+        if o.status == "success":
+            s["filled"] += 1
+            s["fees"] += o.commission or 0.0
+            bps = _slip_bps(o.fill_price, o.signal_price, o.side)
+            if bps is not None:
+                s["slips"].append(bps)
+        elif o.status == "rejected":
+            s["rejected"] += 1
+        elif o.status == "dead":
+            s["dead"] += 1
+    return {sid: {
+        "slippage_bps": (sum(v["slips"]) / len(v["slips"])) if v["slips"] else None,
+        "fees": v["fees"], "filled": v["filled"],
+        "rejected": v["rejected"], "dead": v["dead"],
+    } for sid, v in out.items()}
+
+
 # ---------- live performance page ----------
 
 def _actual_positions(db) -> list[dict]:
@@ -779,10 +814,12 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
             sum(strat_live.values()) if strat_live else None, strat_live)
         strat_equity = _equity_svg(strat_series)
         strat_metrics = _equity_metrics(strat_series.get("Total", []))
+        exec_quality = _execution_quality_by_strategy(db)   # per-strategy slippage/fees/fills
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,
         "strat_equity": strat_equity, "strat_metrics": strat_metrics,
+        "exec_quality": exec_quality,
         "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
         "equity_window": wsel,
     })

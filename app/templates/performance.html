@@ -264,7 +264,37 @@
       (added once at the portfolio level, not per strategy), so the rows sum to the <i>Strategies
       subtotal</i> and the headline adds funding on top. <b>≈</b> = unrealized on a shared symbol is
       notional (offsetting legs net on the venue) and can exceed the realizable Exchange-positions figure.
-      Slippage is a diagnostic — see per-order values in <b>Recent orders</b>.</div>
+      Slippage is a diagnostic — see the per-strategy <b>Execution quality</b> below.</div>
+    {% else %}<p class="muted">No activity yet.</p>{% endif %}
+  </div>
+
+  <!-- ===== execution quality by strategy ===== -->
+  <h2>Execution quality — by strategy</h2>
+  <div class="card">
+    {% if perf.per_strategy %}
+    <table>
+      <thead><tr><th class="l">Strategy</th><th>Slippage (bps)</th><th>Fees</th>
+        <th>Filled</th><th>Dead</th><th>Rejected</th></tr></thead>
+      <tbody>
+        {% for r in perf.per_strategy %}
+        {% set eq = exec_quality.get(r.strategy_id, {}) %}
+        {% set sb = eq.get('slippage_bps') %}
+        <tr>
+          <td class="l mono">{{ r.strategy_id }}</td>
+          <td>{% if sb is not none %}<span class="{{ 'neg' if sb > 0.5 else ('pos' if sb < -0.5 else '') }}">{{ "%+.1f"|format(sb) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="muted">${{ (eq.get('fees') or 0.0)|usd }}</td>
+          <td>{{ eq.get('filled') or 0 }}</td>
+          <td>{% if eq.get('dead') %}<span class="neg">{{ eq.get('dead') }}</span>{% else %}0{% endif %}</td>
+          <td class="muted">{{ eq.get('rejected') or 0 }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="muted"><b>Slippage</b> = avg fill vs signal price on filled orders, sign-adjusted
+      (<b class="neg">+</b> worse than signal, <b class="pos">−</b> price improvement); — = no priced
+      fills. <b>Fees</b> = Σ commission on fills (USDT/USDC ≈ $1). <b>Filled</b> / <b>Dead</b> (retries
+      exhausted — an execution failure) / <b>Rejected</b> (portfolio sizing decision, no order sent)
+      are order counts. Separates execution cost &amp; reliability from signal quality.</div>
     {% else %}<p class="muted">No activity yet.</p>{% endif %}
   </div>
 
