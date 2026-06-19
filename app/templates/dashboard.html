@@ -30,17 +30,17 @@
   </div>
 
   <div class="grid" style="margin-top:16px;">
-    <div class="card">
-      <div class="stat-label">Retrying</div>
-      <div class="stat {% if retrying %}warn{% else %}ok{% endif %}">{{ retrying }}</div>
+    <div class="card stat">
+      <div class="label">Retrying</div>
+      <div class="big {% if retrying %}warn{% else %}ok{% endif %}">{{ retrying }}</div>
     </div>
-    <div class="card">
-      <div class="stat-label">Dead-lettered</div>
-      <div class="stat {% if dead %}err{% else %}ok{% endif %}">{{ dead }}</div>
+    <div class="card stat">
+      <div class="label">Dead-lettered</div>
+      <div class="big {% if dead %}err{% else %}ok{% endif %}">{{ dead }}</div>
     </div>
-    <div class="card">
-      <div class="stat-label">Active strategies</div>
-      <div class="stat">{{ routes|selectattr("enabled")|list|length }} / {{ routes|length }}</div>
+    <div class="card stat">
+      <div class="label">Active strategies</div>
+      <div class="big">{{ routes|selectattr("enabled")|list|length }} / {{ routes|length }}</div>
     </div>
   </div>
 
@@ -144,7 +144,7 @@
           {% set sb = o.fill_price|slipbps(o.signal_price, o.side) %}
           <td class="mono">{% if sb is none %}<span style="color:#666;">—</span>{% else %}<span style="color:{% if sb > 0.5 %}#f87171{% elif sb < -0.5 %}#4ade80{% else %}#9aa{% endif %};">{{ "%+.1f"|format(sb) }}</span>{% endif %}</td>
           <td class="mono">{% if o.commission %}{{ o.commission|fee }} {{ o.commission_asset }}{% else %}<span style="color:#666;">—</span>{% endif %}</td>
-          <td><span class="pill {{ o.status }}">{{ o.status }}</span></td>
+          <td><span class="pill s-{{ o.status }}">{{ o.status }}</span></td>
           <td>{{ o.attempts }}</td>
           <td class="mono err">{{ o.error_message[:60] if o.error_message else "" }}</td>
         </tr>
@@ -178,7 +178,7 @@
           <td class="mono">{{ r.base_asset }}</td>
           <td>
             {% for v in r.venues %}
-              <span class="pill {{ 'success' if v.enabled else 'pending' }}"
+              <span class="pill {{ 's-success' if v.enabled else 's-pending' }}"
                     title="symbol: {{ v.symbol }}">
                 {{ v.exchange }}{% if v.enabled %} ●{% else %} ○{% endif %}
               </span>

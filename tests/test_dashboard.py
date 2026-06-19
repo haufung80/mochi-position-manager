@@ -62,6 +62,21 @@ def test_dashboard_html_sends_no_store(client):
     assert "no-store" in r.headers.get("cache-control", "")
 
 
+def test_dashboard_uses_unified_components(client):
+    """Homepage renders the shared design-system components (one visual vocabulary
+    across all pages): card-stats with .label/.big and canonical `.pill.s-*` status
+    pills — not the retired standalone `.stat`/`.stat-label` or compound `.pill
+    <status>`. Guards the design-unification from silently regressing."""
+    _add_order(status="dead", fill_price=50000.0, signal_price=50000.0)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.text.count('class="card stat"') == 3   # 3 stat cards, the data-page pattern
+    assert 'class="big' in r.text                    # big-number stat (not the old standalone .stat)
+    assert 'class="pill s-dead"' in r.text           # canonical status pill
+    assert 'class="pill dead"' not in r.text         # legacy compound pill retired
+    assert "stat-label" not in r.text                # legacy label class retired
+
+
 # ---------- execution quality on /orders ----------
 
 def test_orders_reports_slippage_and_commission(client):
