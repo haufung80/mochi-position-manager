@@ -91,9 +91,9 @@
       empty_msg='No snapshots yet — the curve starts building within the hour (the headline already shows your current Total PnL).') }}
 
   <!-- ===== equity curve: by strategy ===== -->
-  {{ equity_chart('strat', 'Equity curve (USDT — by strategy)', strat_equity, strat_metrics,
-      "Each line = strategy realized + unrealized (live MTM) − commission, captured hourly. Σ strategies excludes exchange-level funding (+ funding = Total PnL); unrealized on a symbol shared by >1 strategy is notional (≈). Builds forward from the first snapshot.",
-      equity_windows, equity_window, show_window=False, net_label='Σ strategies',
+  {{ equity_chart('strat', 'Equity curve (USDT — by strategy)', strat_equity, none,
+      "Each line = one strategy's realized + unrealized (live MTM) − commission, captured hourly (excludes exchange-level funding — that's in Total PnL above). Unrealized on a symbol shared by >1 strategy is notional (≈). Builds forward from the first snapshot.",
+      equity_windows, equity_window, show_window=False,
       empty_msg='No per-strategy history yet — builds forward from the first hourly snapshot.') }}
 
   <!-- ===== per exchange ===== -->

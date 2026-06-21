@@ -747,15 +747,16 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         cap = get_settings().equity_capital_base
         equity = _equity_chart_payload(series, capital_base=cap)   # ECharts payload (app.js draws it)
         metrics = _equity_metrics(series.get("Total", []), cap)
-        # Per-strategy curve: same window + render helpers, fed the by_strategy breakdown.
-        # Σ-strategies aggregate excludes exchange-level funding; no capital/right axis
-        # (capital isn't split per strategy).
+        # Per-strategy curve: one line PER strategy, fed the by_strategy breakdown. The
+        # aggregate ("Total"/"Σ strategies") is dropped — it excludes exchange-level
+        # funding, so it's a misleading partial; the true Total (with funding) + its
+        # metric cards live on the by-exchange chart and the headline.
         strat_live = _by_strategy_totals(perf)
         strat_series = _equity_series(
             strat_snapshots, wdelta,
             sum(strat_live.values()) if strat_live else None, strat_live)
-        strat_equity = _equity_chart_payload(strat_series)
-        strat_metrics = _equity_metrics(strat_series.get("Total", []))
+        strat_equity = _equity_chart_payload(
+            {k: v for k, v in strat_series.items() if k != "Total"})
         # Execution-quality row order: the by-strategy P&L order (perf.per_strategy) FIRST,
         # then any strategy that has orders but no fill/position (all rejected/dead) — else
         # a fail-only strategy, the table's whole point, would never render.
@@ -765,7 +766,7 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,
-        "strat_equity": strat_equity, "strat_metrics": strat_metrics,
+        "strat_equity": strat_equity,
         "exec_quality": exec_quality, "exec_order": exec_order,
         "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
         "equity_window": wsel,

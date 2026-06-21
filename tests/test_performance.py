@@ -91,7 +91,8 @@ def test_performance_renders_with_data(client):
 
 def test_performance_renders_per_strategy_chart(client):
     """The page renders the SECOND 'by strategy' equity chart (fed from by_strategy
-    snapshots) alongside the existing overall+by-exchange one."""
+    snapshots) as PER-STRATEGY lines only — the aggregate ('Σ strategies') line + its
+    metric cards are dropped (a misleading funding-excluded partial)."""
     _seed_round_trip()
     with session_scope() as db:                 # a populated per-strategy snapshot point
         db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, 2, tzinfo=timezone.utc),
@@ -100,11 +101,10 @@ def test_performance_renders_per_strategy_chart(client):
                               by_strategy=json.dumps({"S1": 20.0})))
     r = client.get("/performance?equity_window=All")
     assert r.status_code == 200
-    assert "by strategy" in r.text                       # the NEW chart heading
-    assert "Σ strategies" in r.text                      # the strategy-chart net label
-    assert "excludes exchange-level funding" in r.text   # the funding note
-    assert 'id="eqstrat"' in r.text                      # second chart's suffixed ECharts canvas
-    assert "per exchange + aggregate" in r.text          # existing chart still present
+    assert "by strategy" in r.text                       # the chart heading
+    assert 'id="eqstrat"' in r.text                      # the per-strategy ECharts canvas
+    assert "Σ strategies" not in r.text                  # aggregate label removed (no metric cards)
+    assert "per exchange + aggregate" in r.text          # the by-exchange chart still has its Total
 
 
 def _add_exec_order(sid, status, key, *, signal=None, fill=None, commission=0.0):
