@@ -548,10 +548,10 @@ def test_hyperliquid_fill_fee_matches_oid(monkeypatch):
 
     class FakeInfo:
         def user_fills(self, addr):
-            return [
-                {"oid": 111, "fee": "0.01", "feeToken": "USDC"},
-                {"oid": 111, "fee": "0.02", "feeToken": "USDC"},
-                {"oid": 999, "fee": "9.9", "feeToken": "USDC"},
+            return [   # oid 111 fills sum sz=1.1 (two partials), fee 0.03
+                {"oid": 111, "fee": "0.01", "feeToken": "USDC", "sz": "0.5"},
+                {"oid": 111, "fee": "0.02", "feeToken": "USDC", "sz": "0.6"},
+                {"oid": 999, "fee": "9.9", "feeToken": "USDC", "sz": "3.0"},
             ]
     ex._info = FakeInfo()
 
@@ -559,6 +559,12 @@ def test_hyperliquid_fill_fee_matches_oid(monkeypatch):
     assert abs(fee - 0.03) < 1e-9
     assert token == "USDC"
     assert ex._fill_fee("123") == (0.0, "USDC")  # no match -> zero
+    # Completeness gate: found=True only once matched fills cover want_qty, so a partial
+    # fill isn't mislabeled as a fully-captured ("exchange") fee.
+    f, t, found = ex._fill_fee_detail("111", want_qty=1.0)       # 1.1 >= 1.0 -> complete
+    assert abs(f - 0.03) < 1e-9 and t == "USDC" and found is True
+    pf, pt, pfound = ex._fill_fee_detail("111", want_qty=5.0)    # 1.1 < 5.0 -> partial
+    assert abs(pf - 0.03) < 1e-9 and pt == "USDC" and pfound is False  # best fee, flagged not-found
     # _fill_fee_detail adds a `found` flag so a real 0 fee is distinguishable from
     # "not captured" (which the perp path flags fee_source="unavailable").
     fee2, token2, found2 = ex._fill_fee_detail("111")
@@ -592,8 +598,8 @@ def test_order_records_signal_price_fill_and_commission(strategies_yaml, stub_ex
 def test_order_fee_source_unavailable_when_enrichment_missing(strategies_yaml, stub_exchange,
                                                               silent_notifier):
     """An adapter that returns no fee_source (post-fill enrichment failed) leaves the
-    order flagged "unavailable": commission=0 is a PLACEHOLDER, not a real zero, so the
-    backfill can find it and evaluation isn't silently misled by a missing fee."""
+    order flagged "unavailable": commission=0 is a PLACEHOLDER, not a real zero — surfaced
+    as a ⚠ in the orders tables so evaluation isn't silently misled by a missing fee."""
     stub_exchange.next_result = OrderResult(
         success=True, exchange_order_id="X1", filled_qty_base=0.001,
         avg_price=50000.0)                       # no commission, no fee_source declared

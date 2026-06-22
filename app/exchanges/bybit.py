@@ -6,7 +6,8 @@ from typing import Literal
 
 from pybit.unified_trading import HTTP
 
-from ..schemas import OrderResult
+from ..schemas import (OrderResult, FEE_SOURCE_DRY_RUN, FEE_SOURCE_EXCHANGE,
+                       FEE_SOURCE_UNAVAILABLE)
 from .symbols import base_asset_of, canonical_step_size
 
 log = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ class BybitExchange:
                          side, symbol, qty_str, leverage)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
                                    filled_qty_base=float(qty_str), avg_price=price,
-                                   fee_source="dry_run")
+                                   fee_source=FEE_SOURCE_DRY_RUN)
 
             resp = self._client.place_order(
                 category=CATEGORY,
@@ -189,8 +190,13 @@ class BybitExchange:
                 avg_price=fill_price,
                 commission=commission,
                 commission_asset=commission_asset,
-                # det present => real fill price + fee; absent => mark estimate + 0 fee.
-                fee_source="exchange" if det else "unavailable",
+                # "exchange" only when the executions covered the FULL requested qty; a
+                # partial capture (det present but filled_qty < qty) or no det -> mark
+                # estimate / partial fee, flagged "unavailable" rather than claiming a
+                # complete, trustworthy fee.
+                fee_source=(FEE_SOURCE_EXCHANGE
+                            if (det and filled_qty + 1e-9 >= float(qty_str))
+                            else FEE_SOURCE_UNAVAILABLE),
                 raw=resp,
             )
         except Exception as e:

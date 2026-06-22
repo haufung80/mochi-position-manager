@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros.html" import fee_cell %}
 {% block title %}TradingView Middleware — Mochi Position Manager{% endblock %}
 {% block content %}
   <h1>📡 TradingView Middleware</h1>
@@ -143,7 +144,7 @@
           <td class="mono">{% if o.fill_price %}{{ o.fill_price|qty }}{% else %}—{% endif %}</td>
           {% set sb = o.fill_price|slipbps(o.signal_price, o.side) %}
           <td class="mono">{% if sb is none %}<span style="color:#666;">—</span>{% else %}<span style="color:{% if sb > 0.5 %}#f87171{% elif sb < -0.5 %}#4ade80{% else %}#9aa{% endif %};">{{ "%+.1f"|format(sb) }}</span>{% endif %}</td>
-          <td class="mono">{% if o.fee_source == 'unavailable' %}<span class="warn" title="fee not captured at fill — counted as 0">⚠</span>{% elif o.commission %}{{ o.commission|fee }} {{ o.commission_asset }}{% else %}<span style="color:#666;">—</span>{% endif %}</td>
+          {{ fee_cell(o, "mono") }}
           <td><span class="pill s-{{ o.status }}">{{ o.status }}</span></td>
           <td>{{ o.attempts }}</td>
           <td class="mono err">{{ o.error_message[:60] if o.error_message else "" }}</td>

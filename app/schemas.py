@@ -81,3 +81,12 @@ class OrderResult(BaseModel):
     fee_source: str = ""
     error_message: str = ""
     raw: dict | None = None
+
+
+# fee_source: fidelity of OrderResult.commission / Order.fee_source — ONE canonical set,
+# so a typo in any producer can't silently disable the /performance "fee not captured"
+# warning. (The order-table templates compare these literals directly; keep them in sync
+# if these ever change. "" = legacy row written before the column existed = unknown.)
+FEE_SOURCE_EXCHANGE = "exchange"        # real fee fetched from the venue at fill time
+FEE_SOURCE_UNAVAILABLE = "unavailable"  # enrichment missed -> commission is a 0 placeholder
+FEE_SOURCE_DRY_RUN = "dry_run"          # simulated (DRY_RUN)

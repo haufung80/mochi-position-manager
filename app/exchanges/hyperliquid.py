@@ -8,7 +8,8 @@ from hyperliquid.exchange import Exchange as HLExchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-from ..schemas import OrderResult
+from ..schemas import (OrderResult, FEE_SOURCE_DRY_RUN, FEE_SOURCE_EXCHANGE,
+                       FEE_SOURCE_UNAVAILABLE)
 from .symbols import (
     HYPERLIQUID_NATIVE_SPOT,
     HYPERLIQUID_SPOT_QUOTE,
@@ -125,12 +126,16 @@ class HyperliquidExchange:
         fee, token, _ = self._fill_fee_detail(oid)
         return fee, token
 
-    def _fill_fee_detail(self, oid: str) -> tuple[float, str, bool]:
-        """As `_fill_fee` plus a `found` flag — False when no fill matched in the
-        poll window, so the caller marks commission a 0 PLACEHOLDER (fee_source
-        'unavailable') rather than a real zero."""
+    def _fill_fee_detail(self, oid: str, want_qty: float = 0.0) -> tuple[float, str, bool]:
+        """Sum fees for fills belonging to `oid` from user_fills, plus a `found` flag.
+        `found` is True only once matched fills sum to >= `want_qty` — a still-arriving
+        PARTIAL fill is NOT a complete capture, so it isn't mislabeled fee_source
+        'exchange'. With want_qty <= 0 (the spot/legacy 2-tuple path) it returns on the
+        FIRST match as before. On timeout it returns the best (possibly partial) fee seen
+        with found=False. Never raises into the order path."""
         if not self._account_address or not oid:
             return 0.0, "USDC", False
+        best = (0.0, "USDC")                 # most-complete (fee, token) seen so far
         for _ in range(self.FILL_POLL_ATTEMPTS):
             try:
                 fills = self._info.user_fills(self._account_address) or []
@@ -141,8 +146,12 @@ class HyperliquidExchange:
             if matched:
                 fee = sum(float(f.get("fee", 0) or 0) for f in matched)
                 token = matched[0].get("feeToken") or "USDC"
-                return fee, token, True
+                best = (fee, token)
+                sz = sum(float(f.get("sz", 0) or 0) for f in matched)
+                if want_qty <= 0 or sz + 1e-12 >= want_qty:   # complete (or legacy first-match)
+                    return fee, token, True
             time.sleep(self.FILL_POLL_DELAY)
+        return best[0], best[1], False        # nothing matched, or only a partial landed
         return 0.0, "USDC", False
 
     def _round_size(self, symbol: str, qty: float) -> float:
@@ -183,7 +192,7 @@ class HyperliquidExchange:
                          side, symbol, qty_base)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
                                    filled_qty_base=qty_base, avg_price=price,
-                                   fee_source="dry_run")
+                                   fee_source=FEE_SOURCE_DRY_RUN)
 
             if leverage and leverage > 0:
                 try:
@@ -223,7 +232,8 @@ class HyperliquidExchange:
             # look them up. Best-effort — the order already filled regardless.
             commission, commission_asset, fee_found = 0.0, "", False
             try:
-                commission, commission_asset, fee_found = self._fill_fee_detail(oid)
+                commission, commission_asset, fee_found = self._fill_fee_detail(
+                    oid, filled or qty_base)
             except Exception as e:
                 log.warning("HL fee enrichment failed (continuing): %s", e)
 
@@ -234,8 +244,10 @@ class HyperliquidExchange:
                 avg_price=avg_px,
                 commission=commission,
                 commission_asset=commission_asset,
-                # avg_px is always the real fill; only the fee is best-effort here.
-                fee_source="exchange" if fee_found else "unavailable",
+                # avg_px is always the real fill; the fee is best-effort. "exchange" only
+                # once fills covering the full qty surfaced (see _fill_fee_detail); a
+                # partial/missing fee is flagged "unavailable".
+                fee_source=FEE_SOURCE_EXCHANGE if fee_found else FEE_SOURCE_UNAVAILABLE,
                 raw=resp,
             )
         except Exception as e:

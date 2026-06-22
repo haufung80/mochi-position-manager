@@ -30,7 +30,7 @@ from .exchanges.registry import get_registry
 from .models import Alert, Order, Position, StrategyPosition
 from .notifier import get_notifier
 from .routing import VenueRoute
-from .schemas import OrderResult
+from .schemas import OrderResult, FEE_SOURCE_UNAVAILABLE
 
 log = logging.getLogger(__name__)
 
@@ -235,7 +235,7 @@ def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
     # Fidelity flag: an adapter that didn't declare a source means the fee wasn't
     # confirmed from the venue -> "unavailable" (commission is a 0 placeholder),
     # never silently a real zero.
-    order.fee_source = result.fee_source or "unavailable"
+    order.fee_source = result.fee_source or FEE_SOURCE_UNAVAILABLE
     order.error_message = ""
     order.next_retry_at = None
     if result.avg_price > 0 and filled_qty > 0:

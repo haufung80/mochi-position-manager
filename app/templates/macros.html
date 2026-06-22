@@ -1,2 +1,8 @@
-{# Shared Jinja macros. Import with {% from "macros.html" import money %}. #}
+{# Shared Jinja macros. Import with {% from "macros.html" import money, fee_cell %}. #}
 {% macro money(v) %}<span class="{{ 'pos' if (v or 0) >= 0 else 'neg' }}">${{ v|usd }}</span>{% endmacro %}
+
+{# Recent-orders Fee cell. ⚠ when the fee wasn't captured at fill (commission is a 0
+   placeholder), else the commission (or — when none). `cls` = the <td> class. Warns on
+   ANY fee_source that isn't known-good/legacy, so a future state fails SAFE (warns)
+   rather than silently rendering a 0 as a real fee. `o` may be an ORM Order or a dict. #}
+{% macro fee_cell(o, cls="muted") %}<td class="{{ cls }}">{% if o.fee_source not in ('exchange', 'dry_run', '') %}<span class="warn" title="fee not captured at fill — counted as 0">⚠</span>{% elif o.commission %}{{ o.commission|fee }} {{ o.commission_asset }}{% else %}—{% endif %}</td>{% endmacro %}
