@@ -296,15 +296,19 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
 
     order = existing_order or _new_order(alert.id, venue, side, quantity,
                                          getattr(alert, "signal_price", None))
-    if existing_order is None:
-        db.add(order)
-        db.flush()
-
     order.attempts += 1
     order.updated_at = _utcnow()
-    db.flush()
 
+    # Place + enrich the fill BEFORE writing anything to the DB. The fill-enrichment
+    # poll inside market_order can take up to ~5s; doing it here — with no row flushed
+    # yet — keeps the per-venue write transaction (and its SQLite write lock) OUT of
+    # that window, so it never contends with the retry/funding workers or other venues'
+    # commits under busy_timeout. (The pre-call flush was pure cost: uncommitted, so it
+    # gave no crash-audit and no reader visibility, and the PK isn't used before commit.)
     result = _call_exchange(venue, side, quantity)
+
+    if existing_order is None:
+        db.add(order)
     if result.success:
         _on_success(db, order, alert, venue, side, result)
     else:

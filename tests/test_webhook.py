@@ -612,6 +612,28 @@ def test_order_fee_source_unavailable_when_enrichment_missing(strategies_yaml, s
         assert o.fee_source == "unavailable"     # placeholder, not a confirmed zero
 
 
+def test_execute_order_places_before_persisting(stub_exchange, silent_notifier, monkeypatch):
+    """WAL-contention guard: execute_order calls the exchange BEFORE writing the Order
+    row, so the per-venue write transaction (SQLite write lock) is not held open across
+    the up-to-~5s fill-enrichment poll (which would contend with the retry/funding
+    workers and other venues under busy_timeout)."""
+    import app.executor as ex_mod
+    from app.routing import VenueRoute
+    seen = {}
+    orig = ex_mod._call_exchange
+    def spy(venue, side, quantity):              # records DB state AT the exchange call
+        seen["orders_at_call"] = db.query(Order).count()
+        return orig(venue, side, quantity)
+    monkeypatch.setattr(ex_mod, "_call_exchange", spy)
+    with session_scope() as db:
+        alert = Alert(idempotency_key="seq1", strategy_id="S1", action="buy", raw_payload="{}")
+        db.add(alert); db.flush()
+        ex_mod.execute_order(db, alert, VenueRoute("bybit", "BTCUSDT", True), quantity=0.01)
+    assert seen["orders_at_call"] == 0           # order NOT persisted until after the call
+    with session_scope() as db:                  # ...and it IS persisted afterward
+        assert db.query(Order).filter(Order.status == "success").count() == 1
+
+
 def test_orders_json_includes_execution_fields(strategies_yaml, stub_exchange, silent_notifier):
     stub_exchange.next_result = OrderResult(
         success=True, exchange_order_id="X1", filled_qty_base=0.001,
