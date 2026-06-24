@@ -436,7 +436,8 @@ class BybitExchange:
             if self.dry_run:
                 log.info("[DRY_RUN] bybit spot %s %s qty=%s", side, symbol, qty_str)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
-                                   filled_qty_base=float(qty_str), avg_price=price)
+                                   filled_qty_base=float(qty_str), avg_price=price,
+                                   fee_source=FEE_SOURCE_DRY_RUN)
 
             resp = self._client.place_order(
                 category=SPOT_CATEGORY,
@@ -456,6 +457,7 @@ class BybitExchange:
 
             fill_price, commission, commission_asset = price, 0.0, ""
             filled_qty = float(qty_str)
+            det = None
             try:
                 det = self._fill_details(symbol, order_id, float(qty_str),
                                          category=SPOT_CATEGORY)
@@ -477,6 +479,8 @@ class BybitExchange:
                 avg_price=fill_price,
                 commission=commission,
                 commission_asset=commission_asset,
+                # det present => real fee from the venue; absent => mark estimate + 0 fee.
+                fee_source=FEE_SOURCE_EXCHANGE if det else FEE_SOURCE_UNAVAILABLE,
                 raw=resp,
             )
         except Exception as e:

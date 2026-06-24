@@ -62,7 +62,9 @@ class Order(Base):
     # the venue at fill time; "unavailable" = the post-fill enrichment fetch failed, so
     # commission is a 0 PLACEHOLDER (and on Bybit fill_price is a mark estimate);
     # "dry_run" = simulated. Makes a 0 fee unambiguous (real zero vs. not captured at
-    # fill). Empty "" = legacy row written before this column (treat as unknown).
+    # fill). Every FILL sets one of the above (perp + spot adapters); empty "" is only a
+    # non-fill row — a rejected audit order or a legacy row pre-dating this column —
+    # treated as unknown and never flagged.
     fee_source: Mapped[str] = mapped_column(String(16), default="", nullable=False)
     # Realized PnL this fill produced (the portion of the position it CLOSED), USDT,
     # gross of fees — the per-fill `realized_delta` from `_fill_math`, the same number

@@ -439,7 +439,8 @@ class HyperliquidExchange:
             if self.dry_run or self._exchange is None:
                 log.info("[DRY_RUN] hyperliquid spot %s %s qty=%s", side, symbol, qty_base)
                 return OrderResult(success=True, exchange_order_id="DRY_RUN",
-                                   filled_qty_base=qty_base, avg_price=0.0)
+                                   filled_qty_base=qty_base, avg_price=0.0,
+                                   fee_source=FEE_SOURCE_DRY_RUN)
 
             try:
                 price = self._mid_price(pair_name)
@@ -468,9 +469,9 @@ class HyperliquidExchange:
                 elif "error" in st:
                     return OrderResult(success=False, error_message=str(st["error"]), raw=resp)
 
-            commission, commission_asset = 0.0, ""
+            commission, commission_asset, fee_found = 0.0, "", False
             try:
-                commission, commission_asset = self._fill_fee(oid)
+                commission, commission_asset, fee_found = self._fill_fee_detail(oid)
             except Exception as e:
                 log.warning("HL spot fee enrichment failed (continuing): %s", e)
 
@@ -491,6 +492,8 @@ class HyperliquidExchange:
                 avg_price=avg_px,
                 commission=commission,
                 commission_asset=commission_asset,
+                # fee found in user_fills => real; else a 0 placeholder (parity with perp).
+                fee_source=FEE_SOURCE_EXCHANGE if fee_found else FEE_SOURCE_UNAVAILABLE,
                 raw=resp,
             )
         except Exception as e:

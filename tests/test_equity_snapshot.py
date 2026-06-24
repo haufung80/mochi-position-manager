@@ -211,6 +211,27 @@ def test_equity_chart_payload_shape():
     assert _equity_chart_payload({"Total": [(t1, -5.0)]})["series"][0]["color"] == "#f87171"  # neg -> red
 
 
+def test_equity_series_include_total_flag():
+    """include_total=False (per-strategy charts) synthesizes NO aggregate, so a strategy
+    literally named 'Total' is just its own line — never dropped or drawn as the
+    aggregate. The default builds the 'Total' aggregate (by-exchange behavior)."""
+    t1 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    t2 = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    snaps = [(t1, 30.0, {"S1": 10.0, "Total": 20.0}),   # "Total" is a STRATEGY id here
+             (t2, 33.0, {"S1": 11.0, "Total": 22.0})]
+    s = _equity_series(snaps, None, include_total=False)
+    assert set(s) == {"S1", "Total"}                            # the strategy survives...
+    assert s["Total"][-1][1] == pytest.approx(22.0)             # ...as ITS series, not the 33.0 aggregate
+    p = _equity_chart_payload(s, include_total=False)
+    assert {x["name"] for x in p["series"]} == {"S1", "Total"}
+    assert all(x["is_total"] is False for x in p["series"])     # nothing drawn as the aggregate
+    # default: the aggregate IS synthesized (normal venue snapshots, no name collision)
+    norm = [(t1, 30.0, {"bybit": 30.0}), (t2, 33.0, {"bybit": 33.0})]
+    s2 = _equity_series(norm, None)
+    assert s2["Total"][-1][1] == pytest.approx(33.0)
+    assert next(x for x in _equity_chart_payload(s2)["series"] if x["name"] == "Total")["is_total"]
+
+
 def test_equity_metrics_sharpe_with_enough_points():
     """Sharpe (est.) is computed from >= 8 DAILY returns (one equity point per day)."""
     base = datetime(2026, 5, 18, tzinfo=timezone.utc)

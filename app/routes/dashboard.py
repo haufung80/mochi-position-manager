@@ -590,11 +590,16 @@ def _clear_equity_cache() -> None:
                      strat_snapshots=None, exec_quality=None)
 
 
-def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None) -> dict:
+def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None,
+                   include_total: bool = True) -> dict:
     """Per-exchange + aggregate ('Total') PnL series from in-memory `snapshots` (from
     _load_snapshots) inside the window. Each series is tipped with the live headline
     value so the right edge matches the page. Returns {name: [(ts, value)]}; empty
-    when there are no snapshots in the window."""
+    when there are no snapshots in the window.
+
+    include_total=False omits the synthesized 'Total' aggregate entirely (per-line-only
+    charts, e.g. by-strategy) — so a series whose NAME happens to be 'Total' is just that
+    line, never silently overwritten by / confused with the aggregate."""
     rows = snapshots
     if window_delta is not None:
         cutoff = datetime.now(timezone.utc) - window_delta
@@ -613,15 +618,16 @@ def _equity_series(snapshots, window_delta, live_total=None, live_by_ex=None) ->
         if live_total is None or not snapshots:
             return {}
         now = datetime.now(timezone.utc)
-        out = {"Total": [(now, float(live_total))]}
+        out = {"Total": [(now, float(live_total))]} if include_total else {}
         for ex, tip in (live_by_ex or {}).items():
             if tip is not None:
                 out[ex] = [(now, float(tip))]
         return out
-    series = {"Total": total_pts, **ex_pts}
+    series = {"Total": total_pts, **ex_pts} if include_total else dict(ex_pts)
     if live_total is not None:                          # tip every series to the live edge
         anchor = max(datetime.now(timezone.utc), total_pts[-1][0])
-        series["Total"] = total_pts + [(anchor, float(live_total))]
+        if include_total:
+            series["Total"] = total_pts + [(anchor, float(live_total))]
         for ex in ex_pts:
             tip = (live_by_ex or {}).get(ex)
             if tip is not None:
@@ -689,7 +695,8 @@ def _equity_metrics(total_series: list, capital_base: float = 0.0):
     return m
 
 
-def _equity_chart_payload(series, capital_base: float = 0.0) -> dict | None:
+def _equity_chart_payload(series, capital_base: float = 0.0,
+                          include_total: bool = True) -> dict | None:
     """Convert an `_equity_series` dict ({name: [(ts, value)]}) into an ECharts-ready
     payload, rendered client-side by renderEChart in app.js (used by both /performance
     and /funding-arb). Series ordering + colors: Total last (drawn on top), green/red by
@@ -698,18 +705,22 @@ def _equity_chart_payload(series, capital_base: float = 0.0) -> dict | None:
     (reserved for the right-axis follow-up). None when there's nothing to plot."""
     if not series:
         return None
-    order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])
+    if include_total:
+        order = [k for k in series if k != "Total"] + (["Total"] if "Total" in series else [])
+    else:
+        order = list(series)                 # per-line-only: nothing is the aggregate
     palette = iter(_SERIES_PALETTE)
     out = []
     for name in order:
         pts = series.get(name) or []
-        color = (("#4ade80" if pts[-1][1] >= 0 else "#f87171") if name == "Total"
+        is_total = include_total and name == "Total"
+        color = (("#4ade80" if pts[-1][1] >= 0 else "#f87171") if is_total
                  else (_SERIES_COLORS.get(name) or next(palette, "#9ca3af")))
         data = [[int(e * 1000), round(float(v), 4)]
                 for ts, v in pts if (e := _epoch_ts(ts)) is not None]
         if data:
             out.append({"name": name, "color": color,
-                        "is_total": name == "Total", "last": pts[-1][1], "data": data})
+                        "is_total": is_total, "last": pts[-1][1], "data": data})
     if not out:
         return None
     return {"series": out, "capital_base": float(capital_base or 0.0)}
@@ -754,9 +765,9 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         strat_live = _by_strategy_totals(perf)
         strat_series = _equity_series(
             strat_snapshots, wdelta,
-            sum(strat_live.values()) if strat_live else None, strat_live)
-        strat_equity = _equity_chart_payload(
-            {k: v for k, v in strat_series.items() if k != "Total"})
+            sum(strat_live.values()) if strat_live else None, strat_live,
+            include_total=False)        # per-strategy lines only; the aggregate is built by neither layer
+        strat_equity = _equity_chart_payload(strat_series, include_total=False)
         # Execution-quality row order: the by-strategy P&L order (perf.per_strategy) FIRST,
         # then any strategy that has orders but no fill/position (all rejected/dead) — else
         # a fail-only strategy, the table's whole point, would never render.
