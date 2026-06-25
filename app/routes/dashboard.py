@@ -762,9 +762,16 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         # aggregate ("Total"/"Σ strategies") is dropped — it excludes exchange-level
         # funding, so it's a misleading partial; the true Total (with funding) + its
         # metric cards live on the by-exchange chart and the headline.
-        strat_live = _by_strategy_totals(perf)
+        # The CHART shows only CURRENTLY-CONFIGURED strategies: a strategy removed from
+        # strategies.yaml keeps its StrategyPosition row + historical snapshots (so the
+        # accounting table/headline below stay complete — its realized P&L was real), but
+        # it should drop off the live chart rather than linger as a flat ghost line.
+        configured = {r.strategy_id for r in request.app.state.strategy_router.all()}
+        strat_live = {k: v for k, v in _by_strategy_totals(perf).items() if k in configured}
+        strat_snaps = [(ts, s, {k: v for k, v in by.items() if k in configured})
+                       for ts, s, by in strat_snapshots]
         strat_series = _equity_series(
-            strat_snapshots, wdelta,
+            strat_snaps, wdelta,
             sum(strat_live.values()) if strat_live else None, strat_live,
             include_total=False)        # per-strategy lines only; the aggregate is built by neither layer
         strat_equity = _equity_chart_payload(strat_series, include_total=False)

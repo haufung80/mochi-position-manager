@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app.db import session_scope
 from app.executor import _apply_fill_to_position
 from app.main import app
-from app.models import Alert, EquitySnapshot, FundingEvent, Order
+from app.models import Alert, EquitySnapshot, FundingEvent, Order, StrategyPosition
 from app.routes.dashboard import (_equity_chart_payload, _equity_curve,
                                    _execution_quality_by_strategy, _performance)
 from app.routing import StrategyRouter
@@ -105,6 +105,29 @@ def test_performance_renders_per_strategy_chart(client):
     assert 'id="eqstrat"' in r.text                      # the per-strategy ECharts canvas
     assert "Σ strategies" not in r.text                  # aggregate label removed (no metric cards)
     assert "per exchange + aggregate" in r.text          # the by-exchange chart still has its Total
+
+
+def test_per_strategy_chart_excludes_removed_strategies(client):
+    """A strategy removed from strategies.yaml (no router entry) drops off the by-strategy
+    CHART — but its realized P&L stays in the accounting table (the ledger/history persist;
+    the money was real). Guards the 'why is the removed strategy still on the chart' report."""
+    import re
+    import html as _html
+    _seed_round_trip()                                   # S1 is the configured strategy
+    with session_scope() as db:
+        db.add(EquitySnapshot(captured_at=datetime(2026, 6, 1, 2, tzinfo=timezone.utc),
+                              total_pnl=25.0, by_exchange=json.dumps({"bybit": 25.0}),
+                              by_strategy=json.dumps({"S1": 20.0, "GHOST_REMOVED": 5.0})))
+        db.add(StrategyPosition(strategy_id="GHOST_REMOVED", exchange="bybit",
+                                symbol="BTCUSDT", net_qty_base=0.0, net_qty_usd=0.0,
+                                realized_pnl=5.0))
+    r = client.get("/performance?equity_window=All")
+    assert r.status_code == 200
+    m = re.search(r"id=\"eqstrat\" data-chart='([^']*)'", r.text)
+    assert m, "by-strategy chart not rendered"
+    names = {s["name"] for s in json.loads(_html.unescape(m.group(1)))["series"]}
+    assert "S1" in names and "GHOST_REMOVED" not in names   # chart: configured only
+    assert "GHOST_REMOVED" in r.text                        # accounting table keeps it
 
 
 def _add_exec_order(sid, status, key, *, signal=None, fill=None, commission=0.0):
