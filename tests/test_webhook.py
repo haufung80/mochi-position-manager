@@ -634,6 +634,45 @@ def test_execute_order_places_before_persisting(stub_exchange, silent_notifier, 
         assert db.query(Order).filter(Order.status == "success").count() == 1
 
 
+def test_order_succeeded_alert_shows_realized_gain_and_loss():
+    """The directional order-filled alert surfaces the realized gain/loss a CLOSING fill
+    booked (🟢 / 🔴); an open/increase (realized 0) shows no realized line."""
+    import app.notifier as N
+    n = N.TelegramNotifier.__new__(N.TelegramNotifier)
+    sent = {}
+    n.send = lambda text, **kw: sent.__setitem__("t", text)
+    n.order_succeeded("S1", "bybit", "BTCUSDT", "sell", 1.0, 120.0, realized=20.0)
+    assert "Realized: 🟢 $20.00" in sent["t"]
+    n.order_succeeded("S1", "bybit", "BTCUSDT", "sell", 1.0, 90.0, realized=-5.0)
+    assert "Realized: 🔴 $-5.00" in sent["t"]
+    n.order_succeeded("S1", "bybit", "BTCUSDT", "buy", 1.0, 100.0)   # open -> 0 -> no line
+    assert "Realized" not in sent["t"]
+
+
+def test_order_alert_carries_realized_on_closing_fill(stub_exchange, silent_notifier):
+    """A fill that CLOSES a position passes its booked realized PnL to the order alert,
+    so the Telegram message can show the gain/loss; an open passes 0."""
+    from app.executor import execute_order
+    from app.routing import VenueRoute
+    silent_notifier.calls.clear()
+    venue = VenueRoute("bybit", "BTCUSDT", True)
+    stub_exchange.next_result = OrderResult(success=True, exchange_order_id="o1",
+        filled_qty_base=1.0, avg_price=100.0, fee_source="exchange")     # open long 1 @ 100
+    with session_scope() as db:
+        a = Alert(idempotency_key="ro", strategy_id="RS", action="buy", raw_payload="{}")
+        db.add(a); db.flush()
+        execute_order(db, a, venue, quantity=1.0)
+    stub_exchange.next_result = OrderResult(success=True, exchange_order_id="o2",
+        filled_qty_base=1.0, avg_price=120.0, fee_source="exchange")     # close 1 @ 120 -> +20
+    with session_scope() as db:
+        a = Alert(idempotency_key="rc", strategy_id="RS", action="sell", raw_payload="{}")
+        db.add(a); db.flush()
+        execute_order(db, a, venue, quantity=1.0)
+    succ = [c for c in silent_notifier.calls if c[0] == "order_succeeded"]
+    assert succ[-1][2].get("realized") == pytest.approx(20.0)            # the SELL booked +20
+    assert (succ[0][2].get("realized") or 0.0) == pytest.approx(0.0)     # the BUY booked nothing
+
+
 def test_orders_json_includes_execution_fields(strategies_yaml, stub_exchange, silent_notifier):
     stub_exchange.next_result = OrderResult(
         success=True, exchange_order_id="X1", filled_qty_base=0.001,

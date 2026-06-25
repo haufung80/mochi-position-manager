@@ -87,12 +87,19 @@ class TelegramNotifier:
         )
 
     def order_succeeded(self, strategy_id: str, exchange: str, symbol: str,
-                        side: str, quantity: float, price: float) -> None:
+                        side: str, quantity: float, price: float, *,
+                        realized: float = 0.0) -> None:
+        # When the fill CLOSED/reduced a position it books a realized gain/loss; show it
+        # (🟢/🔴). An open/increase books 0 -> no line.
+        realized_line = ""
+        if realized:
+            realized_line = f"\n• Realized: {'🟢' if realized >= 0 else '🔴'} ${realized:,.2f}"
         self.send(
             "✅ *Order filled*\n"
             f"• Strategy: `{strategy_id}`\n"
             f"• Exchange: *{exchange}* / {symbol}\n"
-            f"• {side.upper()}: {_fmt_qty(quantity, symbol, price)} @ ${price:,.2f}",
+            f"• {side.upper()}: {_fmt_qty(quantity, symbol, price)} @ ${price:,.2f}"
+            f"{realized_line}",
         )
 
     def duplicate_alert(self, strategy_id: str, idempotency_key: str) -> None:

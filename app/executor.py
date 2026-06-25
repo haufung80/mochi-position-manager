@@ -246,6 +246,7 @@ def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
     get_notifier().order_succeeded(
         alert.strategy_id, venue.exchange, venue.symbol,
         side, filled_qty, result.avg_price,
+        realized=order.realized_pnl or 0.0,   # gain/loss this fill BOOKED (0 on an open/increase)
     )
     log.info("Order success alert=%s strategy=%s ex=%s sym=%s qty=%s @ $%.2f",
              alert.id, alert.strategy_id, venue.exchange, venue.symbol,
