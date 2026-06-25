@@ -775,16 +775,28 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
             sum(strat_live.values()) if strat_live else None, strat_live,
             include_total=False)        # per-strategy lines only; the aggregate is built by neither layer
         strat_equity = _equity_chart_payload(strat_series, include_total=False)
-        # Execution-quality row order: the by-strategy P&L order (perf.per_strategy) FIRST,
-        # then any strategy that has orders but no fill/position (all rejected/dead) — else
-        # a fail-only strategy, the table's whole point, would never render.
-        seen = {r["strategy_id"] for r in perf["per_strategy"]}
-        exec_order = ([r["strategy_id"] for r in perf["per_strategy"]]
-                      + sorted(s for s in exec_quality if s not in seen))
+        # Per-strategy DISPLAYS show only CURRENTLY-CONFIGURED strategies (consistent with
+        # the chart): a strategy removed from strategies.yaml is dropped from the by-strategy
+        # P&L rows + the diagnostic exec-quality table. Its realized P&L is still real, so it
+        # stays in the headline/subtotal and is folded into ONE "removed/inactive" P&L row
+        # (when non-zero) — the table still reconciles to the headline.
+        active_strat = [r for r in perf["per_strategy"] if r["strategy_id"] in configured]
+        removed = [r for r in perf["per_strategy"] if r["strategy_id"] not in configured]
+        removed_agg = ({k: sum(r[k] for r in removed)
+                        for k in ("realized", "unrealized", "commission", "total")}
+                       if removed else None)
+        if removed_agg and all(abs(v) < 0.005 for v in removed_agg.values()):
+            removed_agg = None              # all flat/zero -> nothing to show; subtotal still reconciles
+        # Exec-quality row order: configured P&L order FIRST, then configured strategies
+        # that have orders but no fill/position (fail-only — all rejected/dead).
+        seen = {r["strategy_id"] for r in active_strat}
+        exec_order = ([r["strategy_id"] for r in active_strat]
+                      + sorted(s for s in exec_quality if s in configured and s not in seen))
         orders = _recent_orders(db, limit=50)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,
-        "strat_equity": strat_equity,
+        "strat_equity": strat_equity, "per_strategy_active": active_strat,
+        "removed_agg": removed_agg,
         "exec_quality": exec_quality, "exec_order": exec_order,
         "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
         "equity_window": wsel,

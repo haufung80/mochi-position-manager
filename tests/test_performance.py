@@ -107,10 +107,12 @@ def test_performance_renders_per_strategy_chart(client):
     assert "per exchange + aggregate" in r.text          # the by-exchange chart still has its Total
 
 
-def test_per_strategy_chart_excludes_removed_strategies(client):
-    """A strategy removed from strategies.yaml (no router entry) drops off the by-strategy
-    CHART — but its realized P&L stays in the accounting table (the ledger/history persist;
-    the money was real). Guards the 'why is the removed strategy still on the chart' report."""
+def test_removed_strategy_dropped_from_all_per_strategy_displays(client):
+    """A strategy removed from strategies.yaml (no router entry) is dropped CONSISTENTLY
+    from every per-strategy display — the chart, the by-strategy P&L rows, and the
+    exec-quality table — never named individually. Its realized P&L was real, so it's
+    folded into one 'removed / inactive strategies' row and stays in the headline (the
+    table still reconciles)."""
     import re
     import html as _html
     _seed_round_trip()                                   # S1 is the configured strategy
@@ -127,7 +129,8 @@ def test_per_strategy_chart_excludes_removed_strategies(client):
     assert m, "by-strategy chart not rendered"
     names = {s["name"] for s in json.loads(_html.unescape(m.group(1)))["series"]}
     assert "S1" in names and "GHOST_REMOVED" not in names   # chart: configured only
-    assert "GHOST_REMOVED" in r.text                        # accounting table keeps it
+    assert "GHOST_REMOVED" not in r.text                    # never named individually (chart/tables)
+    assert "removed / inactive strategies" in r.text        # its realized P&L folded into one row
 
 
 def _add_exec_order(sid, status, key, *, signal=None, fill=None, commission=0.0):
@@ -179,15 +182,19 @@ def test_performance_renders_execution_quality_table(client):
     assert "S1" in r.text
 
 
-def test_execution_quality_table_shows_fail_only_strategy(client):
-    """A strategy with ONLY rejected/dead orders (no fill -> no StrategyPosition, so absent
-    from per_strategy) STILL appears in the Execution-quality table — surfacing the
-    dead/reject count is the table's whole point. (Regression: it iterates exec_order, the
-    union of per_strategy + exec_quality keys, not just per_strategy.)"""
+def test_execution_quality_table_shows_fail_only_strategy(client, tmp_path):
+    """A CONFIGURED strategy with ONLY rejected/dead orders (no fill -> no
+    StrategyPosition, so absent from per_strategy) STILL appears in the Execution-quality
+    table — surfacing the dead/reject count is the table's whole point. Only REMOVED
+    (unconfigured) strategies are filtered out; a configured fail-only one stays."""
+    f = tmp_path / "s.yaml"                              # DEADONLY is CONFIGURED (still active)
+    f.write_text("strategies:\n  S1:\n    base_asset: BTC\n    venues:\n      bybit: true\n"
+                 "  DEADONLY:\n    base_asset: ETH\n    venues:\n      bybit: true\n")
+    client.app.state.strategy_router = StrategyRouter(f)
     _seed_round_trip()                                   # S1 has fills -> in per_strategy
-    _add_exec_order("DEADONLY", "dead", "d1")            # fail-only: never filled
+    _add_exec_order("DEADONLY", "dead", "d1")            # configured fail-only: never filled
     _add_exec_order("DEADONLY", "rejected", "r1")
-    r = client.get("/performance?equity_window=All")
+    r = client.get("/performance?equity_window=All&refresh=true")
     assert r.status_code == 200
     # Isolate the Execution-quality card (between its <h2> and the next <h2>) so this can't
     # pass merely because Recent orders also lists DEADONLY's orders.

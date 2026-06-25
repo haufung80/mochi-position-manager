@@ -129,12 +129,12 @@
   <!-- ===== per strategy ===== -->
   <h2>By strategy</h2>
   <div class="card">
-    {% if perf.per_strategy %}
+    {% if per_strategy_active or removed_agg %}
     <table class="numeric">
       <thead><tr><th class="l">Strategy</th><th>Realized</th><th>Unrealized</th>
         <th>Commission</th><th>Total</th></tr></thead>
       <tbody>
-        {% for r in perf.per_strategy %}
+        {% for r in per_strategy_active %}
         <tr>
           <td class="l mono">{{ r.strategy_id }}</td>
           <td>{{ money(r.realized) }}</td>
@@ -143,6 +143,13 @@
           <td><strong>{{ money(r.total) }}</strong></td>
         </tr>
         {% endfor %}
+        {% if removed_agg %}
+        <tr><td class="l muted" title="strategies removed from the config — realized P&amp;L kept so the totals still reconcile">removed / inactive strategies</td>
+          <td>{{ money(removed_agg.realized) }}</td>
+          <td>{{ money(removed_agg.unrealized) }}</td>
+          <td class="muted">${{ removed_agg.commission|usd }}</td>
+          <td><strong>{{ money(removed_agg.total) }}</strong></td></tr>
+        {% endif %}
         {% set strat_total = perf.per_strategy|sum(attribute='total') %}
         <tr style="border-top:2px solid #3a3f4b">
           <td class="l"><b>Strategies subtotal</b></td>
