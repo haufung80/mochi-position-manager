@@ -3,16 +3,19 @@
 # The DB must be in WAL mode (app/db.py already sets PRAGMA journal_mode=WAL).
 #
 # ${VARS} are expanded by Litestream at runtime from the container env (set them
-# in .env on the box). Cloudflare R2 free tier is recommended:
-#   LITESTREAM_S3_REGION=auto
-#   LITESTREAM_S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+# in .env on the box). Default target is AWS S3 — the endpoint is derived from
+# the bucket's region, so none is configured here. Use a bucket in a DIFFERENT
+# region than the Lightsail box (don't co-locate the backup with the primary).
+#
+# Non-AWS S3-compatible (Cloudflare R2 / Backblaze B2): add an `endpoint:` line
+# under the replica, e.g.  endpoint: ${LITESTREAM_S3_ENDPOINT}  (R2 also wants
+# LITESTREAM_S3_REGION=auto).
 dbs:
   - path: /data/middleware.db
     replicas:
       - type: s3
         bucket: ${LITESTREAM_S3_BUCKET}
         path: middleware.db
-        endpoint: ${LITESTREAM_S3_ENDPOINT}
         region: ${LITESTREAM_S3_REGION}
         access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
         secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}

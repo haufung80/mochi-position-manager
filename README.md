@@ -220,11 +220,14 @@ The SQLite DB is a single file on one VM, so the stack ships a **Litestream** si
 (`docker-compose.prod.yml`) that continuously replicates it to S3-compatible storage. It **idles
 harmlessly until configured** — no backup until you set the creds.
 
-**Enable** (Cloudflare R2 free tier recommended — 10 GB free):
-1. Create an R2 bucket + an R2 API token (Cloudflare dashboard → R2 → Manage API Tokens).
+**Enable** (AWS S3):
+1. Create an S3 bucket in a region **different from** the Lightsail box (don't co-locate the backup
+   with the primary), plus an IAM user with `s3:PutObject`/`GetObject`/`ListBucket`/`DeleteObject`
+   scoped to that bucket.
 2. On the box, set in `.env` (see `.env.example` for the keys): `LITESTREAM_S3_BUCKET`,
-   `LITESTREAM_S3_ENDPOINT` (`https://<account-id>.r2.cloudflarestorage.com`), `LITESTREAM_S3_REGION=auto`,
-   `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`.
+   `LITESTREAM_S3_REGION` (the bucket's region), `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY`.
+   (Non-AWS S3-compatible like Cloudflare R2 / Backblaze B2: also add an `endpoint:` line to
+   `litestream.yml` and set `LITESTREAM_S3_ENDPOINT` — R2 wants `LITESTREAM_S3_REGION=auto`.)
 3. `docker compose -f docker-compose.prod.yml up -d` — the `litestream` container starts replicating.
    Confirm: `docker compose -f docker-compose.prod.yml logs -f litestream`.
 

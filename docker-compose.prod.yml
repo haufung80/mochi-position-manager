@@ -19,9 +19,9 @@ services:
     expose:
       - "8000"                     # internal only; Caddy reaches it on the compose network
 
-  # Continuous off-box backup of the SQLite DB to S3-compatible storage (e.g.
-  # Cloudflare R2 free tier). Idles harmlessly until LITESTREAM_* is set in .env.
-  # Shares the same ./data volume; the DB is in WAL mode (required by Litestream).
+  # Continuous off-box backup of the SQLite DB to AWS S3 (or any S3-compatible
+  # store). Idles harmlessly until LITESTREAM_* is set in .env. Shares the same
+  # ./data volume; the DB is in WAL mode (required by Litestream).
   litestream:
     image: litestream/litestream:0.3.13
     container_name: mochi-litestream
