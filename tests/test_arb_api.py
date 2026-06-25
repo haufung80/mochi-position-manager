@@ -297,3 +297,48 @@ def test_shared_hl_address_open_refused_before_any_order(client_set, monkeypatch
 
     reg_mod.reset_registry()
     get_settings.cache_clear()
+
+
+# --- global kill-switch: halts opens, never closes --------------------------
+
+def _set_kill(on: bool):
+    from app.risk import update_risk_settings
+    with session_scope() as db:
+        update_risk_settings(db, kill_switch=on)
+
+
+def test_kill_switch_blocks_open_503(client_set, arb_registry):
+    _set_kill(True)
+    r = client_set.post(
+        "/funding-arb/open", headers=H,
+        json={"idempotency_key": "ks1", "asset": "BTC", "notional": 1000},
+    )
+    assert r.status_code == 503, r.text
+    assert "kill-switch" in r.json()["detail"].lower()
+    # refused before persisting — no NEW exposure created.
+    with session_scope() as db:
+        assert db.query(ArbPosition).count() == 0
+
+
+def test_kill_switch_still_allows_close(client_set, arb_registry):
+    # open with the switch OFF...
+    r1 = client_set.post(
+        "/funding-arb/open", headers=H,
+        json={"idempotency_key": "kc1", "asset": "BTC", "notional": 1000},
+    )
+    assert r1.status_code == 200, r1.text
+    arb_id = r1.json()["arb_id"]
+    # ...flip it ON; CLOSE must still be accepted (de-risk is never gated).
+    _set_kill(True)
+    r2 = client_set.post("/funding-arb/close", headers=H, json={"arb_id": arb_id})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["status"] == "closing"
+
+
+def test_kill_switch_off_open_accepted(client_set, arb_registry):
+    _set_kill(False)
+    r = client_set.post(
+        "/funding-arb/open", headers=H,
+        json={"idempotency_key": "ko1", "asset": "BTC", "notional": 1000},
+    )
+    assert r.status_code == 200 and r.json()["status"] == "accepted"

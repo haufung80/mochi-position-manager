@@ -43,6 +43,7 @@ from ..arb_pnl import LegPnLInput, compute_arb_pnl
 from ..arb_funding import leg_funding
 from ..config import Settings, get_settings
 from ..db import session_scope
+from ..risk import get_risk_settings
 from ..exchanges.registry import get_registry
 from ..exchanges.symbols import spot_symbol_for, symbol_for
 from ..models import ArbEquitySnapshot, ArbFundingEvent, ArbLeg, ArbOrder, ArbPosition
@@ -89,7 +90,8 @@ _NON_CLOSED_STATUSES = ("opening", "open", "closing", "error")
 _OPEN_RESPONSES = {
     401: {"description": "Missing or incorrect X-Arb-Secret."},
     409: {"description": "A leg symbol is already held by a non-closed arb."},
-    503: {"description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset)."},
+    503: {"description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset), "
+                         "or the global kill-switch is ON."},
 }
 _CLOSE_RESPONSES = {
     401: {"description": "Missing or incorrect X-Arb-Secret."},
@@ -362,6 +364,16 @@ def open_arb(
                 legs=_sized_from_legs(
                     db.query(ArbLeg).filter(ArbLeg.arb_id == dup.id).all()
                 ),
+            )
+
+        # Global kill-switch (pre-trade risk gate): halt NEW opens. Checked AFTER
+        # idempotency (a repeat key returned `duplicate` above — no NEW exposure) and
+        # mirrors the directional gate in portfolio.decide; CLOSE is never gated, so a
+        # halted book can always be de-risked.
+        if get_risk_settings(db).kill_switch:
+            raise HTTPException(
+                status_code=503,
+                detail="global kill-switch is ON — funding-arb opens halted",
             )
 
         # Symbol exclusivity: refuse if any leg's (exchange, account, symbol) is

@@ -569,6 +569,26 @@ paths:
       summary: Reload Strategies
       tags:
       - admin
+  /admin/risk:
+    post:
+      description: 'Set the global pre-trade risk controls — per-order max notional
+        (USDT; blank/0 =
+
+        off) and the kill-switch (halts ALL new orders). Same WEBHOOK_SECRET auth
+        as the
+
+        strategy writes.'
+      operationId: save_risk_admin_risk_post
+      responses:
+        '200':
+          content:
+            text/html:
+              schema:
+                type: string
+          description: Successful Response
+      summary: Save Risk
+      tags:
+      - admin
   /admin/strategies:
     get:
       operationId: strategies_page_admin_strategies_get
@@ -994,7 +1014,8 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
         '503':
-          description: Funding-arb API not configured (FUNDING_ARB_SECRET unset).
+          description: Funding-arb API not configured (FUNDING_ARB_SECRET unset),
+            or the global kill-switch is ON.
       security:
       - ArbSecret: []
       summary: Open a delta-neutral funding-arb position

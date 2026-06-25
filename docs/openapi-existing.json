@@ -763,6 +763,28 @@
         ]
       }
     },
+    "/admin/risk": {
+      "post": {
+        "description": "Set the global pre-trade risk controls \u2014 per-order max notional (USDT; blank/0 =\noff) and the kill-switch (halts ALL new orders). Same WEBHOOK_SECRET auth as the\nstrategy writes.",
+        "operationId": "save_risk_admin_risk_post",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Save Risk",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/admin/strategies": {
       "get": {
         "operationId": "strategies_page_admin_strategies_get",
@@ -1345,7 +1367,7 @@
             "description": "Validation Error"
           },
           "503": {
-            "description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset)."
+            "description": "Funding-arb API not configured (FUNDING_ARB_SECRET unset), or the global kill-switch is ON."
           }
         },
         "security": [

@@ -594,7 +594,8 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
           description: Validation Error
         '503':
-          description: Funding-arb API not configured (FUNDING_ARB_SECRET unset).
+          description: Funding-arb API not configured (FUNDING_ARB_SECRET unset),
+            or the global kill-switch is ON.
       security:
       - ArbSecret: []
       summary: Open a delta-neutral funding-arb position
