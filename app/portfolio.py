@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 
 from .exchanges.registry import get_registry
 from .models import StrategyPosition
+from .risk import get_risk_settings
 from .routing import StrategyRoute, VenueRoute
 
 log = logging.getLogger(__name__)
@@ -85,11 +86,30 @@ def _net_qty(db: Session, strategy_id: str, exchange: str, symbol: str) -> float
     return row.net_qty_base if row else 0.0
 
 
+def _cap_reason(notional: float, cap: float) -> str:
+    return f"order notional ${notional:,.0f} exceeds the per-order cap ${cap:,.0f}"
+
+
 def decide(db: Session, route: StrategyRoute, venue: VenueRoute,
            action: Side, *, alert_quantity: float | None) -> Sizing:
-    """Compute the order intent for ONE venue. See module docstring for the model."""
+    """Compute the order intent for ONE venue. See module docstring for the model.
+
+    Pre-trade risk gate (global, from RiskSettings): the kill-switch halts ALL new
+    orders; the per-order max notional rejects an OPEN/alert whose USDT notional exceeds
+    the cap. A CLOSE is exempt — you must always be able to exit a position."""
+    risk = get_risk_settings(db)
+    if risk.kill_switch:
+        return Sizing(Decision.REJECT, reason="global kill-switch is ON — all orders halted")
+    cap = risk.per_order_max_notional or 0.0
+
     if route.sar:
-        return Sizing(Decision.ALERT_DRIVEN, side=action, qty=alert_quantity)
+        qty = alert_quantity
+        # Alert-driven has no position_size, so the per-order cap is its only size guard.
+        if qty and cap > 0:
+            price = get_registry().get(venue.exchange).get_price(venue.symbol)
+            if price > 0 and qty * price > cap:
+                return Sizing(Decision.REJECT, reason=_cap_reason(qty * price, cap))
+        return Sizing(Decision.ALERT_DRIVEN, side=action, qty=qty)
 
     net = _net_qty(db, route.strategy_id, venue.exchange, venue.symbol)
     is_long = net > _FLAT_EPS
@@ -137,4 +157,6 @@ def decide(db: Session, route: StrategyRoute, venue: VenueRoute,
             reason=f"position_size {route.position_size:g} below exchange minimum "
                    f"${min_notional:g} (qty {qty:g} @ {price:g})",
         )
+    if cap > 0 and qty * price > cap:
+        return Sizing(Decision.REJECT, reason=_cap_reason(qty * price, cap))
     return Sizing(Decision.OPEN, side=action, qty=qty)

@@ -385,3 +385,58 @@ def test_set_size_form_renders_for_managed(client, strategies_file):
     }, follow_redirects=False)
     r = client.get("/admin/strategies")
     assert "/admin/strategies/set-size/MGD" in r.text          # inline editor present
+
+
+# ---------- risk controls ----------
+
+def test_risk_post_sets_cap_and_kill_switch(client):
+    from app.db import session_scope
+    from app.risk import get_risk_settings
+    r = client.post("/admin/risk", data={
+        "secret": SECRET, "per_order_max_notional": "750", "kill_switch": "on",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    with session_scope() as db:
+        rs = get_risk_settings(db)
+        assert rs.per_order_max_notional == pytest.approx(750.0) and rs.kill_switch is True
+    # blank cap -> off (0); the kill-switch checkbox absent -> off
+    client.post("/admin/risk", data={"secret": SECRET, "per_order_max_notional": ""},
+                follow_redirects=False)
+    with session_scope() as db:
+        rs = get_risk_settings(db)
+        assert rs.per_order_max_notional == 0.0 and rs.kill_switch is False
+
+
+def test_risk_post_requires_secret(client):
+    r = client.post("/admin/risk", data={"per_order_max_notional": "750"},
+                    follow_redirects=False)
+    assert r.status_code == 401
+
+
+def test_strategies_page_shows_risk_form(client):
+    r = client.get("/admin/strategies")
+    assert r.status_code == 200
+    assert 'name="per_order_max_notional"' in r.text and 'name="kill_switch"' in r.text
+    assert "Risk controls" in r.text
+
+
+def test_save_warns_when_position_size_out_of_range(client, stub_exchange):
+    """Configuring position_size surfaces a config-time warning when it's outside the
+    placeable range: above the per-order cap (orders rejected) or below the venue minimum
+    (orders won't fill)."""
+    from app.db import session_scope
+    from app.risk import update_risk_settings
+    with session_scope() as db:
+        update_risk_settings(db, per_order_max_notional=500.0)
+    # above the per-order cap -> warn
+    r = client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "BIG", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "1000"}, follow_redirects=False)
+    assert r.status_code == 303 and "warn=" in r.headers["location"]
+    assert "cap" in r.headers["location"]
+    # below the venue minimum -> warn (stub min for the resolved symbol)
+    stub_exchange.min_notionals["BTCUSDT"] = 50.0
+    r = client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "TINY", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "10"}, follow_redirects=False)
+    assert r.status_code == 303 and "minimum" in r.headers["location"]

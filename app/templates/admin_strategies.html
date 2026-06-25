@@ -15,6 +15,42 @@
     <span style="color:#facc15;">webhook secret</span>.
   </div>
 
+  {% if warn %}
+  <div class="card" style="border-color:#facc15;background:#2d2308;">
+    <b class="warn">⚠ Heads up:</b> {{ warn }}
+  </div>
+  {% endif %}
+
+  <h2>Risk controls</h2>
+  <div class="card">
+    {% if risk.kill_switch %}
+    <div style="margin-bottom:10px;"><span class="pill s-dead">KILL-SWITCH ON</span>
+      <span class="muted"> — all new orders are being rejected.</span></div>
+    {% endif %}
+    <form method="POST" action="/admin/risk" class="form-grid">
+      <div>
+        <label>Per-order max notional (USDT)</label>
+        <input type="text" name="per_order_max_notional" inputmode="decimal"
+               value="{{ '%g'|format(risk.per_order_max_notional) }}" placeholder="500">
+        <div class="muted" style="font-size:11px;">Rejects any single OPEN / alert-driven
+          order above this (0 = off). Max open <i>per strategy</i> is its position_size;
+          total open ≈ Σ position_size = <b>${{ '%g'|format(total_position_size) }}</b>.</div>
+      </div>
+      <div>
+        <label>Global kill-switch</label>
+        <div class="venue-row">
+          <input type="checkbox" name="kill_switch" {% if risk.kill_switch %}checked{% endif %}>
+          <span>Halt ALL new orders (emergency stop)</span>
+        </div>
+      </div>
+      <div class="secret-row" style="grid-column:1 / -1;">
+        <label>Webhook secret (required)</label>
+        <input type="password" name="secret" required autocomplete="off">
+      </div>
+      <div style="grid-column:1 / -1;"><button type="submit">Save risk controls</button></div>
+    </form>
+  </div>
+
   <h2>Add or update a strategy</h2>
   <div class="card">
     <form method="POST" action="/admin/strategies" id="strategy-form">

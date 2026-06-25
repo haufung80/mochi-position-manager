@@ -39,7 +39,16 @@ def _venue(route, exchange="bybit"):
     return next(v for v in route.venues if v.exchange == exchange)
 
 
+def _set_risk(*, per_order_max_notional=None, kill_switch=None):
+    """Set the global risk gate for a decide test."""
+    from app.risk import update_risk_settings
+    with session_scope() as db:
+        update_risk_settings(db, per_order_max_notional=per_order_max_notional,
+                             kill_switch=kill_switch)
+
+
 def test_decide_sar_is_alert_driven(strategies_yaml, stub_exchange):
+    _set_risk(per_order_max_notional=0.0)               # isolate from the risk gate
     route = _route(strategies_yaml, "TEST_SAR")
     with session_scope() as db:
         s = portfolio.decide(db, route, _venue(route), "buy", alert_quantity=0.05)
@@ -48,6 +57,7 @@ def test_decide_sar_is_alert_driven(strategies_yaml, stub_exchange):
 
 
 def test_decide_flat_managed_opens_sized(strategies_yaml, stub_exchange):
+    _set_risk(per_order_max_notional=0.0)               # isolate from the risk gate
     route = _route(strategies_yaml, "TEST_MANAGED")     # position_size 1000, XRP
     v = _venue(route)
     stub_exchange.prices[v.symbol] = 0.5                 # XRP @ $0.50
@@ -184,3 +194,68 @@ def test_decide_managed_below_min_notional_rejected(stub_exchange):
         s = portfolio.decide(db, route, v, "buy", alert_quantity=None)
     assert s.decision is Decision.REJECT
     assert "minimum" in s.reason
+
+
+# ---------- pre-trade risk gate (RiskSettings) ----------
+
+def test_risk_settings_defaults_and_update():
+    """A fresh deploy's singleton defaults to the $500 per-order cap + kill-switch off
+    (the MODEL default; the test fixture zeroes the live row), and update patches it."""
+    from app.models import RiskSettings
+    from app.risk import get_risk_settings, update_risk_settings
+    assert RiskSettings.__table__.c.per_order_max_notional.default.arg == pytest.approx(500.0)
+    assert RiskSettings.__table__.c.kill_switch.default.arg is False
+    with session_scope() as db:
+        update_risk_settings(db, per_order_max_notional=250.0, kill_switch=True)
+    with session_scope() as db:
+        rs = get_risk_settings(db)
+        assert rs.per_order_max_notional == pytest.approx(250.0) and rs.kill_switch is True
+
+
+def test_decide_kill_switch_rejects_all(strategies_yaml, stub_exchange):
+    _set_risk(kill_switch=True)
+    route = _route(strategies_yaml, "TEST_MANAGED")
+    v = _venue(route)
+    stub_exchange.prices[v.symbol] = 0.5
+    with session_scope() as db:
+        s = portfolio.decide(db, route, v, "buy", alert_quantity=None)
+    assert s.decision is Decision.REJECT and "kill-switch" in s.reason.lower()
+
+
+def test_decide_per_order_cap_rejects_oversized_managed_open(strategies_yaml, stub_exchange):
+    route = _route(strategies_yaml, "TEST_MANAGED")     # position_size 1000
+    v = _venue(route)
+    stub_exchange.prices[v.symbol] = 0.5                 # 1000/0.5 -> 2000 qty = $1000 notional
+    stub_exchange.step_sizes[v.symbol] = 0.1
+    _set_risk(per_order_max_notional=500.0)
+    with session_scope() as db:
+        s = portfolio.decide(db, route, v, "buy", alert_quantity=None)
+    assert s.decision is Decision.REJECT and "per-order cap" in s.reason
+    _set_risk(per_order_max_notional=2000.0)             # raise the cap -> now opens
+    with session_scope() as db:
+        s = portfolio.decide(db, route, v, "buy", alert_quantity=None)
+    assert s.decision is Decision.OPEN and s.qty == pytest.approx(2000.0)
+
+
+def test_decide_per_order_cap_rejects_oversized_sar(strategies_yaml, stub_exchange):
+    route = _route(strategies_yaml, "TEST_SAR")
+    v = _venue(route)
+    stub_exchange.prices[v.symbol] = 50000.0            # 0.05 * 50000 = $2500 > $500
+    _set_risk(per_order_max_notional=500.0)
+    with session_scope() as db:
+        s = portfolio.decide(db, route, v, "buy", alert_quantity=0.05)
+    assert s.decision is Decision.REJECT and "per-order cap" in s.reason
+
+
+def test_decide_close_is_exempt_from_per_order_cap(strategies_yaml, stub_exchange):
+    """A CLOSE (opposite signal) is NEVER blocked by the cap — you must be able to exit a
+    position larger than the per-order cap."""
+    route = _route(strategies_yaml, "TEST_MANAGED")
+    v = _venue(route)
+    stub_exchange.prices[v.symbol] = 0.5
+    with session_scope() as db:                          # seed a long 2000 ($1000) position
+        _apply_fill_to_position(db, route.strategy_id, v.exchange, v.symbol, "buy", 2000.0, 0.5)
+    _set_risk(per_order_max_notional=500.0)
+    with session_scope() as db:                          # opposite signal -> close to flat
+        s = portfolio.decide(db, route, v, "sell", alert_quantity=None)
+    assert s.decision is Decision.CLOSE and s.qty == pytest.approx(2000.0)

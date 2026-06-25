@@ -11,6 +11,7 @@ HTTP shape, validation, and router-reload triggering.
 from __future__ import annotations
 import logging
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -18,7 +19,10 @@ from fastapi.templating import Jinja2Templates
 
 from .. import strategy_store
 from ..config import get_settings
+from ..db import session_scope
+from ..exchanges.registry import get_registry
 from ..exchanges.symbols import SUPPORTED_BASE_ASSETS, SUPPORTED_EXCHANGES
+from ..risk import get_risk_settings, update_risk_settings
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -81,18 +85,61 @@ def _validate_position_size(raw: str) -> float | None:
     return v
 
 
+def _position_size_warnings(request: Request, sid: str) -> list[str]:
+    """Config-time notice when a strategy's position_size is outside the placeable range:
+    ABOVE the per-order cap (orders will be REJECTED) or BELOW an enabled venue's exchange
+    minimum (orders won't fill). Best-effort — a live min/price hiccup never blocks the
+    save (the order path also rejects these with a Telegram alert at fire time)."""
+    route = request.app.state.strategy_router.get(sid)
+    if route is None or route.position_size is None:
+        return []
+    size = route.position_size
+    warns: list[str] = []
+    with session_scope() as db:
+        cap = get_risk_settings(db).per_order_max_notional or 0.0
+    if cap > 0 and size > cap:
+        warns.append(f"position_size ${size:g} exceeds the per-order cap ${cap:g} — "
+                     f"orders for {sid} will be REJECTED")
+    for v in route.enabled_venues():
+        try:
+            mn = get_registry().get(v.exchange).get_min_notional(v.symbol)
+        except Exception:                       # noqa: BLE001 — best-effort notice only
+            continue
+        if mn and size < mn:
+            warns.append(f"position_size ${size:g} is below {v.exchange}'s minimum "
+                         f"${mn:g} for {v.symbol} — orders won't fill")
+    return warns
+
+
+def _redirect_strategies(warns: list[str] | None = None) -> RedirectResponse:
+    url = "/admin/strategies"
+    if warns:
+        url += "?" + urlencode({"warn": " · ".join(warns)})
+    return RedirectResponse(url=url, status_code=303)
+
+
 # ---------- endpoints ----------
 
 @router.get("/strategies", response_class=HTMLResponse)
 def strategies_page(request: Request):
+    routes = request.app.state.strategy_router.all()
+    with session_scope() as db:                          # copy out — row detaches on close
+        rs = get_risk_settings(db)
+        risk = {"per_order_max_notional": rs.per_order_max_notional,
+                "kill_switch": rs.kill_switch}
     return templates.TemplateResponse(
         "admin_strategies.html",
         {
             "request": request,
-            "routes": request.app.state.strategy_router.all(),
+            "routes": routes,
             "supported_base_assets": SUPPORTED_BASE_ASSETS,
             "supported_exchanges": SUPPORTED_EXCHANGES,
             "strategies_file": get_settings().strategies_file,
+            "risk": risk,
+            # Total OPEN-notional cap = Σ of the per-strategy position_size (max open per
+            # strategy), per the config model. Informational.
+            "total_position_size": sum(r.position_size or 0.0 for r in routes),
+            "warn": request.query_params.get("warn", ""),
         },
     )
 
@@ -121,7 +168,7 @@ async def save_strategy(request: Request):
     _reload_router(request)
     log.info("admin: %s strategy %s base=%s venues=%s sar=%s size=%s",
              "updated" if is_update else "created", sid, base, venues, sar, position_size)
-    return RedirectResponse(url="/admin/strategies", status_code=303)
+    return _redirect_strategies(_position_size_warnings(request, sid))
 
 
 @router.post("/strategies/delete/{sid}", response_class=HTMLResponse)
@@ -172,6 +219,27 @@ def set_position_size(sid: str, request: Request, secret: str = Form(...),
         raise HTTPException(404, f"strategy_id not found: {sid}")
     _reload_router(request)
     log.info("admin: set position_size %s -> %s", sid, size)
+    return _redirect_strategies(_position_size_warnings(request, sid))
+
+
+@router.post("/risk", response_class=HTMLResponse)
+async def save_risk(request: Request):
+    """Set the global pre-trade risk controls — per-order max notional (USDT; blank/0 =
+    off) and the kill-switch (halts ALL new orders). Same WEBHOOK_SECRET auth as the
+    strategy writes."""
+    form = await request.form()
+    _require_secret(str(form.get("secret", "")))
+    raw = str(form.get("per_order_max_notional", "")).strip()
+    try:
+        cap = float(raw) if raw else 0.0
+    except ValueError:
+        raise HTTPException(400, "per_order_max_notional must be a number (USDT) or blank")
+    if cap < 0:
+        raise HTTPException(400, "per_order_max_notional must be >= 0 (0 disables the cap)")
+    kill = _form_bool(form, "kill_switch")
+    with session_scope() as db:
+        update_risk_settings(db, per_order_max_notional=cap, kill_switch=kill)
+    log.warning("admin: risk controls updated — per_order_max=$%.2f kill_switch=%s", cap, kill)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 

@@ -356,3 +356,18 @@ class AppMeta(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+class RiskSettings(Base):
+    """Global pre-trade risk controls — a SINGLETON row (id=1), configured from the admin
+    page and read by `portfolio.decide` on every directional order (and the arb open).
+    Kept in the DB (not strategies.yaml) so `decide` reads it with the session it already
+    holds. `per_order_max_notional` caps any single OPEN/alert order's USDT notional (0 =
+    off); `kill_switch` halts ALL new orders when on."""
+    __tablename__ = "risk_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)          # always 1 (singleton)
+    per_order_max_notional: Mapped[float] = mapped_column(Float, default=500.0, nullable=False)
+    kill_switch: Mapped[bool] = mapped_column(default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)

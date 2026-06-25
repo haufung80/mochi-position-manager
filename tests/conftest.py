@@ -28,6 +28,16 @@ def _clean_db():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _risk_off(_clean_db):
+    """Default the pre-trade per-order cap OFF in tests (so integration tests aren't
+    coupled to it). The risk-gate tests set the cap / kill-switch explicitly."""
+    from app.db import session_scope
+    from app.risk import update_risk_settings
+    with session_scope() as db:
+        update_risk_settings(db, per_order_max_notional=0.0)
+
+
 @pytest.fixture
 def strategies_yaml(tmp_path):
     """Test strategies covering both execution modes.
