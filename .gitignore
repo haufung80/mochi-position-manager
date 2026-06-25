@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 .env
+caddy.env          # dashboard basic-auth hash (DASH_PASSWORD_HASH) — box-only secret
 data/
 *.db
 *.db-journal

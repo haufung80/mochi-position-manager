@@ -175,6 +175,30 @@ docker compose -f docker-compose.prod.yml up -d --build
 Secrets are read from `.env` on the box (`env_file: .env` in the compose file) — they never enter the
 image or git.
 
+### Dashboard login (basic-auth)
+
+The human-facing pages (`/`, `/performance`, the `/funding-arb` report, `/admin`, `/docs`) are gated by
+HTTP **basic-auth at the Caddy layer** — otherwise anyone who finds the public URL can read your live
+positions, PnL, and signals (the hostname is discoverable via Certificate Transparency logs). The
+machine endpoints keep their own secret-based auth and are **excluded** from the login: `/webhook/*`
+(TradingView), `/funding-arb/{open,close,positions...}` (the signal app's `X-Arb-Secret`), and `/health`
+(liveness — the CI deploy + uptime checks hit it).
+
+The bcrypt hash lives in `caddy.env` **on the box only** (gitignored — never committed to this public
+repo); Caddy reads it as `DASH_PASSWORD_HASH`. Login user is `mochi` (set in `Caddyfile`).
+
+```bash
+# On the box, set / rotate the dashboard password:
+cd ~/mochi
+printf 'DASH_PASSWORD_HASH=%s\n' \
+  "$(docker exec mochi-caddy caddy hash-password --plaintext 'your-password')" > caddy.env
+chmod 600 caddy.env
+docker compose -f docker-compose.prod.yml up -d caddy        # recreate to pick it up
+```
+
+Caddy also redacts `X-Arb-Secret` / `Authorization` / `Cookie` from its access logs (it logs request
+headers on errors, which was leaking the arb secret in clear).
+
 ### Deploying code changes
 
 **CI/CD (recommended):** `.github/workflows/ci-cd.yml` runs the test suite + coverage gate

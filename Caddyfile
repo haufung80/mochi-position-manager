@@ -1,9 +1,38 @@
-# Replace example.com with YOUR domain.
+# Replace the hostname with YOUR domain.
 # Its DNS A record must point to this server's static IP, and ports 80 + 443
 # must be open, before Caddy can obtain the Let's Encrypt certificate.
 #
 # Caddy auto-provisions + auto-renews HTTPS for this hostname and reverse-proxies
 # to the app container (service name `app`, port 8000) over the compose network.
 mochi-position-manager.duckdns.org {
-    reverse_proxy app:8000
+	# --- Dashboard login (HTTP basic-auth) ---
+	# Human-facing pages (dashboards, /performance, /funding-arb report, /admin,
+	# /docs) require a browser login. Machine callers authenticate with their OWN
+	# secrets and CANNOT send a browser login, so they're excluded:
+	#   /webhook/*                              TradingView (webhook secret in body)
+	#   /funding-arb/{open,close,positions...}  the signal app (X-Arb-Secret header)
+	#   /health                                 unauthenticated liveness (CI deploy +
+	#                                           uptime monitor + must stay open)
+	# The bcrypt hash is read from the environment (DASH_PASSWORD_HASH, supplied via
+	# caddy.env on the box) so no credential is committed to this public repo.
+	@humans not path /webhook/* /funding-arb/open /funding-arb/close /funding-arb/positions* /health
+	basic_auth @humans {
+		mochi {env.DASH_PASSWORD_HASH}
+	}
+
+	# Access logging WITH sensitive request headers redacted. Caddy logs request
+	# headers on errors (a 502 during a deploy was dumping the signal app's
+	# X-Arb-Secret in clear), so strip the secret-bearing headers from every log line.
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Arb-Secret delete
+				request>headers>Authorization delete
+				request>headers>Cookie delete
+			}
+		}
+	}
+
+	reverse_proxy app:8000
 }

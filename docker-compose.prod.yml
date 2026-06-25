@@ -44,6 +44,12 @@ services:
     image: caddy:2-alpine
     container_name: mochi-caddy
     restart: always
+    # ONLY the dashboard basic-auth hash (DASH_PASSWORD_HASH) — a dedicated file, NOT
+    # the app's .env, so the internet-facing proxy never holds the exchange API keys.
+    # Optional: a directional-only / pre-auth deploy still boots without the file.
+    env_file:
+      - path: caddy.env
+        required: false
     ports:
       - "80:80"                    # needed for Let's Encrypt HTTP-01 challenge
       - "443:443"
