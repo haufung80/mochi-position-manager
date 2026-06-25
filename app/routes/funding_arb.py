@@ -40,6 +40,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .. import arb_executor
 from ..arb_pnl import LegPnLInput, compute_arb_pnl
+from ..arb_funding import leg_funding
 from ..config import Settings, get_settings
 from ..db import session_scope
 from ..exchanges.registry import get_registry
@@ -147,34 +148,9 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
-def _leg_funding(db, arb: ArbPosition, leg: ArbLeg) -> float:
-    """Σ ``ArbFundingEvent.amount`` attributed to one PERP leg, over the arb's
-    window ``[opened_at, closed_at|now]`` and the leg's ``(exchange, account,
-    symbol)``. Spot legs return 0 (funding accrues only on the perp).
-
-    The A.5 open-time symbol exclusivity (one ``(exchange, account, symbol)`` held
-    by at most one non-closed arb) is what makes this single-arb attribution exact:
-    two concurrent BTC arbs can't both claim one account-wide settlement, because
-    they can't both hold the BTC perp symbol on the same account at once.
-    """
-    if leg.product != "perp":
-        return 0.0
-    lo = arb.opened_at
-    hi = arb.closed_at or datetime.now(timezone.utc)
-    q = (
-        db.query(func.coalesce(func.sum(ArbFundingEvent.amount), 0.0))
-        .filter(ArbFundingEvent.exchange == leg.exchange,
-                ArbFundingEvent.account == leg.account,
-                ArbFundingEvent.symbol == leg.symbol)
-    )
-    # Bound the window to the arb's lifetime so a settlement from a PRIOR closed
-    # arb on the same (re-used) symbol can't leak into this one. `opened_at` is
-    # None only before the open finalizes (no funding yet), so an unbounded `lo`
-    # is harmless then.
-    if lo is not None:
-        q = q.filter(ArbFundingEvent.funding_time >= lo)
-    q = q.filter(ArbFundingEvent.funding_time <= hi)
-    return float(q.scalar() or 0.0)
+# Per-leg funding attribution now lives in app/arb_funding.py so the close-alert net
+# (arb_executor) computes funding the SAME way as this report — they can't drift.
+_leg_funding = leg_funding
 
 
 def _perp_mark(leg: ArbLeg) -> float:

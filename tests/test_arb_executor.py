@@ -18,7 +18,8 @@ import pytest
 from app import arb_executor
 from app.db import session_scope
 from app.models import (
-    Alert, ArbLeg, ArbOrder, ArbPosition, Order, Position, StrategyPosition,
+    Alert, ArbFundingEvent, ArbLeg, ArbOrder, ArbPosition, Order, Position,
+    StrategyPosition,
 )
 from app.schemas import OrderResult
 
@@ -648,8 +649,10 @@ class _RecNotifier:
     def arb_error(self, arb_id, asset, reason, skew=None):
         self.calls.append(("arb_error", arb_id, asset, reason, skew))
 
-    def arb_closed(self, arb_id, asset, net=None):
-        self.calls.append(("arb_closed", arb_id, asset, net))
+    def arb_closed(self, arb_id, asset, *, funding=None, commission=None,
+                   realized=None, net=None):
+        self.calls.append(("arb_closed", arb_id, asset, funding, commission,
+                           realized, net))
 
     # the existing per-leg failure alerts the executor still fires — accept &
     # record them so this notifier is a drop-in for the whole arb flow.
@@ -761,26 +764,33 @@ def test_close_completion_fires_arb_closed_alert(arb_registry, rec_notifier):
     assert closed[1] == arb_id and closed[2] == "BTC"
 
 
-def test_close_alert_reports_realized_net_when_available(arb_registry, rec_notifier):
-    """When legs carry funding/commission, the close alert surfaces the readily-
-    available net = Σ funding − Σ commission."""
+def test_close_alert_reports_breakdown_and_net(arb_registry, rec_notifier):
+    """The close alert lists the breakdown + net computed the SAME way as the dashboard:
+    funding from ArbFundingEvent (NOT the vestigial ArbLeg.funding column) − fees +
+    realized. Guards the discrepancy where the alert showed only funding-from-leg-col −
+    fees while the dashboard added real funding + realized."""
     arb_registry.state.spot_balances["BTC"] = 0.02
     arb_id = _mk_arb(asset="BTC", status="closing")
     with session_scope() as db:
-        # perp leg earned funding, both legs paid a commission.
         db.add(ArbLeg(arb_id=arb_id, exchange="hyperliquid", account="arb",
                       product="spot", symbol="UBTC/USDC", side="buy",
                       target_qty=0.02, filled_qty=0.02, commission=1.0,
                       status="success"))
         db.add(ArbLeg(arb_id=arb_id, exchange="hyperliquid", account="arb",
                       product="perp", symbol="BTC", side="sell",
-                      target_qty=0.02, filled_qty=0.02, funding=5.0,
-                      commission=1.0, status="success"))
+                      target_qty=0.02, filled_qty=0.02, commission=1.0,
+                      status="success"))
+        # Funding lives in ArbFundingEvent (the leg.funding column is vestigial/unwritten).
+        db.add(ArbFundingEvent(exchange="hyperliquid", account="arb", symbol="BTC",
+                               funding_time=_now(), amount=5.0))
 
     arb_executor._run_close(arb_id)
 
     closed = next(c for c in rec_notifier.calls if c[0] == "arb_closed")
-    assert closed[3] == pytest.approx(5.0 - 2.0)       # funding 5 − fees (1+1)
+    _, _, _, funding, commission, realized, net = closed
+    assert funding == pytest.approx(5.0)               # sourced from ArbFundingEvent, not leg col
+    assert commission == pytest.approx(2.0)            # fees: 1 + 1
+    assert net == pytest.approx(funding - commission + realized)  # net = funding − fees + realized
 
 
 def test_close_failure_fires_urgent_arb_error_not_closed(arb_registry, rec_notifier):

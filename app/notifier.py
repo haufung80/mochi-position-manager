@@ -162,17 +162,25 @@ class TelegramNotifier:
             urgent=True,
         )
 
-    def arb_closed(self, arb_id: int, asset: str,
-                   net: float | None = None) -> None:
-        """The pair finished closing. `net` (funding − fees) is shown when it is
-        readily available, otherwise just the closed notice."""
-        net_line = (
-            f"\n• Realized (funding − fees): ${net:,.2f}" if net is not None else ""
-        )
+    def arb_closed(self, arb_id: int, asset: str, *,
+                   funding: float | None = None, commission: float | None = None,
+                   realized: float | None = None, net: float | None = None) -> None:
+        """The pair finished closing. When the P&L is available, lists the full
+        breakdown — funding, fees, realized directional — and the net (the SAME net the
+        /funding-arb dashboard shows: funding − fees + realized); otherwise a bare close
+        notice."""
+        breakdown = ""
+        if net is not None:
+            breakdown = (
+                f"\n• Funding: ${funding:,.2f}"
+                f"\n• Fees: −${commission:,.2f}"
+                f"\n• Realized (directional): ${realized:,.2f}"
+                f"\n• *Net* (funding − fees + realized): ${net:,.2f}"
+            )
         self.send(
             "🅾️ *Arb closed*\n"
             f"• Asset: *{asset}*  ·  Arb: `#{arb_id}`"
-            f"{net_line}",
+            f"{breakdown}",
         )
 
 

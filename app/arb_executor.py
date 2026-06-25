@@ -43,6 +43,8 @@ from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 
 from sqlalchemy.orm import Session
 
+from .arb_funding import leg_funding       # shared funding attribution (same as the report)
+from .arb_pnl import ArbPnLResult, LegPnLInput, compute_arb_pnl  # shared net formula (same as report)
 from .config import get_settings
 from .db import session_scope
 from .exchanges.registry import get_registry
@@ -176,15 +178,28 @@ def _neutrality_skew(legs: list[ArbLeg]) -> float | None:
     return signed
 
 
-def _realized_net(legs: list[ArbLeg]) -> float | None:
-    """Readily-available realized net for a close alert = Σ leg funding − Σ leg
-    commissions (both already recorded on the legs). None when no leg carries
-    either figure (nothing meaningful to show -> 'just closed')."""
-    if not any((lg.funding or lg.commission) for lg in legs):
+def _close_breakdown(db, arb: ArbPosition, legs: list[ArbLeg],
+                     realized_total: float) -> ArbPnLResult | None:
+    """The closed pair's full P&L breakdown, computed the SAME way as the /funding-arb
+    report (shared ``leg_funding`` + ``compute_arb_pnl``) so the alert and the dashboard
+    can't disagree: ``net = funding (ArbFundingEvent) − fees + realized``. Legs are flat
+    at close, so ``mark = avg_fill`` makes the unrealized MTM 0 — the directional P&L is
+    the already-booked ``realized``. Best-effort: None on any error (the close is already
+    finalized; the alert must never undo it)."""
+    try:
+        inputs = [
+            LegPnLInput(
+                exchange=lg.exchange, account=lg.account, product=lg.product,
+                symbol=lg.symbol, side=lg.side, filled=lg.filled_qty,
+                avg_fill=lg.avg_fill, mark=lg.avg_fill,       # flat -> 0 unrealized MTM
+                funding=leg_funding(db, arb, lg), commission=lg.commission or 0.0,
+            )
+            for lg in legs
+        ]
+        return compute_arb_pnl(inputs, realized=realized_total)
+    except Exception:
+        log.exception("arb_executor: close PnL breakdown failed (alert shows bare close)")
         return None
-    funding = sum(lg.funding or 0.0 for lg in legs)
-    commission = sum(lg.commission or 0.0 for lg in legs)
-    return funding - commission
 
 
 def _arb_opened_alert(arb_id: int, asset: str, qty: float, legs: str) -> None:
@@ -202,9 +217,15 @@ def _arb_error_alert(arb_id: int, asset: str, reason: str,
         log.warning("arb_executor: arb_error alert failed: %s", e)
 
 
-def _arb_closed_alert(arb_id: int, asset: str, net: float | None) -> None:
+def _arb_closed_alert(arb_id: int, asset: str,
+                      pnl: ArbPnLResult | None, realized: float) -> None:
     try:
-        get_notifier().arb_closed(arb_id, asset, net)
+        if pnl is None:
+            get_notifier().arb_closed(arb_id, asset)
+        else:
+            get_notifier().arb_closed(
+                arb_id, asset, funding=pnl.funding_total,
+                commission=pnl.commission_total, realized=realized, net=pnl.net)
     except Exception as e:
         log.warning("arb_executor: arb_closed alert failed: %s", e)
 
@@ -605,13 +626,14 @@ def _run_close(arb_id: int) -> None:
             arb.status = "closed"
             arb.closed_at = _utcnow()
             arb.error_message = ""
-            arb.realized_pnl = sum(realized)     # realized directional P&L booked at close
+            realized_total = sum(realized)       # realized directional P&L booked at close
+            arb.realized_pnl = realized_total
             asset = arb.asset
-            # Readily-available realized net = Σ leg funding − Σ leg commissions
-            # (already recorded on the legs); None if no leg carries either.
+            # Full breakdown for the alert, computed exactly like the /funding-arb report
+            # (shared leg_funding + compute_arb_pnl): net = funding − fees + realized.
             legs = db.query(ArbLeg).filter(ArbLeg.arb_id == arb_id).all()
-            net = _realized_net(legs)
-            _arb_closed_alert(arb_id, asset, net)
+            pnl = _close_breakdown(db, arb, legs, realized_total)
+            _arb_closed_alert(arb_id, asset, pnl, realized_total)
         arb.updated_at = _utcnow()
 
 
