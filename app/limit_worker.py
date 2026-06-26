@@ -13,15 +13,46 @@ in the webhook fan-out, not here. See docs/limit-entry-plan.md.
 from __future__ import annotations
 import asyncio
 import logging
+from datetime import timedelta, timezone
 
+from .config import get_settings
 from .db import session_scope
 from .exchanges.registry import get_registry
 from .executor import book_limit_fill_delta, _utcnow
 from .models import Alert, Order
+from .notifier import get_notifier
 from .schemas import (ORDER_STATE_FILLED, ORDER_STATE_CANCELLED, ORDER_STATE_REJECTED,
                       ORDER_STATE_UNKNOWN, FEE_SOURCE_EXCHANGE)
 
 log = logging.getLogger(__name__)
+
+
+def _as_utc(dt):
+    """SQLite returns naive datetimes even for tz-aware columns; coerce to UTC so the
+    staleness arithmetic never mixes naive + aware."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _maybe_stale_alert(order: Order, alert: Alert) -> None:
+    """Re-ping Telegram every `limit_stale_alert_hours` while an entry rests unfilled
+    (notify-only — NEVER cancels, D2). Stamps `last_stale_alert_at` so it fires once per
+    window, not every poll."""
+    hours = get_settings().limit_stale_alert_hours
+    if not hours:
+        return
+    since = _as_utc(order.last_stale_alert_at or order.created_at)
+    now = _utcnow()
+    if since is None or now - since < timedelta(hours=hours):
+        return
+    age = (now - (_as_utc(order.created_at) or now)).total_seconds() / 3600.0
+    get_notifier().limit_order_stale(
+        alert.strategy_id, order.exchange, order.symbol, order.side,
+        order.limit_price or 0.0, order.qty_base, order.qty_base_filled or 0.0, age)
+    order.last_stale_alert_at = now
+    log.info("limit-entry: staleness ping order=%s %s/%s (~%.0fh resting)",
+             order.id, alert.strategy_id, order.symbol, age)
 
 
 def _poll_working_orders() -> None:
@@ -64,7 +95,20 @@ def _poll_one(db, order: Order) -> None:
         order.fee_source = FEE_SOURCE_EXCHANGE
     elif st.state in (ORDER_STATE_CANCELLED, ORDER_STATE_REJECTED):
         order.status = "cancelled"                       # any partial already booked above
+    else:
+        _maybe_stale_alert(order, alert)                 # still resting -> notify-only staleness (D2)
     order.updated_at = _utcnow()
+
+
+def reconcile_on_boot() -> None:
+    """One-shot reconcile of persisted resting orders on startup — books any fill/cancel
+    that landed while the app was down (a deploy restart) before the normal poll cadence.
+    The orders are DB-persisted, so this fully covers the routine auto-deploy restart."""
+    with session_scope() as db:
+        n = db.query(Order).filter(Order.status == "working").count()
+    if n:
+        log.info("limit-entry boot reconcile: re-checking %d resting order(s)", n)
+    _poll_working_orders()
 
 
 async def limit_loop(router, *, poll_interval_sec: float = 4.0,

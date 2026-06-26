@@ -16,7 +16,7 @@ from .routes.admin import router as admin_router
 from .routes.funding_arb import router as funding_arb_router
 from .retry_worker import retry_loop
 from .funding_worker import funding_loop
-from .limit_worker import limit_loop
+from .limit_worker import limit_loop, reconcile_on_boot
 
 
 def _configure_logging(level: str) -> None:
@@ -46,6 +46,14 @@ async def lifespan(app: FastAPI):
         app.state.strategy_router = StrategyRouter(strategies_path)
         log.info("Loaded %d strategies from %s",
                  len(app.state.strategy_router.all()), strategies_path)
+
+    # Boot-recovery: reconcile any resting limit orders persisted before a restart
+    # (a deploy) BEFORE the poller's normal cadence, so fills/cancels that landed while
+    # down are booked immediately. Never fatal to startup.
+    try:
+        await asyncio.to_thread(reconcile_on_boot)
+    except Exception:
+        log.exception("limit-entry boot reconcile failed (continuing)")
 
     stop_event = asyncio.Event()
     worker_task = asyncio.create_task(

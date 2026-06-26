@@ -59,6 +59,9 @@ class Order(Base):
     limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     qty_base_filled: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     client_order_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    # Last time the notify-only staleness alert fired for this resting order, so it
+    # re-pings every N hours rather than every poll (limit_worker; P3 / D2).
+    last_stale_alert_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- execution quality (live-vs-backtest monitoring) ---
     # signal_price: copied from the alert ({{close}}); fill_price: actual VWAP

@@ -142,6 +142,7 @@ def test_orders_table_schema_unchanged():
         "exchange_order_id", "error_message", "next_retry_at", "created_at", "updated_at",
         # directional limit-entry columns (executor / limit_worker)
         "order_type", "limit_price", "qty_base_filled", "client_order_id",
+        "last_stale_alert_at",
     }
     assert cols == expected
 

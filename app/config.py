@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # the box while an arb is open). Set a fixed value to pin a stable denominator.
     arb_capital_base: float = 0.0
 
+    # Limit-entry: re-ping Telegram every N hours while an entry limit rests unfilled
+    # (notify-only, NEVER auto-cancels — docs/limit-entry-plan.md D2). 0 = off.
+    limit_stale_alert_hours: int = 24
+
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_bot_token and self.telegram_chat_id)

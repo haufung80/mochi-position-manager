@@ -57,6 +57,7 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("limit_price", "FLOAT"),
         ("qty_base_filled", "FLOAT NOT NULL DEFAULT 0.0"),
         ("client_order_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+        ("last_stale_alert_at", "DATETIME"),
     ],
     "strategy_positions": [
         ("avg_entry_price", "FLOAT NOT NULL DEFAULT 0.0"),

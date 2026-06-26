@@ -244,14 +244,17 @@ plus knobs to script a fill trajectory (unfilled → partial → full, or cancel
 
 ## 15. Phased rollout (each phase shippable + tested)
 
-- **P0** — adapters: `limit_order`/`cancel_order`/`order_status` on both venues + fakes + tests.
-- **P1** — model columns + statuses + migration; limit-entry placement; the fill poller (reusing
+- **P0 ✅ DONE** — adapters: `limit_order`/`cancel_order`/`order_status` on both venues + fakes + tests.
+- **P1 ✅ DONE** — model columns + statuses + migration; limit-entry placement; the fill poller (reusing
   `_fill_math`); marketable-immediate. Managed OPEN only.
-- **P2** — cancel-on-close in the fan-out + partial-then-close (D1). *(This is the desync fix.)*
-- **P3** — boot-recovery reconcile + client-order-id crash safety + notify-only staleness alert (D2).
-- **P4** — reporting (`/orders` working/cancelled) + admin UI toggle + docs.
+- **P2 ✅ DONE** — cancel-on-close in the fan-out + partial-then-close (D1). *(This is the desync fix.)*
+- **P3 ✅ DONE** — boot-recovery reconcile (startup pass) + client-order-id crash-safe handle + the
+  notify-only 24 h staleness alert (D2).
+- **P4 — TODO** — reporting (`/orders` working/cancelled) + admin UI toggle + docs.
 
 Each phase is a separate green PR. P1+P2 deliver the core value; P3 hardens it for the live box.
+**Not yet enabled on any strategy** (`entry` defaults `market`); P4 (the admin toggle + working-order
+visibility) should land before flipping it on live.
 
 ## 16. What this does NOT do
 
@@ -259,3 +262,8 @@ Each phase is a separate green PR. P1+P2 deliver the core value; P3 hardens it f
 - Does not add limit entries to `sar` strategies in P1 (D4; addable later).
 - Does not unstick the *current* SOL position — that still needs the one-off re-fire or
   temporary-disable, independent of this feature.
+- **Boot-recovery (P3) covers DB-persisted resting orders** (the routine deploy case). It does
+  NOT yet reconcile against the venue's open-order *list*, so the narrow window where the app
+  dies *between* the exchange accepting a limit and the DB commit could leave an order resting
+  on the exchange with no DB row. Mitigation today: graceful shutdown + the deterministic client
+  id. Add exchange-open-order reconciliation if this ever proves an issue.

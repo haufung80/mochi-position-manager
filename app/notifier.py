@@ -62,6 +62,21 @@ class TelegramNotifier:
 
     # ---- formatted helpers ----
 
+    def limit_order_stale(self, strategy_id: str, exchange: str, symbol: str, side: str,
+                          limit_price: float, qty_target: float, qty_filled: float,
+                          age_hours: float) -> None:
+        """A resting limit ENTRY has been unfilled past the staleness threshold. Notify
+        ONLY — the order is never auto-cancelled (D2). Re-pinged every N hours by the poller."""
+        fill_note = (f"{qty_filled:g}/{qty_target:g} filled" if qty_filled else "unfilled")
+        self.send(
+            "⏳ *Limit entry still resting*\n"
+            f"• Strategy: `{strategy_id}`\n"
+            f"• Exchange: *{exchange}* / {symbol}\n"
+            f"• {side.upper()} limit @ {limit_price:g} ({fill_note})\n"
+            f"• Resting ~{age_hours:.0f}h, no close yet — NOT auto-cancelled.",
+            urgent=False,
+        )
+
     def order_failed(self, strategy_id: str, exchange: str, symbol: str,
                      side: str, quantity: float, attempts: int, error: str) -> None:
         self.send(

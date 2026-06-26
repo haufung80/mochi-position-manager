@@ -233,3 +233,48 @@ def test_same_direction_while_working_is_ignored(stub_exchange, silent_notifier)
         _dispatch_venue(db, db.get(Alert, aid2), route, _BYBIT, 0.0)
     with session_scope() as db:
         assert db.query(Order).filter_by(order_type="limit").count() == 1
+
+
+# --- P3: staleness alert (notify-only) + boot reconcile ----------------------
+
+from datetime import timedelta              # noqa: E402
+from app.executor import _utcnow            # noqa: E402
+from app.limit_worker import reconcile_on_boot   # noqa: E402
+
+
+def test_staleness_alert_fires_and_repings(stub_exchange, silent_notifier):
+    cloid = _place_working("STALE", "st1")
+    silent_notifier.calls.clear()
+    # age the still-unfilled resting order past the 24h threshold
+    with session_scope() as db:
+        db.query(Order).one().created_at = _utcnow() - timedelta(hours=25)
+    _poll_working_orders()
+    assert any(c[0] == "limit_order_stale" for c in silent_notifier.calls)
+    with session_scope() as db:
+        assert db.query(Order).one().last_stale_alert_at is not None
+    # within the window -> no re-ping
+    silent_notifier.calls.clear()
+    _poll_working_orders()
+    assert not any(c[0] == "limit_order_stale" for c in silent_notifier.calls)
+    # past the window again -> re-pings (recurring, not one-shot)
+    with session_scope() as db:
+        db.query(Order).one().last_stale_alert_at = _utcnow() - timedelta(hours=25)
+    _poll_working_orders()
+    assert any(c[0] == "limit_order_stale" for c in silent_notifier.calls)
+
+
+def test_staleness_not_fired_for_fresh_order(stub_exchange, silent_notifier):
+    _place_working("STALE", "st2")
+    silent_notifier.calls.clear()
+    _poll_working_orders()
+    assert not any(c[0] == "limit_order_stale" for c in silent_notifier.calls)
+
+
+def test_boot_reconcile_books_fill_after_restart(stub_exchange, silent_notifier):
+    """A resting order persisted before a restart is reconciled on boot (its fill booked)."""
+    cloid = _place_working("BOOT", "b1")
+    stub_exchange.limit_orders[cloid].update(filled=2.0, avg=69.8, state="filled")
+    reconcile_on_boot()
+    assert _net() == pytest.approx(2.0)
+    with session_scope() as db:
+        assert db.query(Order).one().status == "success"
