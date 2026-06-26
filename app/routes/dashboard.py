@@ -734,6 +734,8 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
     return [{
         "created_at": o.created_at, "strategy_id": sid, "exchange": o.exchange,
         "symbol": o.symbol, "side": o.side, "qty_base": o.qty_base,
+        "order_type": o.order_type, "limit_price": o.limit_price,
+        "qty_base_filled": o.qty_base_filled,   # resting limit fill progress (limit-entry)
         "fill_price": o.fill_price, "status": o.status, "commission": o.commission,
         "commission_asset": o.commission_asset,
         "fee_source": o.fee_source,            # "unavailable" -> commission is a 0 placeholder

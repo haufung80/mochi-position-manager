@@ -161,13 +161,14 @@ async def save_strategy(request: Request):
 
     sar = _form_bool(form, "sar")
     position_size = _validate_position_size(str(form.get("position_size", "")))
+    entry = "limit" if _form_bool(form, "entry_limit") else "market"
     is_update = strategy_store.upsert_strategy(
         _strategies_path(), sid, base_asset=base, venues=venues, sar=sar,
-        position_size=position_size,
+        position_size=position_size, entry=entry,
     )
     _reload_router(request)
-    log.info("admin: %s strategy %s base=%s venues=%s sar=%s size=%s",
-             "updated" if is_update else "created", sid, base, venues, sar, position_size)
+    log.info("admin: %s strategy %s base=%s venues=%s sar=%s size=%s entry=%s",
+             "updated" if is_update else "created", sid, base, venues, sar, position_size, entry)
     return _redirect_strategies(_position_size_warnings(request, sid))
 
 
@@ -205,6 +206,18 @@ def toggle_sar(sid: str, request: Request, secret: str = Form(...)):
         raise HTTPException(404, f"strategy_id not found: {sid}")
     _reload_router(request)
     log.info("admin: toggled SAR %s -> %s", sid, new_val)
+    return RedirectResponse(url="/admin/strategies", status_code=303)
+
+
+@router.post("/strategies/toggle-entry/{sid}", response_class=HTMLResponse)
+def toggle_entry(sid: str, request: Request, secret: str = Form(...)):
+    """Flip a strategy's entry mode market<->limit (affects managed OPENs only)."""
+    _require_secret(secret)
+    new_val = strategy_store.toggle_entry(_strategies_path(), sid)
+    if new_val is None:
+        raise HTTPException(404, f"strategy_id not found: {sid}")
+    _reload_router(request)
+    log.info("admin: toggled entry %s -> %s", sid, new_val)
     return RedirectResponse(url="/admin/strategies", status_code=303)
 
 

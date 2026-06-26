@@ -48,7 +48,8 @@ table.numeric th.l, table.numeric td.l { text-align: left; }
 .s-pending, .s-paper, .s-opening, .s-closing { background: #0c2a3a; color: #60a5fa; }
 .s-rejected, .s-retrying { background: #3a2a08; color: #facc15; }
 .s-dead, .s-failed, .s-error { background: #4a1414; color: #f87171; }
-.s-closed { background: #2a2e38; color: #9ca3af; }
+.s-working { background: #14304a; color: #7dd3fc; }    /* resting limit (limit-entry) */
+.s-cancelled, .s-closed { background: #2a2e38; color: #9ca3af; }
 .ok { color: #4ade80; }
 .warn { color: #facc15; }
 .err { color: #f87171; }

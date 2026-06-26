@@ -250,11 +250,12 @@ plus knobs to script a fill trajectory (unfilled → partial → full, or cancel
 - **P2 ✅ DONE** — cancel-on-close in the fan-out + partial-then-close (D1). *(This is the desync fix.)*
 - **P3 ✅ DONE** — boot-recovery reconcile (startup pass) + client-order-id crash-safe handle + the
   notify-only 24 h staleness alert (D2).
-- **P4 — TODO** — reporting (`/orders` working/cancelled) + admin UI toggle + docs.
+- **P4 ✅ DONE** — reporting (working/cancelled status badges + per-row limit fill detail on
+  `/performance`) + admin UI toggle (per-strategy *LIMIT* pill + create-form checkbox) + README docs.
 
-Each phase is a separate green PR. P1+P2 deliver the core value; P3 hardens it for the live box.
-**Not yet enabled on any strategy** (`entry` defaults `market`); P4 (the admin toggle + working-order
-visibility) should land before flipping it on live.
+Each phase shipped as a separate green PR. P1+P2 deliver the core value; P3 hardens it; P4 makes it
+visible + togglable. **All phases done.** `entry` still defaults `market` (no strategy uses limit yet);
+enable it per strategy from the admin UI (the *LIMIT* pill) when ready — start with ONE strategy and watch.
 
 ## 16. What this does NOT do
 

@@ -283,6 +283,14 @@ Hyperliquid). The `sar` flag selects the **execution mode**:
   size (the exchange's minimum order value) + a Telegram warning, so you can roll out sizing from the
   admin UI before committing capital. (A `position_size` below the exchange minimum is rejected, not shrunk.)
 
+A managed strategy can also choose its **entry execution** (`entry`, default `market`):
+
+- **`entry: limit`** — a managed OPEN rests a **GTC limit at the alert price** instead of a market order
+  (better fills, no chasing). If the close/opposite signal arrives before it fills, the resting order is
+  **cancelled** — so an unfilled/late entry never becomes a wrong-way position. The **close is always a
+  market order**; `sar` strategies are unaffected. Toggle per strategy from the admin UI (the *LIMIT* pill)
+  or set `entry: limit` in YAML. Full design: `docs/limit-entry-plan.md`.
+
 ```yaml
 strategies:
   MR_VOTING_BTC_6H:        # managed: open up to $1000 notional/venue, close on opposite signal

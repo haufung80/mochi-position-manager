@@ -91,6 +91,48 @@ def test_post_creates_strategy_with_single_venue(client, strategies_file):
     assert (enabled[0].exchange, enabled[0].symbol) == ("hyperliquid", "BTC")
 
 
+def test_post_creates_limit_entry_strategy(client, strategies_file):
+    r = client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "LIM_BTC", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "1000", "entry_limit": "on",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    data = yaml.safe_load(strategies_file.read_text())
+    assert data["strategies"]["LIM_BTC"]["entry"] == "limit"
+    assert client.app.state.strategy_router.get("LIM_BTC").entry == "limit"
+
+
+def test_default_entry_is_market_and_omitted_from_yaml(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "MKT_BTC", "base_asset": "BTC",
+        "venue_bybit": "on",
+    }, follow_redirects=False)
+    data = yaml.safe_load(strategies_file.read_text())
+    assert "entry" not in data["strategies"]["MKT_BTC"]      # default omitted, schema unchanged
+    assert client.app.state.strategy_router.get("MKT_BTC").entry == "market"
+
+
+def test_toggle_entry_endpoint_flips_market_limit(client, strategies_file):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": "TOG", "base_asset": "BTC",
+        "venue_bybit": "on", "position_size": "1000",
+    }, follow_redirects=False)
+    assert client.app.state.strategy_router.get("TOG").entry == "market"
+    r = client.post("/admin/strategies/toggle-entry/TOG",
+                    data={"secret": SECRET}, follow_redirects=False)
+    assert r.status_code == 303
+    assert client.app.state.strategy_router.get("TOG").entry == "limit"
+    client.post("/admin/strategies/toggle-entry/TOG",
+                data={"secret": SECRET}, follow_redirects=False)
+    assert client.app.state.strategy_router.get("TOG").entry == "market"
+
+
+def test_toggle_entry_bad_secret_rejected(client):
+    r = client.post("/admin/strategies/toggle-entry/whatever",
+                    data={"secret": "wrong"}, follow_redirects=False)
+    assert r.status_code in (401, 403)
+
+
 def test_post_creates_multi_venue(client, strategies_file):
     client.post("/admin/strategies", data={
         "secret": SECRET, "strategy_id": "MULTI",

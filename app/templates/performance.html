@@ -271,7 +271,8 @@
           <td class="l muted">{{ o.created_at|when("%m-%d %H:%M:%S") }}</td>
           <td class="l mono">{{ o.strategy_id }}</td>
           <td class="l mono">{{ o.exchange }}/{{ o.symbol }}</td>
-          <td class="l">{{ o.side }}</td>
+          <td class="l">{{ o.side }}{% if o.order_type == 'limit' %}
+            <span class="muted" title="resting limit @ {{ o.limit_price }} · {{ o.qty_base_filled|qty }}/{{ o.qty_base|qty }} filled">· limit</span>{% endif %}</td>
           <td>{{ o.qty_base|qty }}</td>
           <td>{% if o.fill_price %}${{ o.fill_price|usd }}{% else %}<span class="muted">—</span>{% endif %}</td>
           <td>{% if o.slippage_bps is not none %}{{ "%.0f"|format(o.slippage_bps) }}{% else %}<span class="muted">—</span>{% endif %}</td>

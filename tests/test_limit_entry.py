@@ -278,3 +278,31 @@ def test_boot_reconcile_books_fill_after_restart(stub_exchange, silent_notifier)
     assert _net() == pytest.approx(2.0)
     with session_scope() as db:
         assert db.query(Order).one().status == "success"
+
+
+# --- P4: config persistence + reporting fields ------------------------------
+
+def test_strategy_store_entry_roundtrip_and_toggle(tmp_path):
+    from app import strategy_store
+    p = tmp_path / "s.yaml"
+    strategy_store.upsert_strategy(p, "A", base_asset="SOL", venues={"bybit": True},
+                                   position_size=100.0, entry="limit")
+    assert strategy_store.load(p)["strategies"]["A"]["entry"] == "limit"
+    # the default 'market' is omitted from YAML (schema stays clean)
+    strategy_store.upsert_strategy(p, "B", base_asset="SOL", venues={"bybit": True})
+    assert "entry" not in strategy_store.load(p)["strategies"]["B"]
+    # toggle flips and re-omits the default
+    assert strategy_store.toggle_entry(p, "B") == "limit"
+    assert strategy_store.load(p)["strategies"]["B"]["entry"] == "limit"
+    assert strategy_store.toggle_entry(p, "B") == "market"
+    assert "entry" not in strategy_store.load(p)["strategies"]["B"]
+    assert strategy_store.toggle_entry(p, "missing") is None
+
+
+def test_recent_orders_includes_limit_fields(stub_exchange, silent_notifier):
+    from app.routes.dashboard import _recent_orders
+    _place_working("RO", "ro1")
+    with session_scope() as db:
+        rows = _recent_orders(db)
+    o = next(r for r in rows if r["order_type"] == "limit")
+    assert o["limit_price"] == 69.8 and o["qty_base_filled"] == 0.0

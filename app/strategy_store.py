@@ -66,17 +66,20 @@ def save(path: Path, data: dict[str, Any]) -> None:
 def upsert_strategy(path: Path, strategy_id: str, *,
                     base_asset: str, venues: dict[str, bool],
                     sar: bool = False,
-                    position_size: float | None = None) -> bool:
+                    position_size: float | None = None,
+                    entry: str = "market") -> bool:
     """Insert or update a single strategy entry. Returns True if it was an
     update (i.e. existed before), False if newly created."""
     data = load(path)
     strategies = data.setdefault("strategies", {})
     is_update = strategy_id in strategies
-    entry: dict = {"base_asset": base_asset, "sar": bool(sar)}
+    cfg: dict = {"base_asset": base_asset, "sar": bool(sar)}
     if position_size is not None:
-        entry["position_size"] = float(position_size)
-    entry["venues"] = dict(venues)
-    strategies[strategy_id] = entry
+        cfg["position_size"] = float(position_size)
+    if entry and entry != "market":
+        cfg["entry"] = entry            # "limit"; the default "market" is omitted to keep YAML clean
+    cfg["venues"] = dict(venues)
+    strategies[strategy_id] = cfg
     save(path, data)
     return is_update
 
@@ -121,6 +124,23 @@ def toggle_sar(path: Path, strategy_id: str) -> bool | None:
         return None
     new_val = not bool(strategies[strategy_id].get("sar", False))
     strategies[strategy_id]["sar"] = new_val
+    save(path, data)
+    return new_val
+
+
+def toggle_entry(path: Path, strategy_id: str) -> str | None:
+    """Flip a strategy's entry mode market<->limit IN PLACE. Returns the new mode, or None
+    if the strategy doesn't exist. ('market' is the default, so it's omitted from the YAML.)"""
+    data = load(path)
+    strategies = data.get("strategies", {})
+    if strategy_id not in strategies:
+        return None
+    current = str(strategies[strategy_id].get("entry", "market")).lower()
+    new_val = "market" if current == "limit" else "limit"
+    if new_val == "market":
+        strategies[strategy_id].pop("entry", None)
+    else:
+        strategies[strategy_id]["entry"] = "limit"
     save(path, data)
     return new_val
 
