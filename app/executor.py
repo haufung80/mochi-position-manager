@@ -273,14 +273,20 @@ def _call_exchange_limit(venue: VenueRoute, side: str, quantity: float,
     )
 
 
-def _on_limit_placed(order: Order, result: OrderResult) -> None:
+def _on_limit_placed(order: Order, alert: Alert, result: OrderResult) -> None:
     """A GTC limit was accepted and now rests. NO ledger update here — the fill-poller
     (limit_worker) books fills as they land. qty_base stays the TARGET; qty_base_filled
-    (0 here) tracks fills."""
+    (0 here) tracks fills. Telegram-alerts that it's resting (manual fire + auto entries)."""
     order.status = "working"
     order.exchange_order_id = result.exchange_order_id
     order.error_message = ""
     order.next_retry_at = None
+    get_notifier().limit_order_placed(
+        alert.strategy_id, order.exchange, order.symbol, order.side,
+        order.qty_base, order.limit_price or 0.0)
+    log.info("Limit placed alert=%s strategy=%s ex=%s sym=%s %s %s @ %s (working)",
+             alert.id, alert.strategy_id, order.exchange, order.symbol,
+             order.side, order.qty_base, order.limit_price)
 
 
 def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
@@ -395,7 +401,7 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
         db.add(order)
     if result.success:
         if order_type == "limit":
-            _on_limit_placed(order, result)   # 'working' — the poller books fills as they land
+            _on_limit_placed(order, alert, result)   # 'working' + Telegram alert; poller books fills
         else:
             _on_success(db, order, alert, venue, side, result)
     else:

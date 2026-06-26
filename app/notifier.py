@@ -62,6 +62,19 @@ class TelegramNotifier:
 
     # ---- formatted helpers ----
 
+    def limit_order_placed(self, strategy_id: str, exchange: str, symbol: str, side: str,
+                           quantity: float, limit_price: float) -> None:
+        """A resting limit order was placed (manual fire OR an auto limit-entry). NOT filled
+        yet — it rests at `limit_price` until it fills or the close cancels it."""
+        self.send(
+            "📌 *Limit order placed* (resting)\n"
+            f"• Strategy: `{strategy_id}`\n"
+            f"• Exchange: *{exchange}* / {symbol}\n"
+            f"• {side.upper()} {_fmt_qty(quantity, symbol, limit_price)} @ limit {limit_price:g}\n"
+            f"• Rests until it fills or is cancelled on the close.",
+            urgent=False,
+        )
+
     def limit_order_stale(self, strategy_id: str, exchange: str, symbol: str, side: str,
                           limit_price: float, qty_target: float, qty_filled: float,
                           age_hours: float) -> None:

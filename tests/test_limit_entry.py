@@ -56,6 +56,7 @@ def test_make_client_order_id_format():
 # --- placement: OPEN rests a limit; no ledger move ---------------------------
 
 def test_limit_open_places_working_no_ledger(stub_exchange, silent_notifier):
+    silent_notifier.calls.clear()
     aid = _mk_alert("k-open", "buy", 69.8, "LIM")
     cloid = make_client_order_id(aid, "bybit", "SOLUSDT")
     with session_scope() as db:
@@ -65,9 +66,10 @@ def test_limit_open_places_working_no_ledger(stub_exchange, silent_notifier):
         assert order.order_type == "limit" and order.status == "working"
         assert order.limit_price == 69.8 and order.exchange_order_id == cloid
         assert order.qty_base_filled == 0.0
-    # a LIMIT was placed, not a market order
+    # a LIMIT was placed (+ Telegram alerted), not a market order
     assert any(c[0] == "limit" for c in stub_exchange.calls)
     assert not any(c[0] == "market" for c in stub_exchange.calls)
+    assert any(c[0] == "limit_order_placed" for c in silent_notifier.calls)
     # no ledger movement at placement time
     with session_scope() as db:
         assert db.query(Position).count() == 0

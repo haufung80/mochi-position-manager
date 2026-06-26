@@ -155,6 +155,7 @@ def test_fire_limit_explicit_qty_places_working(client, strategies_file, stub_ex
         o = db.query(Order).filter_by(order_type="limit").one()
         assert o.status == "working" and o.side == "buy"
         assert o.limit_price == 69.8 and o.qty_base == 2.0
+    assert any(c[0] == "limit_order_placed" for c in silent_notifier.calls)   # Telegram alert fired
 
 
 def test_fire_limit_managed_sizing_when_qty_blank(client, strategies_file, stub_exchange, silent_notifier):
