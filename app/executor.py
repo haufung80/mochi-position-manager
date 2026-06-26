@@ -18,6 +18,7 @@ against an open long naturally closes it; a sell against a flat position
 opens a short. The pine script is responsible for the action sequence.
 """
 from __future__ import annotations
+import hashlib
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
@@ -180,11 +181,15 @@ def _fill_math(old_net: float, old_avg: float, signed: float, qty: float,
 
 
 def _new_order(alert_id: int, venue: VenueRoute, side: str,
-               quantity: float, signal_price: float | None = None) -> Order:
+               quantity: float, signal_price: float | None = None, *,
+               order_type: str = "market", limit_price: float | None = None,
+               client_order_id: str = "") -> Order:
     """Create a pending Order row. qty_base is the source of truth (from TV);
     qty_usd is left at 0 and filled in once we know the fill price.
     signal_price is the alert's reference price ({{close}}), carried here so the
-    fill's slippage can be measured per order without a join."""
+    fill's slippage can be measured per order without a join. For a limit entry,
+    order_type/limit_price/client_order_id are frozen on the row so a retry re-places
+    the SAME limit (and the poller can re-find it)."""
     return Order(
         alert_id=alert_id,
         exchange=venue.exchange,
@@ -195,9 +200,21 @@ def _new_order(alert_id: int, venue: VenueRoute, side: str,
         reduce_only=False,
         leverage=DEFAULT_LEVERAGE,
         signal_price=signal_price,
+        order_type=order_type,
+        limit_price=limit_price,
+        client_order_id=client_order_id,
+        qty_base_filled=0.0,   # explicit so the in-memory row reads 0 before first flush
         status="pending",
         attempts=0,
     )
+
+
+def make_client_order_id(alert_id: int, exchange: str, symbol: str) -> str:
+    """Deterministic '0x' + 32-hex client id — valid as BOTH a Bybit orderLinkId and an
+    HL Cloid. Deterministic per (alert, venue) so a crashed-then-restarted placement
+    re-finds the same resting order instead of orphaning it (crash safety, P3)."""
+    h = hashlib.sha256(f"{alert_id}:{exchange}:{symbol}".encode()).hexdigest()[:32]
+    return "0x" + h
 
 
 def record_rejected_order(db: Session, alert: Alert, venue: VenueRoute,
@@ -220,6 +237,28 @@ def _call_exchange(venue: VenueRoute, side: str, quantity: float) -> OrderResult
         quantity=quantity,
         leverage=DEFAULT_LEVERAGE,
     )
+
+
+def _call_exchange_limit(venue: VenueRoute, side: str, quantity: float,
+                         price: float, client_order_id: str) -> OrderResult:
+    return get_registry().get(venue.exchange).limit_order(
+        symbol=venue.symbol,
+        side=side,  # type: ignore[arg-type]
+        quantity=quantity,
+        price=price,
+        client_order_id=client_order_id,
+        leverage=DEFAULT_LEVERAGE,
+    )
+
+
+def _on_limit_placed(order: Order, result: OrderResult) -> None:
+    """A GTC limit was accepted and now rests. NO ledger update here — the fill-poller
+    (limit_worker) books fills as they land. qty_base stays the TARGET; qty_base_filled
+    (0 here) tracks fills."""
+    order.status = "working"
+    order.exchange_order_id = result.exchange_order_id
+    order.error_message = ""
+    order.next_retry_at = None
 
 
 def _on_success(db: Session, order: Order, alert: Alert, venue: VenueRoute,
@@ -283,8 +322,17 @@ def _on_failure(order: Order, alert: Alert, venue: VenueRoute,
 
 def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
                   quantity: float,
-                  existing_order: Order | None = None) -> Order:
-    """Place (or retry) a market order on a single venue.
+                  existing_order: Order | None = None,
+                  order_type: str = "market",
+                  limit_price: float | None = None,
+                  client_order_id: str = "") -> Order:
+    """Place (or retry) an order on a single venue.
+
+    `order_type="market"` (default) places a market order and books the fill
+    synchronously (unchanged path). `order_type="limit"` places a GTC resting limit at
+    `limit_price` → status 'working'; the fill is booked LATER by the limit-worker poller
+    (no ledger touch here). On a RETRY (`existing_order` set) the execution fields are read
+    from the order's OWN frozen state, so a retried limit re-places as a limit.
 
     Args:
         db: SQLAlchemy session.
@@ -292,11 +340,21 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
         venue: resolved per-exchange route.
         quantity: order size in BASE-ASSET units (e.g. 0.001 = 0.001 BTC).
         existing_order: pass when retrying an already-persisted Order.
+        order_type/limit_price/client_order_id: limit-entry placement (first attempt only;
+            retries reuse the order's frozen fields).
     """
     side = alert.action.lower()  # "buy" | "sell"
 
-    order = existing_order or _new_order(alert.id, venue, side, quantity,
-                                         getattr(alert, "signal_price", None))
+    if existing_order is not None:
+        order = existing_order
+        order_type = order.order_type or "market"
+        limit_price = order.limit_price
+        client_order_id = order.client_order_id or ""
+    else:
+        order = _new_order(alert.id, venue, side, quantity,
+                           getattr(alert, "signal_price", None),
+                           order_type=order_type, limit_price=limit_price,
+                           client_order_id=client_order_id)
     order.attempts += 1
     order.updated_at = _utcnow()
 
@@ -306,12 +364,18 @@ def execute_order(db: Session, alert: Alert, venue: VenueRoute, *,
     # that window, so it never contends with the retry/funding workers or other venues'
     # commits under busy_timeout. (The pre-call flush was pure cost: uncommitted, so it
     # gave no crash-audit and no reader visibility, and the PK isn't used before commit.)
-    result = _call_exchange(venue, side, quantity)
+    if order_type == "limit":
+        result = _call_exchange_limit(venue, side, quantity, limit_price or 0.0, client_order_id)
+    else:
+        result = _call_exchange(venue, side, quantity)
 
     if existing_order is None:
         db.add(order)
     if result.success:
-        _on_success(db, order, alert, venue, side, result)
+        if order_type == "limit":
+            _on_limit_placed(order, result)   # 'working' — the poller books fills as they land
+        else:
+            _on_success(db, order, alert, venue, side, result)
     else:
         _on_failure(order, alert, venue, side, result)
     return order

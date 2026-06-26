@@ -52,6 +52,11 @@ _SQLITE_ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("commission_asset", "VARCHAR(16) NOT NULL DEFAULT ''"),
         ("realized_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
         ("fee_source", "VARCHAR(16) NOT NULL DEFAULT ''"),
+        # resting limit-entry fields
+        ("order_type", "VARCHAR(8) NOT NULL DEFAULT 'market'"),
+        ("limit_price", "FLOAT"),
+        ("qty_base_filled", "FLOAT NOT NULL DEFAULT 0.0"),
+        ("client_order_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
     ],
     "strategy_positions": [
         ("avg_entry_price", "FLOAT NOT NULL DEFAULT 0.0"),

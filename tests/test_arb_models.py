@@ -130,15 +130,18 @@ def test_arb_funding_event_arb_id_nullable():
 
 def test_orders_table_schema_unchanged():
     """The arb work must not touch the directional `orders` table — arb fills write
-    `ArbOrder`, never `Order`. Pins the exact column set. (`realized_pnl` and
-    `fee_source` are DIRECTIONAL execution-quality columns — per-fill realized PnL and
-    fee-fidelity for the Recent-orders view — not arb columns; isolation is unaffected.)"""
+    `ArbOrder`, never `Order`. Pins the exact column set. (`realized_pnl`/`fee_source` are
+    DIRECTIONAL execution-quality columns, and `order_type`/`limit_price`/`qty_base_filled`/
+    `client_order_id` are the DIRECTIONAL limit-entry columns — not arb columns; arb
+    isolation is unaffected.)"""
     cols = {c["name"] for c in inspect(engine).get_columns("orders")}
     expected = {
         "id", "alert_id", "exchange", "symbol", "side", "qty_usd", "qty_base",
         "reduce_only", "leverage", "signal_price", "fill_price", "commission",
         "commission_asset", "fee_source", "realized_pnl", "status", "attempts",
         "exchange_order_id", "error_message", "next_retry_at", "created_at", "updated_at",
+        # directional limit-entry columns (executor / limit_worker)
+        "order_type", "limit_price", "qty_base_filled", "client_order_id",
     }
     assert cols == expected
 

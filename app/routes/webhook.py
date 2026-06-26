@@ -24,7 +24,7 @@ from .. import portfolio
 from ..config import Settings, get_settings
 from ..db import session_scope
 from ..dedup import idempotency_key
-from ..executor import execute_order, record_rejected_order
+from ..executor import execute_order, record_rejected_order, make_client_order_id
 from ..models import Alert
 from ..notifier import get_notifier
 from ..portfolio import Decision
@@ -112,7 +112,16 @@ def _dispatch_venue(db, alert: Alert, route, venue, alert_quantity: float) -> No
     if sizing.paper:
         notifier.paper_trade(route.strategy_id, venue.exchange, venue.symbol,
                              action, sizing.qty)
-    execute_order(db, alert, venue, quantity=sizing.qty)
+    # Limit-entry: a managed OPEN rests a GTC limit at the alert price (the CLOSE stays a
+    # market order for fill certainty; sar/ALERT_DRIVEN is unaffected). Fall back to market
+    # if the alert carried no usable price, so a signal is never silently dropped.
+    if (route.entry == "limit" and sizing.decision is Decision.OPEN
+            and (alert.signal_price or 0) > 0):
+        cloid = make_client_order_id(alert.id, venue.exchange, venue.symbol)
+        execute_order(db, alert, venue, quantity=sizing.qty, order_type="limit",
+                      limit_price=alert.signal_price, client_order_id=cloid)
+    else:
+        execute_order(db, alert, venue, quantity=sizing.qty)
 
 
 @router.post("/webhook/tradingview")

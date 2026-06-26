@@ -50,6 +50,16 @@ class Order(Base):
     reduce_only: Mapped[bool] = mapped_column(default=False)
     leverage: Mapped[float] = mapped_column(Float, default=1.0)
 
+    # --- resting limit-entry fields (limit-entry feature; the market path leaves these
+    # at their defaults so existing rows + behaviour are unchanged). order_type drives
+    # placement (market vs a GTC limit at limit_price); qty_base_filled is the CUMULATIVE
+    # fill the poller has applied to the ledger (so it only books the delta each pass);
+    # client_order_id is our crash-safe handle (Bybit orderLinkId / HL cloid). ---
+    order_type: Mapped[str] = mapped_column(String(8), default="market", nullable=False)
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    qty_base_filled: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    client_order_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+
     # --- execution quality (live-vs-backtest monitoring) ---
     # signal_price: copied from the alert ({{close}}); fill_price: actual VWAP
     # fill from the exchange. slippage = fill vs signal. commission: real fee

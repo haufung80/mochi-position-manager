@@ -38,6 +38,10 @@ class StrategyRoute:
     # Max position size in USDT (notional) for managed (sar=false) strategies, per
     # venue. None = paper mode (min-unit orders + warning). Ignored when sar=true.
     position_size: float | None = None
+    # Entry execution: "market" (default) or "limit" — a managed OPEN rests a GTC limit
+    # at the alert price instead of a market order (cancelled on the close). Only affects
+    # managed OPENs; CLOSEs are always market. See docs/limit-entry-plan.md.
+    entry: str = "market"
 
     def enabled_venues(self) -> tuple[VenueRoute, ...]:
         return tuple(v for v in self.venues if v.enabled)
@@ -66,6 +70,12 @@ def _coerce_position_size(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return f if f > 0 else None
+
+
+def _coerce_entry(value: object) -> str:
+    """Parse the optional `entry` mode. Anything but 'limit' → 'market' (the safe default)."""
+    v = str(value or "market").strip().lower()
+    return v if v in ("market", "limit") else "market"
 
 
 def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
@@ -104,7 +114,8 @@ def _build_strategy(sid: str, cfg: dict) -> StrategyRoute:
     if ps_raw not in (None, "") and position_size is None:
         log.warning("strategy %s: invalid position_size %r — running in PAPER mode", sid, ps_raw)
     return StrategyRoute(strategy_id=sid, base_asset=base, venues=tuple(venues),
-                         sar=bool(cfg.get("sar", False)), position_size=position_size)
+                         sar=bool(cfg.get("sar", False)), position_size=position_size,
+                         entry=_coerce_entry(cfg.get("entry")))
 
 
 class StrategyRouter:

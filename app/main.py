@@ -16,6 +16,7 @@ from .routes.admin import router as admin_router
 from .routes.funding_arb import router as funding_arb_router
 from .retry_worker import retry_loop
 from .funding_worker import funding_loop
+from .limit_worker import limit_loop
 
 
 def _configure_logging(level: str) -> None:
@@ -53,12 +54,15 @@ async def lifespan(app: FastAPI):
     funding_task = asyncio.create_task(
         funding_loop(app.state.strategy_router, stop_event=stop_event)
     )
+    limit_task = asyncio.create_task(
+        limit_loop(app.state.strategy_router, stop_event=stop_event)
+    )
     log.info("Middleware ready. dry_run=%s", settings.dry_run)
     try:
         yield
     finally:
         stop_event.set()
-        for task in (worker_task, funding_task):
+        for task in (worker_task, funding_task, limit_task):
             task.cancel()
             try:
                 await task
