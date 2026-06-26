@@ -1,13 +1,15 @@
 from __future__ import annotations
 import logging
 import time
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from typing import Literal
 
 from pybit.unified_trading import HTTP
 
-from ..schemas import (OrderResult, FEE_SOURCE_DRY_RUN, FEE_SOURCE_EXCHANGE,
-                       FEE_SOURCE_UNAVAILABLE)
+from ..schemas import (OrderResult, OrderStatus, FEE_SOURCE_DRY_RUN, FEE_SOURCE_EXCHANGE,
+                       FEE_SOURCE_UNAVAILABLE, ORDER_STATE_WORKING, ORDER_STATE_PARTIAL,
+                       ORDER_STATE_FILLED, ORDER_STATE_CANCELLED, ORDER_STATE_REJECTED,
+                       ORDER_STATE_UNKNOWN)
 from .symbols import base_asset_of, canonical_step_size
 
 log = logging.getLogger(__name__)
@@ -15,6 +17,20 @@ log = logging.getLogger(__name__)
 Side = Literal["buy", "sell"]
 CATEGORY = "linear"       # USDT perpetuals
 SPOT_CATEGORY = "spot"    # USDT spot (the cash-and-carry spot leg)
+
+# Bybit orderStatus -> our canonical ORDER_STATE_*. (PartiallyFilledCanceled = a
+# partial that was then cancelled -> terminal cancelled, the partial already booked.)
+_BYBIT_STATE_MAP = {
+    "New": ORDER_STATE_WORKING,
+    "Created": ORDER_STATE_WORKING,
+    "Untriggered": ORDER_STATE_WORKING,
+    "PartiallyFilled": ORDER_STATE_PARTIAL,
+    "Filled": ORDER_STATE_FILLED,
+    "Cancelled": ORDER_STATE_CANCELLED,
+    "PartiallyFilledCanceled": ORDER_STATE_CANCELLED,
+    "Deactivated": ORDER_STATE_CANCELLED,
+    "Rejected": ORDER_STATE_REJECTED,
+}
 
 
 class BybitExchange:
@@ -78,6 +94,15 @@ class BybitExchange:
         if q < min_qty:
             raise RuntimeError(f"Bybit: quantity {q} below minOrderQty {min_qty} for {symbol}")
         return format(q.normalize(), "f")
+
+    def _round_price(self, symbol: str, price: float, category: str = CATEGORY) -> str:
+        """Snap a limit price to the symbol's tickSize grid (Bybit REJECTS an unaligned
+        price). Rounds to the NEAREST tick — the limit price is the signal reference, so
+        nearest is neutral (vs floor/ceil which would bias buy/sell aggressiveness)."""
+        inst = self._instrument(symbol, category)
+        tick = Decimal(str((inst.get("priceFilter") or {}).get("tickSize", "0.01")))
+        p = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+        return format(p.normalize(), "f")
 
     def _fill_details(self, symbol: str, order_id: str, want_qty: float,
                       category: str = CATEGORY):
@@ -202,6 +227,87 @@ class BybitExchange:
         except Exception as e:
             log.exception("Bybit market_order failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    # ---------- resting limit-order surface ----------
+
+    def limit_order(self, symbol: str, side: Side, quantity: float, price: float, *,
+                    client_order_id: str = "", leverage: float = 1.0) -> OrderResult:
+        try:
+            if not self.dry_run:
+                self._ensure_leverage(symbol, leverage)
+            qty_str = self._round_qty(symbol, quantity)
+            price_str = self._round_price(symbol, price)
+
+            if self.dry_run:
+                log.info("[DRY_RUN] bybit limit %s %s qty=%s @ %s", side, symbol, qty_str, price_str)
+                return OrderResult(success=True, exchange_order_id=client_order_id or "DRY_RUN",
+                                   filled_qty_base=0.0, avg_price=float(price_str),
+                                   fee_source=FEE_SOURCE_DRY_RUN)
+
+            kw = dict(category=CATEGORY, symbol=symbol,
+                      side="Buy" if side == "buy" else "Sell",
+                      orderType="Limit", qty=qty_str, price=price_str, timeInForce="GTC")
+            if client_order_id:
+                kw["orderLinkId"] = client_order_id     # our crash-safe handle
+            resp = self._client.place_order(**kw)
+            if resp.get("retCode") != 0:
+                return OrderResult(success=False, raw=resp,
+                                   error_message=f"retCode={resp.get('retCode')} {resp.get('retMsg')}")
+            order_id = (resp.get("result") or {}).get("orderId", "") or client_order_id
+            # A fresh limit rests; we do NOT block here polling for a (marketable) immediate
+            # fill — order_status() is the single source of fill truth for the poller.
+            return OrderResult(success=True, exchange_order_id=order_id,
+                               filled_qty_base=0.0, avg_price=float(price_str), raw=resp)
+        except Exception as e:
+            log.exception("Bybit limit_order failed")
+            return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        try:
+            if self.dry_run:
+                return True
+            resp = self._client.cancel_order(category=CATEGORY, symbol=symbol, orderId=order_id)
+            rc = resp.get("retCode")
+            if rc == 0:
+                return True
+            # 110001 "order not exists or too late to cancel" -> already filled/cancelled;
+            # idempotent success (the resting order is gone, which is what we wanted).
+            if rc == 110001 or "not exist" in str(resp.get("retMsg", "")).lower():
+                return True
+            log.warning("Bybit cancel_order non-zero: %s", resp)
+            return False
+        except Exception as e:
+            log.warning("Bybit cancel_order failed: %s", e)
+            return False
+
+    def order_status(self, symbol: str, order_id: str) -> OrderStatus:
+        try:
+            # Live (resting/partial) first; once terminal the order leaves the open book
+            # and only get_order_history has it — so a fill completed between polls isn't lost.
+            st = self._query_order(symbol, order_id, history=False)
+            if st is None or st.state == ORDER_STATE_UNKNOWN:
+                st = self._query_order(symbol, order_id, history=True) or st
+            return st or OrderStatus(state=ORDER_STATE_UNKNOWN, exchange_order_id=order_id)
+        except Exception as e:
+            log.warning("Bybit order_status failed: %s", e)
+            return OrderStatus(state=ORDER_STATE_UNKNOWN, exchange_order_id=order_id)
+
+    def _query_order(self, symbol: str, order_id: str, *, history: bool) -> OrderStatus | None:
+        fn = self._client.get_order_history if history else self._client.get_open_orders
+        resp = fn(category=CATEGORY, symbol=symbol, orderId=order_id)
+        rows = (resp.get("result") or {}).get("list") or []
+        if not rows:
+            return None
+        r = rows[0]
+        return OrderStatus(
+            state=_BYBIT_STATE_MAP.get(r.get("orderStatus", ""), ORDER_STATE_UNKNOWN),
+            filled_qty_base=float(r.get("cumExecQty") or 0),
+            avg_price=float(r.get("avgPrice") or 0),
+            commission=float(r.get("cumExecFee") or 0),
+            commission_asset="USDT",
+            exchange_order_id=r.get("orderId", "") or order_id,
+            raw=r,
+        )
 
     def close_position(self, symbol: str) -> OrderResult:
         try:

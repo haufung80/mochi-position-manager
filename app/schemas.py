@@ -83,6 +83,33 @@ class OrderResult(BaseModel):
     raw: dict | None = None
 
 
+# Canonical lifecycle states for a resting limit order — returned by
+# Exchange.order_status() and consumed by the fill-poller (P1+). ONE set so the
+# adapters and the worker can't drift on a string.
+ORDER_STATE_WORKING = "working"             # placed + resting, nothing filled yet
+ORDER_STATE_PARTIAL = "partially_filled"    # resting, partially filled
+ORDER_STATE_FILLED = "filled"               # fully filled (terminal)
+ORDER_STATE_CANCELLED = "cancelled"         # cancelled (terminal); may carry a partial fill
+ORDER_STATE_REJECTED = "rejected"           # rejected by the venue (terminal)
+ORDER_STATE_UNKNOWN = "unknown"             # lookup failed / order not found (never raise)
+
+
+class OrderStatus(BaseModel):
+    """Live snapshot of a (resting) limit order, returned by `Exchange.order_status`.
+
+    `filled_qty_base` / `avg_price` / `commission` are CUMULATIVE so far, so the
+    fill-poller applies only the delta since it last looked (the ledger math is
+    incremental). `state` is one of the `ORDER_STATE_*` constants. Best-effort:
+    `state == ORDER_STATE_UNKNOWN` means the lookup failed — never an exception."""
+    state: str
+    filled_qty_base: float = 0.0
+    avg_price: float = 0.0
+    commission: float = 0.0
+    commission_asset: str = ""
+    exchange_order_id: str = ""
+    raw: dict | None = None
+
+
 # fee_source: fidelity of OrderResult.commission / Order.fee_source — ONE canonical set,
 # so a typo in any producer can't silently disable the /performance "fee not captured"
 # warning. (The order-table templates compare these literals directly; keep them in sync

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Protocol, Literal
-from ..schemas import OrderResult
+from ..schemas import OrderResult, OrderStatus
 
 
 Side = Literal["buy", "sell"]
@@ -54,6 +54,38 @@ class Exchange(Protocol):
     def get_min_notional(self, symbol: str) -> float:
         """Minimum order value (quote currency, e.g. USDT) the exchange accepts,
         so managed/paper orders aren't placed below it and rejected."""
+        ...
+
+    # ---------- resting limit-order surface (limit-entry feature) ----------
+    # A GTC limit can rest unfilled, so it needs place / cancel / status — distinct
+    # from the synchronous market path. The fill-poller drives these. See
+    # docs/limit-entry-plan.md.
+
+    def limit_order(
+        self,
+        symbol: str,
+        side: Side,
+        quantity: float,        # base-asset units
+        price: float,           # limit price (snapped to the venue tick grid)
+        *,
+        client_order_id: str = "",   # our id (Bybit orderLinkId / HL cloid) — crash-safe handle
+        leverage: float = 1.0,
+    ) -> OrderResult:
+        """Place a GTC resting LIMIT order. A marketable price may fill immediately
+        (`filled_qty_base > 0`); otherwise it rests (`filled_qty_base == 0`) and
+        `exchange_order_id` identifies it for `order_status`/`cancel_order`. Prices are
+        rounded to the venue grid (HL *raises* otherwise — handled inside). Best-effort:
+        returns `OrderResult(success=False, ...)` on failure, never raises."""
+        ...
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        """Cancel a resting order by its `exchange_order_id`. Returns True if the venue
+        accepted the cancel OR the order was already gone (idempotent). Never raises."""
+        ...
+
+    def order_status(self, symbol: str, order_id: str) -> OrderStatus:
+        """Live status of a (resting) order: CUMULATIVE filled qty / VWAP / fee + a
+        canonical `state`. `state == "unknown"` on a lookup failure (never raises)."""
         ...
 
     # ---------- spot surface (funding-arb cash-and-carry legs) ----------

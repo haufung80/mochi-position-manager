@@ -84,7 +84,7 @@ strategies:
     return p
 
 
-from app.schemas import OrderResult  # noqa: E402
+from app.schemas import OrderResult, OrderStatus  # noqa: E402
 
 
 class _SharedState:
@@ -112,6 +112,9 @@ class _SharedState:
         self.spot_step_sizes = {}      # symbol -> spot step (default 0.001)
         self.spot_min_notionals = {}   # symbol -> spot min value (default 10.0)
         self.spot_base_fee = 0.0       # base-coin fee deducted on a spot BUY
+        # --- resting limit-order knobs (limit-entry feature) ---
+        self.limit_orders = {}         # order_id -> dict(symbol,side,qty,price,filled,avg,state,commission,commission_asset)
+        self._limit_seq = 0            # counter for fake resting-order ids
 
 
 # The mutable test knobs that are SHARED across every (name, account) fake built
@@ -184,6 +187,39 @@ class FakeExchange:
     def get_min_notional(self, symbol):
         self._s.calls.append(("get_min_notional", symbol))
         return self._s.min_notionals.get(symbol, 0.0)
+
+    # ---- resting limit-order surface ----
+    # Places a "working" order; tests drive its fill trajectory by mutating
+    # `state.limit_orders[oid]` (filled / state / avg) between order_status() polls.
+    def limit_order(self, symbol, side, quantity, price, *, client_order_id="", leverage=1.0):
+        self._s.calls.append(("limit", symbol, side, quantity, price, client_order_id,
+                              self.name, self.account))
+        self._s._limit_seq += 1
+        oid = client_order_id or f"LIM{self._s._limit_seq}"
+        self._s.limit_orders[oid] = {
+            "symbol": symbol, "side": side, "qty": quantity, "price": price,
+            "filled": 0.0, "avg": price, "state": "working",
+            "commission": 0.0, "commission_asset": "",
+        }
+        return OrderResult(success=True, exchange_order_id=oid,
+                           filled_qty_base=0.0, avg_price=price)
+
+    def cancel_order(self, symbol, order_id):
+        self._s.calls.append(("cancel", symbol, order_id, self.name, self.account))
+        o = self._s.limit_orders.get(order_id)
+        if o is not None:
+            o["state"] = "cancelled"
+        return True
+
+    def order_status(self, symbol, order_id):
+        self._s.calls.append(("order_status", symbol, order_id))
+        o = self._s.limit_orders.get(order_id)
+        if o is None:
+            return OrderStatus(state="unknown", exchange_order_id=order_id)
+        return OrderStatus(state=o["state"], filled_qty_base=o["filled"], avg_price=o["avg"],
+                           commission=o.get("commission", 0.0),
+                           commission_asset=o.get("commission_asset", ""),
+                           exchange_order_id=order_id)
 
     # ---- spot surface (WORKS on both venues, incl. the HL fake) ----
     def spot_market_order(self, symbol, side, qty):

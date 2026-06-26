@@ -8,8 +8,10 @@ from hyperliquid.exchange import Exchange as HLExchange
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
-from ..schemas import (OrderResult, FEE_SOURCE_DRY_RUN, FEE_SOURCE_EXCHANGE,
-                       FEE_SOURCE_UNAVAILABLE)
+from ..schemas import (OrderResult, OrderStatus, FEE_SOURCE_DRY_RUN, FEE_SOURCE_EXCHANGE,
+                       FEE_SOURCE_UNAVAILABLE, ORDER_STATE_WORKING, ORDER_STATE_PARTIAL,
+                       ORDER_STATE_FILLED, ORDER_STATE_CANCELLED, ORDER_STATE_REJECTED,
+                       ORDER_STATE_UNKNOWN)
 from .symbols import (
     HYPERLIQUID_NATIVE_SPOT,
     HYPERLIQUID_SPOT_QUOTE,
@@ -20,6 +22,17 @@ from .symbols import (
 
 log = logging.getLogger(__name__)
 Side = Literal["buy", "sell"]
+
+# HL order `status` -> our canonical ORDER_STATE_*.
+_HL_STATE_MAP = {
+    "open": ORDER_STATE_WORKING,
+    "triggered": ORDER_STATE_WORKING,
+    "filled": ORDER_STATE_FILLED,
+    "canceled": ORDER_STATE_CANCELLED,
+    "cancelled": ORDER_STATE_CANCELLED,
+    "marginCanceled": ORDER_STATE_CANCELLED,
+    "rejected": ORDER_STATE_REJECTED,
+}
 
 # Unit-spot base-token szDecimals as listed on HL (UBTC/UETH/USOL). Used ONLY as
 # an offline/DRY_RUN fallback when `spotMeta` can't be fetched; production reads
@@ -253,6 +266,157 @@ class HyperliquidExchange:
         except Exception as e:
             log.exception("Hyperliquid market_order failed")
             return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    # ---------- resting limit-order surface ----------
+
+    def _perp_sz_decimals(self, symbol: str) -> int:
+        try:
+            for a in self._info.meta()["universe"]:
+                if a.get("name") == symbol:
+                    return int(a.get("szDecimals", 2))
+        except Exception:
+            pass
+        return 2
+
+    def _price_decimals(self, symbol: str) -> int:
+        """Max decimal places HL allows for this symbol's price: MAX_DECIMALS (6 perp /
+        8 spot) minus the asset's szDecimals."""
+        is_spot = self._is_spot_symbol(symbol)
+        max_dec = 8 if is_spot else 6
+        szdec = _canonical_spot_decimals(symbol) if is_spot else self._perp_sz_decimals(symbol)
+        return max(0, max_dec - szdec)
+
+    def _round_price(self, symbol: str, price: float) -> float:
+        """Snap a limit price to HL's grid: <=5 significant figures AND <= (MAX_DECIMALS
+        - szDecimals) decimals. HL's SDK RAISES (`float_to_wire`) on an off-grid price, so
+        this must run before `order(...)`."""
+        if not price or price <= 0:
+            return 0.0
+        sig = float(f"{price:.5g}")                       # <= 5 significant figures
+        return round(sig, self._price_decimals(symbol))   # <= MAX_DECIMALS - szDecimals
+
+    def _fills_for_oid(self, oid: str) -> tuple[float, float, float, str]:
+        """(filled_qty, vwap, fee, fee_token) aggregated from user_fills matching `oid`.
+        Best-effort: all-zero on no match / lookup failure. Never raises."""
+        if not self._account_address or not oid:
+            return 0.0, 0.0, 0.0, "USDC"
+        try:
+            fills = self._info.user_fills(self._account_address) or []
+        except Exception as e:
+            log.warning("HL user_fills failed (continuing): %s", e)
+            return 0.0, 0.0, 0.0, "USDC"
+        m = [f for f in fills if str(f.get("oid")) == str(oid)]
+        if not m:
+            return 0.0, 0.0, 0.0, "USDC"
+        qty = sum(float(f.get("sz", 0) or 0) for f in m)
+        notional = sum(float(f.get("px", 0) or 0) * float(f.get("sz", 0) or 0) for f in m)
+        fee = sum(float(f.get("fee", 0) or 0) for f in m)
+        token = m[0].get("feeToken") or "USDC"
+        return qty, (notional / qty if qty else 0.0), fee, token
+
+    @staticmethod
+    def _to_cloid(client_order_id: str):
+        """Build an HL `Cloid` from our client id IF it's the required 16-byte hex form
+        ('0x' + 32 hex); else None (place without one). The P1+ caller supplies a 0x-hex
+        id that doubles as a Bybit orderLinkId."""
+        if not client_order_id or not client_order_id.startswith("0x") or len(client_order_id) != 34:
+            return None
+        try:
+            from hyperliquid.utils.types import Cloid
+            return Cloid.from_str(client_order_id)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cancel_accepted(resp) -> bool:
+        if not isinstance(resp, dict) or resp.get("status") != "ok":
+            return False
+        statuses = (resp.get("response") or {}).get("data", {}).get("statuses") or []
+        for s in statuses:
+            if s == "success":
+                return True
+            text = (s.get("error") if isinstance(s, dict) else str(s)).lower()
+            if any(w in text for w in ("never placed", "already", "filled")):
+                return True   # order already gone -> idempotent success
+        return False
+
+    def limit_order(self, symbol: str, side: Side, quantity: float, price: float, *,
+                    client_order_id: str = "", leverage: float = 1.0) -> OrderResult:
+        try:
+            qty_base = self._round_size(symbol, quantity)
+            if qty_base <= 0:
+                return OrderResult(success=False,
+                                   error_message=f"quantity rounded to 0 (requested={quantity}, symbol={symbol})")
+            limit_px = self._round_price(symbol, price)
+            if limit_px <= 0:
+                return OrderResult(success=False,
+                                   error_message=f"price rounded to 0 (requested={price}, symbol={symbol})")
+
+            if self.dry_run or self._exchange is None:
+                log.info("[DRY_RUN] hyperliquid limit %s %s qty=%s @ %s", side, symbol, qty_base, limit_px)
+                return OrderResult(success=True, exchange_order_id=client_order_id or "DRY_RUN",
+                                   filled_qty_base=0.0, avg_price=limit_px, fee_source=FEE_SOURCE_DRY_RUN)
+
+            if leverage and leverage > 0:
+                try:
+                    self._exchange.update_leverage(int(leverage), symbol)
+                except Exception as e:
+                    log.warning("HL update_leverage failed (continuing): %s", e)
+
+            order_kw = dict(name=symbol, is_buy=(side == "buy"), sz=qty_base, limit_px=limit_px,
+                            order_type={"limit": {"tif": "Gtc"}}, reduce_only=False)
+            cloid = self._to_cloid(client_order_id)
+            if cloid is not None:
+                order_kw["cloid"] = cloid
+            resp = self._exchange.order(**order_kw)
+            if resp.get("status") != "ok":
+                return OrderResult(success=False, error_message=str(resp), raw=resp)
+
+            statuses = (resp.get("response") or {}).get("data", {}).get("statuses") or []
+            oid, filled, avg_px = "", 0.0, limit_px
+            for st in statuses:
+                if "resting" in st:                     # the GTC order rests -> capture its oid
+                    oid = str(st["resting"].get("oid", ""))
+                elif "filled" in st:                    # marketable -> filled immediately
+                    f = st["filled"]
+                    oid = str(f.get("oid", ""))
+                    filled += float(f.get("totalSz", 0))
+                    avg_px = float(f.get("avgPx", limit_px))
+                elif "error" in st:
+                    return OrderResult(success=False, error_message=str(st["error"]), raw=resp)
+            return OrderResult(success=True, exchange_order_id=oid,
+                               filled_qty_base=filled, avg_price=avg_px, raw=resp)
+        except Exception as e:
+            log.exception("Hyperliquid limit_order failed")
+            return OrderResult(success=False, error_message=f"{type(e).__name__}: {e}")
+
+    def cancel_order(self, symbol: str, order_id: str) -> bool:
+        try:
+            if self.dry_run or self._exchange is None:
+                return True
+            resp = self._exchange.cancel(symbol, int(order_id))
+            return self._cancel_accepted(resp)
+        except Exception as e:
+            log.warning("HL cancel_order failed: %s", e)
+            return False
+
+    def order_status(self, symbol: str, order_id: str) -> OrderStatus:
+        try:
+            filled, avg, fee, token = self._fills_for_oid(order_id)     # cumulative from user_fills
+            state = ORDER_STATE_UNKNOWN
+            if self._account_address and order_id:
+                data = self._info.query_order_by_oid(self._account_address, int(order_id))
+                if isinstance(data, dict) and data.get("status") == "order":
+                    hl = ((data.get("order") or {}).get("status")) or ""
+                    state = _HL_STATE_MAP.get(hl, ORDER_STATE_UNKNOWN)
+            if state == ORDER_STATE_WORKING and filled > 1e-12:
+                state = ORDER_STATE_PARTIAL
+            return OrderStatus(state=state, filled_qty_base=filled, avg_price=avg,
+                               commission=fee, commission_asset=token,
+                               exchange_order_id=str(order_id))
+        except Exception as e:
+            log.warning("HL order_status failed: %s", e)
+            return OrderStatus(state=ORDER_STATE_UNKNOWN, exchange_order_id=str(order_id))
 
     def close_position(self, symbol: str) -> OrderResult:
         try:
