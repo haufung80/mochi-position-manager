@@ -133,6 +133,74 @@ def test_toggle_entry_bad_secret_rejected(client):
     assert r.status_code in (401, 403)
 
 
+# --- manual "Fire limit order" ----------------------------------------------
+
+def _create_managed(client, sid, size="140"):
+    client.post("/admin/strategies", data={
+        "secret": SECRET, "strategy_id": sid, "base_asset": "SOL",
+        "venue_bybit": "on", "position_size": size,
+    }, follow_redirects=False)
+
+
+def test_fire_limit_explicit_qty_places_working(client, strategies_file, stub_exchange, silent_notifier):
+    from app.db import session_scope
+    from app.models import Order
+    _create_managed(client, "FL")
+    r = client.post("/admin/strategies/fire-limit", data={
+        "secret": SECRET, "strategy_id": "FL", "side": "buy",
+        "limit_price": "69.8", "fire_quantity": "2",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    with session_scope() as db:
+        o = db.query(Order).filter_by(order_type="limit").one()
+        assert o.status == "working" and o.side == "buy"
+        assert o.limit_price == 69.8 and o.qty_base == 2.0
+
+
+def test_fire_limit_managed_sizing_when_qty_blank(client, strategies_file, stub_exchange, silent_notifier):
+    from app.db import session_scope
+    from app.models import Order
+    _create_managed(client, "FL4", size="140")
+    r = client.post("/admin/strategies/fire-limit", data={
+        "secret": SECRET, "strategy_id": "FL4", "side": "sell", "limit_price": "70",
+    }, follow_redirects=False)   # no quantity -> 140/70 = 2.0 (step 0.001)
+    assert r.status_code == 303
+    with session_scope() as db:
+        o = db.query(Order).filter_by(order_type="limit").one()
+        assert o.status == "working" and o.side == "sell" and o.qty_base == pytest.approx(2.0)
+
+
+def test_fire_limit_bad_secret(client, strategies_file):
+    _create_managed(client, "FL2")
+    r = client.post("/admin/strategies/fire-limit", data={
+        "secret": "wrong", "strategy_id": "FL2", "side": "buy", "limit_price": "69.8",
+    }, follow_redirects=False)
+    assert r.status_code == 401
+
+
+def test_fire_limit_unknown_strategy(client, strategies_file):
+    r = client.post("/admin/strategies/fire-limit", data={
+        "secret": SECRET, "strategy_id": "NOPE", "side": "buy", "limit_price": "69.8",
+    }, follow_redirects=False)
+    assert r.status_code == 404
+
+
+def test_fire_limit_refused_during_kill_switch(client, strategies_file):
+    from app.db import session_scope
+    from app.risk import update_risk_settings
+    from app.models import Order
+    _create_managed(client, "FL3")
+    with session_scope() as db:
+        update_risk_settings(db, kill_switch=True)
+    r = client.post("/admin/strategies/fire-limit", data={
+        "secret": SECRET, "strategy_id": "FL3", "side": "buy",
+        "limit_price": "69.8", "fire_quantity": "2",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    with session_scope() as db:
+        assert db.query(Order).count() == 0       # halted -> nothing placed
+
+
 def test_post_creates_multi_venue(client, strategies_file):
     client.post("/admin/strategies", data={
         "secret": SECRET, "strategy_id": "MULTI",

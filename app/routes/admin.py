@@ -10,6 +10,7 @@ HTTP shape, validation, and router-reload triggering.
 """
 from __future__ import annotations
 import logging
+import uuid
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -17,11 +18,13 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from .. import strategy_store
+from .. import portfolio, strategy_store
 from ..config import get_settings
 from ..db import session_scope
 from ..exchanges.registry import get_registry
 from ..exchanges.symbols import SUPPORTED_BASE_ASSETS, SUPPORTED_EXCHANGES
+from ..executor import execute_order, make_client_order_id
+from ..models import Alert
 from ..risk import get_risk_settings, update_risk_settings
 
 log = logging.getLogger(__name__)
@@ -219,6 +222,89 @@ def toggle_entry(sid: str, request: Request, secret: str = Form(...)):
     _reload_router(request)
     log.info("admin: toggled entry %s -> %s", sid, new_val)
     return RedirectResponse(url="/admin/strategies", status_code=303)
+
+
+@router.post("/strategies/fire-limit", response_class=HTMLResponse)
+def fire_limit(request: Request, secret: str = Form(...), strategy_id: str = Form(...),
+               side: str = Form(...), limit_price: float = Form(...),
+               fire_quantity: str = Form("")):
+    """Manually place a ONE-OFF resting LIMIT order on a strategy's enabled venues at
+    `limit_price`. Optional `quantity` (base units) overrides managed sizing; blank →
+    size from the strategy's position_size at the limit price. Does NOT change the
+    strategy's entry mode. Force-places (no open/close/pyramid logic) but still respects
+    the kill-switch (halt = halt) and the per-order cap (fat-finger guard). The order is
+    tracked like any limit entry (fill-poller + cancel-on-close).
+
+    Sync endpoint → FastAPI runs it in a threadpool, so the blocking exchange calls don't
+    touch the event loop; the operator gets an immediate per-venue result."""
+    _require_secret(secret)
+    side = side.strip().lower()
+    if side not in ("buy", "sell"):
+        raise HTTPException(400, "side must be 'buy' or 'sell'")
+    if limit_price <= 0:
+        raise HTTPException(400, "limit_price must be > 0")
+    route = request.app.state.strategy_router.get(strategy_id)
+    if route is None:
+        raise HTTPException(404, f"strategy_id not found: {strategy_id}")
+    venues = route.enabled_venues()
+    if not venues:
+        return _redirect_strategies([f"{strategy_id}: no enabled venues — nothing fired"])
+
+    qty_explicit: float | None = None
+    q = fire_quantity.strip()
+    if q:
+        try:
+            qty_explicit = float(q)
+        except ValueError:
+            raise HTTPException(400, "quantity must be a number (base units) or blank")
+        if qty_explicit <= 0:
+            raise HTTPException(400, "quantity must be > 0 (or blank for managed sizing)")
+
+    with session_scope() as db:
+        risk = get_risk_settings(db)
+        kill, cap = risk.kill_switch, (risk.per_order_max_notional or 0.0)
+    if kill:
+        return _redirect_strategies(["global kill-switch is ON — manual fire refused"])
+
+    # One synthetic alert ties the order(s) into the ledger / poller / cancel-on-close.
+    idem = f"manual-{uuid.uuid4().hex[:12]}"
+    with session_scope() as db:
+        alert = Alert(idempotency_key=idem, strategy_id=strategy_id, action=side,
+                      raw_payload=f'{{"manual": true, "limit_price": {limit_price}}}',
+                      signal_price=limit_price,
+                      source_ip=(request.client.host if request.client else ""))
+        db.add(alert)
+        db.flush()
+        alert_id = alert.id
+
+    notices: list[str] = []
+    reg = get_registry()
+    for v in venues:
+        try:
+            qty = qty_explicit
+            if qty is None:
+                if route.position_size is None:
+                    notices.append(f"{v.exchange}: no position_size and no quantity — skipped")
+                    continue
+                step = reg.get(v.exchange).get_step_size(v.symbol)
+                qty = portfolio.compute_managed_qty(route.position_size, limit_price, step)
+            if qty <= 0:
+                notices.append(f"{v.exchange}: sized to 0 — skipped")
+                continue
+            if cap > 0 and qty * limit_price > cap:
+                notices.append(f"{v.exchange}: ${qty * limit_price:,.0f} exceeds per-order cap "
+                               f"${cap:,.0f} — skipped")
+                continue
+            cloid = make_client_order_id(alert_id, v.exchange, v.symbol)
+            with session_scope() as db:
+                execute_order(db, db.get(Alert, alert_id), v, quantity=qty, order_type="limit",
+                              limit_price=limit_price, client_order_id=cloid)
+            notices.append(f"{v.exchange}: limit {side} {qty:g} @ {limit_price:g} placed")
+        except Exception as e:
+            log.exception("fire-limit failed strat=%s ex=%s", strategy_id, v.exchange)
+            notices.append(f"{v.exchange}: error — {type(e).__name__}")
+    log.info("admin: manual fire-limit %s %s @ %s -> %s", strategy_id, side, limit_price, notices)
+    return _redirect_strategies(notices)
 
 
 @router.post("/strategies/set-size/{sid}", response_class=HTMLResponse)

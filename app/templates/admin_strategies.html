@@ -157,6 +157,49 @@
     })();
   </script>
 
+  <h2>Fire limit order (manual)</h2>
+  <div class="card">
+    <form method="POST" action="/admin/strategies/fire-limit"
+          onsubmit="return confirm('Place a manual LIMIT order now? Fires a real resting order on the strategy\'s enabled venues.');">
+      <div class="muted" style="margin-bottom:10px; font-size:12px;">
+        One-off resting limit on the strategy's enabled venues at your price — does <b>not</b> change its
+        entry mode. Blank quantity ⇒ sized from <code>position_size</code>; an explicit quantity (base units)
+        overrides. Respects the kill-switch + per-order cap. Cancelled automatically on the next close signal.
+      </div>
+      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <div>
+          <label>Strategy</label>
+          <select name="strategy_id" required>
+            {% for r in routes %}<option value="{{ r.strategy_id }}">{{ r.strategy_id }}</option>{% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Side</label>
+          <select name="side" required>
+            <option value="buy">buy</option>
+            <option value="sell">sell</option>
+          </select>
+        </div>
+        <div>
+          <label>Limit price</label>
+          <input type="text" name="limit_price" inputmode="decimal" required
+                 style="width:110px;" placeholder="e.g. 69.80" autocomplete="off">
+        </div>
+        <div>
+          <label>Quantity (base) — optional</label>
+          <input type="text" name="fire_quantity" inputmode="decimal"
+                 style="width:150px;" placeholder="blank = managed sizing" autocomplete="off">
+        </div>
+        <div>
+          <label>Webhook secret</label>
+          <input type="password" name="secret" required style="width:150px;"
+                 placeholder="WEBHOOK_SECRET" autocomplete="off">
+        </div>
+        <div><button type="submit">Fire limit</button></div>
+      </div>
+    </form>
+  </div>
+
   <h2>Active strategies ({{ routes | length }})</h2>
   <div class="card">
     {% if routes %}

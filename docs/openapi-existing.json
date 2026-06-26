@@ -452,6 +452,39 @@
         "title": "Body_delete_strategy_admin_strategies_delete__sid__post",
         "type": "object"
       },
+      "Body_fire_limit_admin_strategies_fire_limit_post": {
+        "properties": {
+          "fire_quantity": {
+            "default": "",
+            "title": "Fire Quantity",
+            "type": "string"
+          },
+          "limit_price": {
+            "title": "Limit Price",
+            "type": "number"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          },
+          "side": {
+            "title": "Side",
+            "type": "string"
+          },
+          "strategy_id": {
+            "title": "Strategy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret",
+          "strategy_id",
+          "side",
+          "limit_price"
+        ],
+        "title": "Body_fire_limit_admin_strategies_fire_limit_post",
+        "type": "object"
+      },
       "Body_reload_strategies_admin_reload_strategies_post": {
         "properties": {
           "secret": {
@@ -494,6 +527,19 @@
           "secret"
         ],
         "title": "Body_sync_positions_admin_strategies_sync_positions_post",
+        "type": "object"
+      },
+      "Body_toggle_entry_admin_strategies_toggle_entry__sid__post": {
+        "properties": {
+          "secret": {
+            "title": "Secret",
+            "type": "string"
+          }
+        },
+        "required": [
+          "secret"
+        ],
+        "title": "Body_toggle_entry_admin_strategies_toggle_entry__sid__post",
         "type": "object"
       },
       "Body_toggle_sar_admin_strategies_toggle_sar__sid__post": {
@@ -962,6 +1008,48 @@
         ]
       }
     },
+    "/admin/strategies/fire-limit": {
+      "post": {
+        "description": "Manually place a ONE-OFF resting LIMIT order on a strategy's enabled venues at\n`limit_price`. Optional `quantity` (base units) overrides managed sizing; blank \u2192\nsize from the strategy's position_size at the limit price. Does NOT change the\nstrategy's entry mode. Force-places (no open/close/pyramid logic) but still respects\nthe kill-switch (halt = halt) and the per-order cap (fat-finger guard). The order is\ntracked like any limit entry (fill-poller + cancel-on-close).\n\nSync endpoint \u2192 FastAPI runs it in a threadpool, so the blocking exchange calls don't\ntouch the event loop; the operator gets an immediate per-venue result.",
+        "operationId": "fire_limit_admin_strategies_fire_limit_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_fire_limit_admin_strategies_fire_limit_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Fire Limit",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
     "/admin/strategies/set-size/{sid}": {
       "post": {
         "description": "Set/clear a managed strategy's position_size inline \u2014 leaves base_asset,\nvenues and SAR untouched. Blank clears it (paper mode).",
@@ -1052,6 +1140,59 @@
           }
         },
         "summary": "Sync Positions",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/admin/strategies/toggle-entry/{sid}": {
+      "post": {
+        "description": "Flip a strategy's entry mode market<->limit (affects managed OPENs only).",
+        "operationId": "toggle_entry_admin_strategies_toggle_entry__sid__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "title": "Sid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_toggle_entry_admin_strategies_toggle_entry__sid__post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Toggle Entry",
         "tags": [
           "admin"
         ]
