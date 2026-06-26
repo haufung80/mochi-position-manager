@@ -31,7 +31,7 @@ from .exchanges.registry import get_registry
 from .models import Alert, Order, Position, StrategyPosition
 from .notifier import get_notifier
 from .routing import VenueRoute
-from .schemas import OrderResult, FEE_SOURCE_UNAVAILABLE
+from .schemas import OrderResult, OrderStatus, FEE_SOURCE_UNAVAILABLE
 
 log = logging.getLogger(__name__)
 
@@ -178,6 +178,28 @@ def _fill_math(old_net: float, old_avg: float, signed: float, qty: float,
     else:
         new_avg = old_avg                                    # partial close
     return new_net, new_avg, realized_delta
+
+
+def book_limit_fill_delta(db: Session, order: Order, strategy_id: str,
+                          st: OrderStatus) -> float:
+    """Book the NEW portion of a limit order's CUMULATIVE fill (`st.filled_qty_base −
+    order.qty_base_filled`) onto the order + ledger; return the newly-booked base (0.0 if
+    none). Sets `qty_base_filled` BEFORE applying so it commits ATOMICALLY with the ledger
+    (the first commit inside `_apply_fill_to_position`) — crash-safe + no double-count.
+    Shared by the fill-poller (limit_worker) and cancel-on-close (webhook) so a fill is
+    booked identically whichever path observes it."""
+    newly = (st.filled_qty_base or 0.0) - (order.qty_base_filled or 0.0)
+    if newly <= _POSITION_EPS:
+        return 0.0
+    price = st.avg_price or order.limit_price or 0.0
+    order.qty_base_filled = st.filled_qty_base
+    order.fill_price = st.avg_price or order.fill_price
+    order.commission = st.commission
+    order.commission_asset = st.commission_asset or order.commission_asset
+    realized = _apply_fill_to_position(
+        db, strategy_id, order.exchange, order.symbol, order.side, newly, price)
+    order.realized_pnl = (order.realized_pnl or 0.0) + realized
+    return newly
 
 
 def _new_order(alert_id: int, venue: VenueRoute, side: str,

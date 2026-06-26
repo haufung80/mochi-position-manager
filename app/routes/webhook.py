@@ -24,11 +24,13 @@ from .. import portfolio
 from ..config import Settings, get_settings
 from ..db import session_scope
 from ..dedup import idempotency_key
-from ..executor import execute_order, record_rejected_order, make_client_order_id
-from ..models import Alert
+from ..exchanges.registry import get_registry
+from ..executor import (execute_order, record_rejected_order, make_client_order_id,
+                        book_limit_fill_delta, _utcnow)
+from ..models import Alert, Order
 from ..notifier import get_notifier
 from ..portfolio import Decision
-from ..schemas import TradingViewAlert
+from ..schemas import TradingViewAlert, ORDER_STATE_UNKNOWN
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -97,11 +99,66 @@ def _run_fan_out(alert_id: int, route, quantity: float) -> None:
                           alert_id, venue.exchange)
 
 
+def _find_working_entry(db, strategy_id: str, exchange: str, symbol: str) -> Order | None:
+    """The (most recent) resting limit ENTRY for this (strategy, venue, symbol), if any.
+    Order carries no strategy_id, so join Alert to scope it to the strategy."""
+    return (db.query(Order)
+            .join(Alert, Alert.id == Order.alert_id)
+            .filter(Order.status == "working", Order.order_type == "limit",
+                    Order.exchange == exchange, Order.symbol == symbol,
+                    Alert.strategy_id == strategy_id)
+            .order_by(Order.id.desc())
+            .first())
+
+
+def _cancel_working_entry(db, order: Order, strategy_id: str) -> None:
+    """Cancel a resting limit entry on its venue, BOOKING any fill that raced the cancel
+    (via the shared `book_limit_fill_delta`, so a partial isn't lost), then mark it
+    cancelled. Pure de-risking — runs before `decide`, so the kill-switch never blocks it."""
+    adapter = get_registry().get(order.exchange)
+    handle = order.exchange_order_id or order.client_order_id
+    try:
+        adapter.cancel_order(order.symbol, handle)
+    except Exception:
+        log.exception("cancel-on-close: cancel_order failed order=%s", order.id)
+    try:
+        st = adapter.order_status(order.symbol, handle)
+        if st.state != ORDER_STATE_UNKNOWN:
+            book_limit_fill_delta(db, order, strategy_id, st)
+    except Exception:
+        log.exception("cancel-on-close: status/book failed order=%s", order.id)
+    order.status = "cancelled"
+    order.updated_at = _utcnow()
+
+
 def _dispatch_venue(db, alert: Alert, route, venue, alert_quantity: float) -> None:
     """Apply the portfolio manager's decision for ONE venue."""
     action = alert.action.lower()
-    sizing = portfolio.decide(db, route, venue, action, alert_quantity=alert_quantity)
     notifier = get_notifier()
+
+    # Cancel-on-close (limit-entry safety): a resting limit ENTRY for this
+    # (strategy, venue, symbol) is cancelled by an OPPOSITE signal (its close); a
+    # SAME-direction signal is ignored (the entry is already pending, don't double-place).
+    # An UNFILLED entry → the close is a no-op (NO short — this is the fix); a PARTIAL fill
+    # → book it, then fall through so `decide` CLOSES the partial. Runs BEFORE decide, so
+    # the kill-switch can't block the de-risking cancel.
+    working = _find_working_entry(db, route.strategy_id, venue.exchange, venue.symbol)
+    if working is not None:
+        if action == working.side:
+            log.info("limit-entry: repeat %s for %s/%s ignored (entry already resting)",
+                     action, route.strategy_id, venue.symbol)
+            return
+        _cancel_working_entry(db, working, route.strategy_id)
+        net = portfolio._net_qty(db, route.strategy_id, venue.exchange, venue.symbol)
+        if abs(net) <= portfolio._FLAT_EPS:
+            log.info("cancel-on-close: %s/%s entry was unfilled → flat, no order placed",
+                     route.strategy_id, venue.symbol)
+            return
+        log.info("cancel-on-close: %s/%s entry partially filled (net %+g) → closing the partial",
+                 route.strategy_id, venue.symbol, net)
+        # fall through: decide() now sees the partial position and CLOSES it (market)
+
+    sizing = portfolio.decide(db, route, venue, action, alert_quantity=alert_quantity)
     if sizing.decision is Decision.REJECT:
         record_rejected_order(db, alert, venue, action, sizing.reason)
         notifier.order_rejected(route.strategy_id, venue.exchange, venue.symbol,

@@ -16,14 +16,12 @@ import logging
 
 from .db import session_scope
 from .exchanges.registry import get_registry
-from .executor import _apply_fill_to_position, _utcnow
+from .executor import book_limit_fill_delta, _utcnow
 from .models import Alert, Order
 from .schemas import (ORDER_STATE_FILLED, ORDER_STATE_CANCELLED, ORDER_STATE_REJECTED,
                       ORDER_STATE_UNKNOWN, FEE_SOURCE_EXCHANGE)
 
 log = logging.getLogger(__name__)
-
-_FILL_EPS = 1e-12
 
 
 def _poll_working_orders() -> None:
@@ -54,24 +52,11 @@ def _poll_one(db, order: Order) -> None:
     if st.state == ORDER_STATE_UNKNOWN:
         return   # transient lookup miss — retry next pass (a genuinely stuck order is a P3 alert)
 
-    newly = (st.filled_qty_base or 0.0) - (order.qty_base_filled or 0.0)
-    if newly > _FILL_EPS:
-        price = st.avg_price or order.limit_price or 0.0
-        # CRITICAL: set qty_base_filled BEFORE applying to the ledger, so it is committed
-        # ATOMICALLY with the fill (the first commit inside _apply_fill_to_position). A
-        # crash can't then leave the ledger updated but qty_base_filled stale (= double
-        # count next poll). status/realized below aren't atomic, but a re-poll self-heals
-        # them (newly==0 once qty_base_filled is caught up).
-        order.qty_base_filled = st.filled_qty_base
-        order.fill_price = st.avg_price or order.fill_price
-        order.commission = st.commission                 # cumulative
-        order.commission_asset = st.commission_asset or order.commission_asset
-        realized = _apply_fill_to_position(
-            db, alert.strategy_id, order.exchange, order.symbol, order.side, newly, price)
-        order.realized_pnl = (order.realized_pnl or 0.0) + realized
+    newly = book_limit_fill_delta(db, order, alert.strategy_id, st)   # atomic + no double-count
+    if newly > 0:
         log.info("limit fill order=%s strat=%s %s %s +%g @ %.6f (cum %g)",
                  order.id, alert.strategy_id, order.symbol, order.side,
-                 newly, price, order.qty_base_filled)
+                 newly, order.fill_price or 0.0, order.qty_base_filled)
 
     if st.state == ORDER_STATE_FILLED:
         order.status = "success"

@@ -167,3 +167,69 @@ def test_poller_cancel_unfilled_no_position(stub_exchange, silent_notifier):
     assert _net() == 0.0
     with session_scope() as db:
         assert db.query(Order).one().status == "cancelled"
+
+
+# --- P2: cancel-on-close ----------------------------------------------------
+
+from app.schemas import OrderResult  # noqa: E402
+
+
+def _open_working_limit(strategy: str, key: str, price: float = 69.8) -> int:
+    """Dispatch a managed buy OPEN on an entry:limit strategy → a resting limit. Returns
+    the working Order id."""
+    route = StrategyRoute(strategy, "SOL", (_BYBIT,), sar=False, position_size=140.0, entry="limit")
+    aid = _mk_alert(key, "buy", price, strategy)
+    with session_scope() as db:
+        _dispatch_venue(db, db.get(Alert, aid), route, _BYBIT, 0.0)
+    with session_scope() as db:
+        return db.query(Order).filter_by(order_type="limit").one().id
+
+
+def test_cancel_on_close_unfilled_opens_no_short(stub_exchange, silent_notifier):
+    """The core fix: a close arriving while the entry limit is unfilled cancels it and
+    opens NOTHING (no wrong-way short)."""
+    stub_exchange.prices["SOLUSDT"] = 69.8
+    route = StrategyRoute("CX", "SOL", (_BYBIT,), sar=False, position_size=140.0, entry="limit")
+    _open_working_limit("CX", "cx-open")
+    aid2 = _mk_alert("cx-close", "sell", 69.0, "CX")
+    with session_scope() as db:
+        _dispatch_venue(db, db.get(Alert, aid2), route, _BYBIT, 0.0)
+    with session_scope() as db:
+        assert db.query(Order).filter_by(order_type="limit").one().status == "cancelled"
+        assert db.query(Order).filter_by(order_type="market").count() == 0   # no short
+    assert _net() == 0.0
+
+
+def test_cancel_on_close_partial_is_closed(stub_exchange, silent_notifier):
+    """A partially-filled entry, on the close, is cancelled AND the partial is market-closed."""
+    stub_exchange.prices["SOLUSDT"] = 69.8
+    route = StrategyRoute("CP", "SOL", (_BYBIT,), sar=False, position_size=140.0, entry="limit")
+    _open_working_limit("CP", "cp-open")
+    with session_scope() as db:
+        o = db.query(Order).filter_by(order_type="limit").one()
+        cloid, q = o.exchange_order_id, o.qty_base
+    partial = q * 0.5
+    stub_exchange.limit_orders[cloid].update(filled=partial, avg=69.8, state="partially_filled")
+    # the market CLOSE should flatten the partial — make the fake market fill match it
+    stub_exchange.next_result = OrderResult(success=True, exchange_order_id="M1",
+                                            filled_qty_base=partial, avg_price=69.0,
+                                            fee_source="exchange")
+    aid2 = _mk_alert("cp-close", "sell", 69.0, "CP")
+    with session_scope() as db:
+        _dispatch_venue(db, db.get(Alert, aid2), route, _BYBIT, 0.0)
+    with session_scope() as db:
+        assert db.query(Order).filter_by(order_type="limit").one().status == "cancelled"
+        assert db.query(Order).filter_by(order_type="market").count() == 1   # the partial close
+    assert _net() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_same_direction_while_working_is_ignored(stub_exchange, silent_notifier):
+    """A repeat same-direction signal while an entry rests must NOT place a second order."""
+    stub_exchange.prices["SOLUSDT"] = 69.8
+    route = StrategyRoute("CS", "SOL", (_BYBIT,), sar=False, position_size=140.0, entry="limit")
+    _open_working_limit("CS", "cs-open1")
+    aid2 = _mk_alert("cs-open2", "buy", 70.0, "CS")
+    with session_scope() as db:
+        _dispatch_venue(db, db.get(Alert, aid2), route, _BYBIT, 0.0)
+    with session_scope() as db:
+        assert db.query(Order).filter_by(order_type="limit").count() == 1
