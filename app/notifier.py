@@ -75,6 +75,32 @@ class TelegramNotifier:
             urgent=False,
         )
 
+    def limit_order_filled(self, strategy_id: str, exchange: str, symbol: str, side: str,
+                           filled_qty: float, avg_price: float) -> None:
+        """A resting limit order FULLY filled (the analog of a market order's fill)."""
+        self.send(
+            "✅ *Limit order FILLED*\n"
+            f"• Strategy: `{strategy_id}`\n"
+            f"• Exchange: *{exchange}* / {symbol}\n"
+            f"• {side.upper()} {_fmt_qty(filled_qty, symbol, avg_price)} @ {avg_price:g}",
+            urgent=False,
+        )
+
+    def limit_order_cancelled(self, strategy_id: str, exchange: str, symbol: str, side: str,
+                              filled_qty: float, target_qty: float, reason: str) -> None:
+        """A resting limit order was cancelled (cancel-on-close). Notes any partial fill that
+        was kept (and then closed)."""
+        fill_note = (f"{filled_qty:g}/{target_qty:g} filled (kept + closed)"
+                     if filled_qty else "unfilled — nothing opened")
+        self.send(
+            "🚫 *Limit order cancelled*\n"
+            f"• Strategy: `{strategy_id}`\n"
+            f"• Exchange: *{exchange}* / {symbol}\n"
+            f"• {side.upper()} @ limit · {fill_note}\n"
+            f"• Reason: {reason}",
+            urgent=False,
+        )
+
     def limit_order_stale(self, strategy_id: str, exchange: str, symbol: str, side: str,
                           limit_price: float, qty_target: float, qty_filled: float,
                           age_hours: float) -> None:

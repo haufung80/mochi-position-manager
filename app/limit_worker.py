@@ -93,8 +93,12 @@ def _poll_one(db, order: Order) -> None:
         order.status = "success"
         order.qty_base = order.qty_base_filled           # final fill = qty_base (market-path parity)
         order.fee_source = FEE_SOURCE_EXCHANGE
+        get_notifier().limit_order_filled(alert.strategy_id, order.exchange, order.symbol,
+                                          order.side, order.qty_base_filled, order.fill_price or 0.0)
     elif st.state in (ORDER_STATE_CANCELLED, ORDER_STATE_REJECTED):
         order.status = "cancelled"                       # any partial already booked above
+        # (cancel-on-close alerts in the webhook; the poller only sees EXTERNAL cancels — left
+        # silent to avoid a double-alert race with cancel-on-close)
     else:
         _maybe_stale_alert(order, alert)                 # still resting -> notify-only staleness (D2)
     order.updated_at = _utcnow()

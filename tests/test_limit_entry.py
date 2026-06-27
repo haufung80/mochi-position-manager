@@ -125,6 +125,7 @@ def _net(symbol="SOLUSDT", exchange="bybit") -> float:
 
 def test_poller_books_partial_then_full(stub_exchange, silent_notifier):
     cloid = _place_working("LIM", "p1")
+    silent_notifier.calls.clear()
     # partial fill
     stub_exchange.limit_orders[cloid].update(filled=1.0, avg=69.8, state="partially_filled")
     _poll_working_orders()
@@ -132,10 +133,12 @@ def test_poller_books_partial_then_full(stub_exchange, silent_notifier):
     with session_scope() as db:
         o = db.query(Order).one()
         assert o.status == "working" and o.qty_base_filled == pytest.approx(1.0)
-    # full fill -> books the remaining delta, order completes
+    assert not any(c[0] == "limit_order_filled" for c in silent_notifier.calls)   # partial: no fill alert
+    # full fill -> books the remaining delta, order completes + alerts
     stub_exchange.limit_orders[cloid].update(filled=2.0, avg=69.8, state="filled")
     _poll_working_orders()
     assert _net() == pytest.approx(2.0)
+    assert any(c[0] == "limit_order_filled" for c in silent_notifier.calls)
     with session_scope() as db:
         o = db.query(Order).one()
         assert o.status == "success" and o.qty_base_filled == pytest.approx(2.0)
@@ -193,9 +196,11 @@ def test_cancel_on_close_unfilled_opens_no_short(stub_exchange, silent_notifier)
     stub_exchange.prices["SOLUSDT"] = 69.8
     route = StrategyRoute("CX", "SOL", (_BYBIT,), sar=False, position_size=140.0, entry="limit")
     _open_working_limit("CX", "cx-open")
+    silent_notifier.calls.clear()
     aid2 = _mk_alert("cx-close", "sell", 69.0, "CX")
     with session_scope() as db:
         _dispatch_venue(db, db.get(Alert, aid2), route, _BYBIT, 0.0)
+    assert any(c[0] == "limit_order_cancelled" for c in silent_notifier.calls)   # cancel alert fired
     with session_scope() as db:
         assert db.query(Order).filter_by(order_type="limit").one().status == "cancelled"
         assert db.query(Order).filter_by(order_type="market").count() == 0   # no short

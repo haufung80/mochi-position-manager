@@ -129,6 +129,9 @@ def _cancel_working_entry(db, order: Order, strategy_id: str) -> None:
         log.exception("cancel-on-close: status/book failed order=%s", order.id)
     order.status = "cancelled"
     order.updated_at = _utcnow()
+    get_notifier().limit_order_cancelled(
+        strategy_id, order.exchange, order.symbol, order.side,
+        order.qty_base_filled or 0.0, order.qty_base, "close signal (cancel-on-close)")
 
 
 def _dispatch_venue(db, alert: Alert, route, venue, alert_quantity: float) -> None:
