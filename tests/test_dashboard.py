@@ -30,11 +30,11 @@ def client(tmp_path):
         yield c
 
 
-def _add_order(**kwargs) -> None:
+def _add_order(strategy: str = "S", **kwargs) -> None:
     """Insert one Alert + Order, overriding Order fields via kwargs."""
     with session_scope() as db:
         alert = Alert(idempotency_key=kwargs.pop("idempotency_key", "k1"),
-                      strategy_id="S", action="buy", raw_payload="{}")
+                      strategy_id=strategy, action="buy", raw_payload="{}")
         db.add(alert)
         db.flush()
         defaults = dict(
@@ -91,6 +91,29 @@ def test_performance_recent_orders_has_strategy_filter(client):
     assert r.status_code == 200
     assert 'id="perf-orders-filter"' in r.text
     assert 'data-strategy="S"' in r.text
+
+
+def test_recent_orders_server_side_strategy_filter(client):
+    """?strategy=X returns only that strategy's orders (deeper history), and the dropdown
+    lists every strategy with order history so any can be picked."""
+    _add_order(idempotency_key="a1", strategy="ALPHA")
+    _add_order(idempotency_key="b1", strategy="BETA")
+    # default: both appear
+    r = client.get("/")
+    assert 'data-strategy="ALPHA"' in r.text and 'data-strategy="BETA"' in r.text
+    # filtered: only ALPHA's rows, but BOTH options offered
+    r = client.get("/?strategy=ALPHA")
+    assert r.status_code == 200
+    assert 'data-strategy="ALPHA"' in r.text and 'data-strategy="BETA"' not in r.text
+    assert '<option value="ALPHA"' in r.text and '<option value="BETA"' in r.text
+
+
+def test_performance_server_side_strategy_filter(client):
+    _add_order(idempotency_key="pa", strategy="ALPHA", fill_price=50000.0, signal_price=50000.0)
+    _add_order(idempotency_key="pb", strategy="BETA", fill_price=50000.0, signal_price=50000.0)
+    r = client.get("/performance?strategy=ALPHA")
+    assert r.status_code == 200
+    assert 'data-strategy="ALPHA"' in r.text and 'data-strategy="BETA"' not in r.text
     assert 'class="pill dead"' not in r.text         # legacy compound pill retired
     assert "stat-label" not in r.text                # legacy label class retired
 

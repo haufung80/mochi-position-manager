@@ -726,11 +726,23 @@ def _equity_chart_payload(series, capital_base: float = 0.0,
     return {"series": out, "capital_base": float(capital_base or 0.0)}
 
 
-def _recent_orders(db, limit: int = 50) -> list[dict]:
-    """Recent orders (newest first), incl. rejected/paper, with strategy + slippage."""
-    rows = (db.query(Order, Alert.strategy_id)
-              .join(Alert, Order.alert_id == Alert.id)
-              .order_by(Order.created_at.desc()).limit(limit).all())
+def _order_strategies(db) -> list[str]:
+    """Distinct strategy_ids that have at least one order (incl. removed strategies),
+    sorted — populates the Recent-orders strategy filter so you can pick ANY strategy with
+    history, not only those in the current page's rows."""
+    rows = (db.query(Alert.strategy_id)
+              .join(Order, Order.alert_id == Alert.id).distinct().all())
+    return sorted({r[0] for r in rows})
+
+
+def _recent_orders(db, limit: int = 50, strategy: str | None = None) -> list[dict]:
+    """Recent orders (newest first), incl. rejected/paper, with strategy + slippage.
+    `strategy` filters to one strategy_id (the Recent-orders strategy filter) so its
+    deeper history shows, not just its share of the global recent window."""
+    q = db.query(Order, Alert.strategy_id).join(Alert, Order.alert_id == Alert.id)
+    if strategy:
+        q = q.filter(Alert.strategy_id == strategy)
+    rows = q.order_by(Order.created_at.desc()).limit(limit).all()
     return [{
         "created_at": o.created_at, "strategy_id": sid, "exchange": o.exchange,
         "symbol": o.symbol, "side": o.side, "qty_base": o.qty_base,
@@ -747,7 +759,8 @@ def _recent_orders(db, limit: int = 50) -> list[dict]:
 
 @router.get("/performance", response_class=HTMLResponse)
 def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WINDOW),
-                refresh: bool = Query(False)):
+                refresh: bool = Query(False), strategy: str = Query("")):
+    sel = strategy.strip() or None      # Recent-orders strategy filter (server-side)
     wsel, wdelta = _resolve_window(equity_window)
     with session_scope() as db:
         # Cached dataset: snapshots + perf + per-strategy snapshots + exec-quality, reused
@@ -794,13 +807,15 @@ def performance(request: Request, equity_window: str = Query(_EQUITY_DEFAULT_WIN
         seen = {r["strategy_id"] for r in active_strat}
         exec_order = ([r["strategy_id"] for r in active_strat]
                       + sorted(s for s in exec_quality if s in configured and s not in seen))
-        orders = _recent_orders(db, limit=50)
+        orders = _recent_orders(db, limit=(200 if sel else 50), strategy=sel)
+        order_strategies = _order_strategies(db)
     resp = templates.TemplateResponse("performance.html", {
         "request": request, "perf": perf, "equity": equity, "metrics": metrics,
         "strat_equity": strat_equity, "per_strategy_active": active_strat,
         "removed_agg": removed_agg,
         "exec_quality": exec_quality, "exec_order": exec_order,
-        "orders": orders, "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
+        "orders": orders, "order_strategies": order_strategies, "selected_strategy": sel or "",
+        "equity_windows": [w for w, _ in _EQUITY_WINDOWS],
         "equity_window": wsel,
     })
     resp.headers["Cache-Control"] = _NO_STORE
@@ -885,14 +900,18 @@ def orders_json(
 
 
 @router.get("/", response_class=HTMLResponse)
-def dashboard(request: Request):
+def dashboard(request: Request, strategy: str = Query("")):
+    sel = strategy.strip() or None      # Recent-orders strategy filter (server-side)
     with session_scope() as db:
         positions = db.query(Position).order_by(Position.exchange, Position.symbol).all()
         strategy_positions = _strategy_positions(db, request.app.state.strategy_router.all())
         recent_alerts = db.query(Alert).order_by(Alert.received_at.desc()).limit(25).all()
-        recent_orders = (db.query(Order, Alert.strategy_id)
-                         .join(Alert, Order.alert_id == Alert.id)
-                         .order_by(Order.created_at.desc()).limit(25).all())
+        order_q = db.query(Order, Alert.strategy_id).join(Alert, Order.alert_id == Alert.id)
+        if sel:
+            order_q = order_q.filter(Alert.strategy_id == sel)
+        # one strategy → deeper history (200); all strategies → the compact recent window (25)
+        recent_orders = order_q.order_by(Order.created_at.desc()).limit(200 if sel else 25).all()
+        order_strategies = _order_strategies(db)
         retrying = db.query(Order).filter(Order.status == "retrying").count()
         dead = db.query(Order).filter(Order.status == "dead").count()
         execq = _execution_quality(db)
@@ -905,6 +924,8 @@ def dashboard(request: Request):
                 "strategy_positions": strategy_positions,
                 "alerts": recent_alerts,
                 "orders": recent_orders,
+                "order_strategies": order_strategies,
+                "selected_strategy": sel or "",
                 "retrying": retrying,
                 "dead": dead,
                 "execq": execq,

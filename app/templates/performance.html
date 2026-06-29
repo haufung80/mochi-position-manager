@@ -263,7 +263,9 @@
             style="font-size:13px; font-weight:400; padding:2px 8px; background:#1a1d24;
                    color:#e6e6e6; border:1px solid #2a2e38; border-radius:6px;">
       <option value="">All strategies</option>
+      {% for s in order_strategies %}<option value="{{ s }}"{% if s == selected_strategy %} selected{% endif %}>{{ s }}</option>{% endfor %}
     </select>
+    {% if selected_strategy %}<span class="muted" style="font-size:12px;">— up to 200 (pick “All strategies” to clear)</span>{% endif %}
   </h2>
   <div class="card">
     {% if orders %}
@@ -294,23 +296,15 @@
     {% else %}<p class="muted">No orders yet.</p>{% endif %}
   </div>
   <script>
-    // Client-side strategy filter for the Recent orders table (filters the loaded rows).
+    // Server-side strategy filter: navigate to ?strategy=<id> (preserves the window param).
     (function () {
-      var table = document.getElementById('perf-recent-orders');
       var sel = document.getElementById('perf-orders-filter');
-      if (!table || !sel) return;
-      var rows = table.querySelectorAll('tr[data-strategy]');
-      var seen = {};
-      rows.forEach(function (r) { var s = r.getAttribute('data-strategy'); if (s) seen[s] = 1; });
-      Object.keys(seen).sort().forEach(function (s) {
-        var o = document.createElement('option');
-        o.value = s; o.textContent = s; sel.appendChild(o);
-      });
+      if (!sel) return;
       sel.addEventListener('change', function () {
-        var v = sel.value;
-        rows.forEach(function (r) {
-          r.style.display = (!v || r.getAttribute('data-strategy') === v) ? '' : 'none';
-        });
+        var u = new URL(window.location.href);
+        if (sel.value) u.searchParams.set('strategy', sel.value);
+        else u.searchParams.delete('strategy');
+        window.location.href = u.toString();
       });
     })();
   </script>
