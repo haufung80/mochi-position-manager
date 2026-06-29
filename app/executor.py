@@ -279,6 +279,7 @@ def _on_limit_placed(order: Order, alert: Alert, result: OrderResult) -> None:
     (0 here) tracks fills. Telegram-alerts that it's resting (manual fire + auto entries)."""
     order.status = "working"
     order.exchange_order_id = result.exchange_order_id
+    order.qty_usd = order.qty_base * (order.limit_price or 0.0)   # target notional (display)
     order.error_message = ""
     order.next_retry_at = None
     get_notifier().limit_order_placed(

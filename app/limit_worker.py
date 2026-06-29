@@ -92,6 +92,7 @@ def _poll_one(db, order: Order) -> None:
     if st.state == ORDER_STATE_FILLED:
         order.status = "success"
         order.qty_base = order.qty_base_filled           # final fill = qty_base (market-path parity)
+        order.qty_usd = order.qty_base_filled * (order.fill_price or order.limit_price or 0.0)
         order.fee_source = FEE_SOURCE_EXCHANGE
         get_notifier().limit_order_filled(alert.strategy_id, order.exchange, order.symbol,
                                           order.side, order.qty_base_filled, order.fill_price or 0.0)

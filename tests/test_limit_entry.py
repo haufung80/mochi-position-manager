@@ -66,6 +66,7 @@ def test_limit_open_places_working_no_ledger(stub_exchange, silent_notifier):
         assert order.order_type == "limit" and order.status == "working"
         assert order.limit_price == 69.8 and order.exchange_order_id == cloid
         assert order.qty_base_filled == 0.0
+        assert order.qty_usd == pytest.approx(2.0 * 69.8)   # target notional shown while resting
     # a LIMIT was placed (+ Telegram alerted), not a market order
     assert any(c[0] == "limit" for c in stub_exchange.calls)
     assert not any(c[0] == "market" for c in stub_exchange.calls)
@@ -143,6 +144,7 @@ def test_poller_books_partial_then_full(stub_exchange, silent_notifier):
         o = db.query(Order).one()
         assert o.status == "success" and o.qty_base_filled == pytest.approx(2.0)
         assert o.qty_base == pytest.approx(2.0) and o.fee_source == "exchange"
+        assert o.qty_usd == pytest.approx(2.0 * 69.8)   # filled value = qty × fill price
 
 
 def test_poller_no_double_count(stub_exchange, silent_notifier):
