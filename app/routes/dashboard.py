@@ -407,6 +407,7 @@ def _performance(db, router) -> dict:
             open_positions.append({
                 "strategy_id": sp.strategy_id, "exchange": sp.exchange,
                 "symbol": sp.symbol, "net_qty_base": sp.net_qty_base,
+                "net_qty_usd": sp.net_qty_base * mark,   # current USDT value (qty × live mark)
                 "avg_entry_price": avg, "mark": mark, "unrealized": unreal,
                 "basis": basis})
 

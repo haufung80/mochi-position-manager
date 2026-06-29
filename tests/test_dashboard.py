@@ -114,6 +114,19 @@ def test_performance_server_side_strategy_filter(client):
     r = client.get("/performance?strategy=ALPHA")
     assert r.status_code == 200
     assert 'data-strategy="ALPHA"' in r.text and 'data-strategy="BETA"' not in r.text
+
+
+def test_open_positions_by_strategy_shows_usdt_value(client):
+    """The 'Open positions by strategy (intent)' table carries a USDT value (qty × mark)."""
+    from app.models import StrategyPosition
+    with session_scope() as db:
+        db.add(StrategyPosition(strategy_id="S", exchange="bybit", symbol="BTCUSDT",
+                                net_qty_base=0.01, net_qty_usd=500.0, last_price=50000.0,
+                                avg_entry_price=49000.0, realized_pnl=0.0))
+    r = client.get("/performance")
+    assert r.status_code == 200
+    assert "Net $" in r.text                          # the new value column header
+    assert "Open positions by strategy" in r.text     # the intent table rendered (non-flat)
     assert 'class="pill dead"' not in r.text         # legacy compound pill retired
     assert "stat-label" not in r.text                # legacy label class retired
 

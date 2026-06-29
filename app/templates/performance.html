@@ -236,13 +236,14 @@
     {% if perf.open_positions %}
     <table class="numeric">
       <thead><tr><th class="l">Strategy</th><th class="l">Venue</th><th>Net qty</th>
-        <th>Avg entry</th><th>Mark</th><th>Unrealized</th></tr></thead>
+        <th>Net $</th><th>Avg entry</th><th>Mark</th><th>Unrealized</th></tr></thead>
       <tbody>
         {% for p in perf.open_positions %}
         <tr>
           <td class="l mono">{{ p.strategy_id }}</td>
           <td class="l mono">{{ p.exchange }}/{{ p.symbol }}</td>
           <td>{{ p.net_qty_base|qty }}</td>
+          <td>${{ p.net_qty_usd|usd }}</td>
           <td>${{ p.avg_entry_price|usd }}{% if p.basis == 'attributed' %} <span class="muted" title="shared symbol: entry attributed, not exact">≈</span>{% endif %}</td>
           <td>${{ p.mark|usd }}</td>
           <td>{{ money(p.unrealized) }}{% if p.basis == 'attributed' %}<span class="muted">≈</span>{% endif %}</td>
