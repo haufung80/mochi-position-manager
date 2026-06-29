@@ -127,14 +127,20 @@
     </p>
   </div>
 
-  <h2>Recent orders</h2>
+  <h2 style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">Recent orders
+    <select id="recent-orders-filter" title="filter by strategy"
+            style="font-size:13px; font-weight:400; padding:2px 8px; background:#1a1d24;
+                   color:#e6e6e6; border:1px solid #2a2e38; border-radius:6px;">
+      <option value="">All strategies</option>
+    </select>
+  </h2>
   <div class="card">
-    <table>
+    <table id="recent-orders">
       <tr><th>When</th><th>Strategy</th><th>Exchange / Symbol</th><th>Side</th><th>Qty $</th>
           <th>Signal</th><th>Fill</th><th>Slippage</th><th>Fee</th>
           <th>Status</th><th>Att</th><th>Error</th></tr>
       {% for o, sid in orders %}
-        <tr>
+        <tr data-strategy="{{ sid }}">
           <td class="mono">{{ o.created_at|when("%H:%M:%S") }}</td>
           <td class="mono">{{ sid }}</td>
           <td>{{ o.exchange }}/{{ o.symbol }}</td>
@@ -152,6 +158,27 @@
       {% endfor %}
     </table>
   </div>
+  <script>
+    // Client-side strategy filter for the Recent orders table (filters the loaded rows).
+    (function () {
+      var table = document.getElementById('recent-orders');
+      var sel = document.getElementById('recent-orders-filter');
+      if (!table || !sel) return;
+      var rows = table.querySelectorAll('tr[data-strategy]');
+      var seen = {};
+      rows.forEach(function (r) { var s = r.getAttribute('data-strategy'); if (s) seen[s] = 1; });
+      Object.keys(seen).sort().forEach(function (s) {
+        var o = document.createElement('option');
+        o.value = s; o.textContent = s; sel.appendChild(o);
+      });
+      sel.addEventListener('change', function () {
+        var v = sel.value;
+        rows.forEach(function (r) {
+          r.style.display = (!v || r.getAttribute('data-strategy') === v) ? '' : 'none';
+        });
+      });
+    })();
+  </script>
 
   <h2>Recent alerts</h2>
   <div class="card">

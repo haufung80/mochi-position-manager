@@ -73,6 +73,24 @@ def test_dashboard_uses_unified_components(client):
     assert r.text.count('class="card stat"') == 3   # 3 stat cards, the data-page pattern
     assert 'class="big' in r.text                    # big-number stat (not the old standalone .stat)
     assert 'class="pill s-dead"' in r.text           # canonical status pill
+
+
+def test_recent_orders_has_strategy_filter(client):
+    """Homepage Recent-orders gets a client-side strategy filter: a select + each row
+    tagged with data-strategy for show/hide."""
+    _add_order(status="success", fill_price=50000.0, signal_price=50000.0)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'id="recent-orders-filter"' in r.text     # filter dropdown
+    assert 'data-strategy="S"' in r.text             # order row tagged for filtering
+
+
+def test_performance_recent_orders_has_strategy_filter(client):
+    _add_order(status="success", fill_price=50000.0, signal_price=50000.0)
+    r = client.get("/performance")
+    assert r.status_code == 200
+    assert 'id="perf-orders-filter"' in r.text
+    assert 'data-strategy="S"' in r.text
     assert 'class="pill dead"' not in r.text         # legacy compound pill retired
     assert "stat-label" not in r.text                # legacy label class retired
 
